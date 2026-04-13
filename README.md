@@ -16,11 +16,11 @@ Before using Cortex City, make sure the host machine is set up with:
 
 - `Claude Code` installed and available on your shell as `claude`
 - `GitHub CLI` installed and authenticated as `gh`
-- A non-sandboxed Claude execution mode
+- A sandboxed host environment for running Claude Code safely
 
-Cortex City runs Claude as an autonomous worker against local repositories. In practice that means the Claude environment needs to allow file edits, git operations, and shell commands without interactive sandbox blocking.
+Cortex City runs Claude as an autonomous worker against local repositories. In practice that means Claude itself needs to run without interactive permission prompts so it can edit files, run git commands, and use the shell autonomously.
 
-If you are running Claude Code manually in a way that maps to `--dangerously-skip-permissions`, use that mode for Cortex City. A restricted sandbox will break the intended workflow.
+Because Cortex uses `--dangerously-skip-permissions`, you should run it inside a sandboxed environment that is already scoped and safe. The safety boundary should come from the environment around Claude, not from per-command permission prompts inside Claude itself.
 
 ## Core Concepts
 
