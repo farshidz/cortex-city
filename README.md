@@ -10,6 +10,18 @@ The core idea is simple:
 
 This project is meant to help you operate an agent workflow from one place instead of juggling prompts, branches, PRs, and session state by hand.
 
+## Prerequisites
+
+Before using Cortex City, make sure the host machine is set up with:
+
+- `Claude Code` installed and available on your shell as `claude`
+- `GitHub CLI` installed and authenticated as `gh`
+- A non-sandboxed Claude execution mode
+
+Cortex City runs Claude as an autonomous worker against local repositories. In practice that means the Claude environment needs to allow file edits, git operations, and shell commands without interactive sandbox blocking.
+
+If you are running Claude Code manually in a way that maps to `--dangerously-skip-permissions`, use that mode for Cortex City. A restricted sandbox will break the intended workflow.
+
 ## Core Concepts
 
 ### Agent
