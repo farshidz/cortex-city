@@ -177,10 +177,14 @@ The prompt is where you define the agent's persistent behavior.
 A strong prompt usually covers:
 
 - The codebase or product area it owns
+- How to set up any required development environment
+- Which commands to use for install, build, lint, and test
 - The quality bar it should hold
 - Constraints it must respect
 - Preferred testing or review behavior
 - How it should report outcomes
+
+It can also document which secrets the agent may rely on through environment variables that you attach to that agent.
 
 Keep task-specific instructions in the task itself. Keep long-lived behavior in the agent prompt.
 
