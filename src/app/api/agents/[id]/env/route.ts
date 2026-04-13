@@ -62,7 +62,7 @@ export async function PUT(
   const envFile = agent.env_file || `.env.${id}`;
   if (!agent.env_file) {
     config.agents[id] = { ...agent, env_file: envFile };
-    await writeConfig(config, `Set env file for agent: ${agent.name}`);
+    await writeConfig(config);
   }
 
   const envPath = getEnvPath(envFile);

@@ -27,16 +27,7 @@ export async function PUT(
         body.worktree_path = undefined;
       }
     }
-    const task = body.status
-      ? await getTask(id)
-      : undefined;
-    const msg =
-      body.title !== undefined
-        ? `Update task: ${body.title}`
-        : body.status
-          ? `Task "${task?.title || id}": ${task?.status} -> ${body.status}`
-          : undefined;
-    const updated = await updateTask(id, body, msg);
+    const updated = await updateTask(id, body);
     return NextResponse.json(updated);
   } catch {
     return NextResponse.json({ error: "Not found" }, { status: 404 });

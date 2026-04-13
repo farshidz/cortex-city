@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import path from "path";
-import { readConfig, autoCommit } from "@/lib/store";
+import { readConfig } from "@/lib/store";
 
 export async function GET(
   _request: NextRequest,
@@ -40,6 +40,5 @@ export async function PUT(
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
   writeFileSync(fullPath, content, "utf-8");
-  autoCommit(`Update prompt for agent: ${agent.name}`, filePath);
   return NextResponse.json({ ok: true, path: filePath });
 }

@@ -1,5 +1,4 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { execSync } from "child_process";
 import path from "path";
 import type { Task, OrchestratorConfig } from "./types";
 
@@ -31,11 +30,10 @@ export function readTasks(): Task[] {
   return JSON.parse(raw);
 }
 
-export function writeTasks(tasks: Task[], commitMsg?: string): Promise<void> {
+export function writeTasks(tasks: Task[]): Promise<void> {
   return withWriteLock(() => {
     ensureCortexDir();
     writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
-    if (commitMsg) autoCommit(commitMsg, TASKS_FILE);
   });
 }
 
@@ -46,15 +44,11 @@ export async function getTask(id: string): Promise<Task | undefined> {
 export async function createTask(task: Task): Promise<Task> {
   const tasks = readTasks();
   tasks.push(task);
-  await writeTasks(tasks, `Add task: ${task.title}`);
+  await writeTasks(tasks);
   return task;
 }
 
-export async function updateTask(
-  id: string,
-  updates: Partial<Task>,
-  commitMsg?: string
-): Promise<Task> {
+export async function updateTask(id: string, updates: Partial<Task>): Promise<Task> {
   const tasks = readTasks();
   const index = tasks.findIndex((t) => t.id === id);
   if (index === -1) throw new Error(`Task ${id} not found`);
@@ -63,7 +57,7 @@ export async function updateTask(
     ...updates,
     updated_at: new Date().toISOString(),
   };
-  await writeTasks(tasks, commitMsg);
+  await writeTasks(tasks);
   return tasks[index];
 }
 
@@ -72,7 +66,7 @@ export async function deleteTask(id: string): Promise<void> {
   const task = tasks.find((t) => t.id === id);
   const filtered = tasks.filter((t) => t.id !== id);
   if (filtered.length === tasks.length) throw new Error(`Task ${id} not found`);
-  await writeTasks(filtered, `Delete task: ${task?.title || id}`);
+  await writeTasks(filtered);
 }
 
 // --- Config ---
@@ -88,40 +82,11 @@ export function readConfig(): OrchestratorConfig {
   return JSON.parse(raw);
 }
 
-export function writeConfig(
-  config: OrchestratorConfig,
-  commitMsg?: string
-): Promise<void> {
+export function writeConfig(config: OrchestratorConfig): Promise<void> {
   return withWriteLock(() => {
     ensureCortexDir();
     writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-    if (commitMsg) autoCommit(commitMsg, CONFIG_FILE);
   });
-}
-
-// --- Auto-commit ---
-
-const ROOT = process.cwd();
-
-export function autoCommit(message: string, ...files: string[]) {
-  try {
-    const relative = files.map((f) =>
-      path.isAbsolute(f) ? path.relative(ROOT, f) : f
-    );
-    execSync(`git add ${relative.map((f) => `"${f}"`).join(" ")}`, {
-      cwd: ROOT,
-      stdio: "pipe",
-    });
-    execSync(`git diff --cached --quiet`, { cwd: ROOT, stdio: "pipe" });
-    // If we get here, there's nothing staged — skip commit
-  } catch {
-    // diff --cached --quiet exits non-zero when there ARE staged changes
-    try {
-      execSync(`git commit -m "${message}"`, { cwd: ROOT, stdio: "pipe" });
-    } catch (err) {
-      console.error("[autocommit] commit failed:", err);
-    }
-  }
 }
 
 function getDefaultConfig(): OrchestratorConfig {

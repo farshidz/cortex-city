@@ -10,6 +10,6 @@ export async function PUT(request: NextRequest) {
   const body = await request.json();
   const current = readConfig();
   const updated = { ...current, ...body };
-  await writeConfig(updated, "Update config");
+  await writeConfig(updated);
   return NextResponse.json(updated);
 }
