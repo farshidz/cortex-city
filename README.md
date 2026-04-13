@@ -145,6 +145,31 @@ A task may include:
 
 Use the task page to decide whether to rerun, update, close, or merge the work.
 
+## Automatic Triggers
+
+The worker polls continuously and starts agent runs automatically. You do not need to manually restart an agent every time the PR changes.
+
+An agent is triggered automatically when:
+
+- A task is in `open` status and waiting for its initial run
+- A task is in `in_review` and the PR head commit has changed
+- A task is in `in_review` and new submitted review comments appear
+- A task is in `in_review` and new PR conversation comments appear
+- A task is in `in_review` and the review state changes
+- A task is in `in_review` and CI/check status changes, including failed tests
+
+In practical terms, that means Cortex City will pick work back up when a PR needs attention again, including cases like:
+
+- A reviewer leaves comments
+- A reviewer requests changes
+- CI starts failing
+- Conflicts or mergeability state changes
+- Someone pushes new commits to the branch
+
+The worker does not immediately rerun a task while checks are still pending. It waits until the PR reaches a more stable state, then decides whether another review pass is needed.
+
+When a PR is merged or closed, Cortex City updates the task state accordingly and runs cleanup for that task's worktree.
+
 ## What To Put In An Agent Prompt
 
 The prompt is where you define the agent's persistent behavior.
