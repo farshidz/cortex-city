@@ -104,7 +104,7 @@ function buildAgentDirectory(
 ): string {
   const entries = Object.entries(config.agents);
   if (entries.length === 0) {
-    return "No additional agents are configured. Add more agents in Settings when needed.";
+    return "";
   }
   return entries
     .map(([id, agent]) => formatAgentDescription(id, agent, id === currentAgentId))
