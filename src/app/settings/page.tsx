@@ -30,7 +30,7 @@ export default function SettingsPage() {
   );
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<OrchestratorConfig | null>(null);
-  const permissionOptions = form?.agent_runner === "codex"
+  const permissionOptions = form?.default_agent_runner === "codex"
     ? [
         {
           value: "default",
@@ -74,7 +74,7 @@ export default function SettingsPage() {
       : allowed[0];
     setForm({
       ...form,
-      agent_runner: value,
+      default_agent_runner: value,
       permission_mode: nextPermission,
     });
   }
@@ -136,9 +136,9 @@ export default function SettingsPage() {
           </div>
 
           <div className="space-y-2">
-            <Label>Agent Runtime</Label>
-            <Select
-              value={form.agent_runner}
+              <Label>Default Agent Runtime</Label>
+              <Select
+              value={form.default_agent_runner}
               onValueChange={(v) => handleRunnerChange(v)}
             >
               <SelectTrigger>

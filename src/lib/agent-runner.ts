@@ -115,7 +115,8 @@ export async function spawnAgentSession(
   onComplete: (taskId: string) => void
 ): Promise<{ pid: number; child: ChildProcess }> {
   const config = readConfig();
-  const runtime: AgentRuntime = config.agent_runner || "claude";
+  const runtime: AgentRuntime =
+    task.agent_runner || config.default_agent_runner || "claude";
   const agentConfig = config.agents[task.agent];
 
   // Build prompt based on mode

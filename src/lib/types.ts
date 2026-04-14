@@ -18,6 +18,7 @@ export interface Task {
   plan?: string;
   status: TaskStatus;
   agent: string; // key from config.agents
+  agent_runner?: AgentRuntime;
   created_at: string; // ISO 8601
   updated_at: string;
 
@@ -64,7 +65,7 @@ export interface OrchestratorConfig {
   max_parallel_sessions: number;
   poll_interval_seconds: number;
   permission_mode: PermissionMode;
-  agent_runner: AgentRuntime;
+  default_agent_runner: AgentRuntime;
   agents: Record<string, AgentConfig>;
 }
 

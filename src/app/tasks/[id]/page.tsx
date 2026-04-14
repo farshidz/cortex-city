@@ -24,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import type { Task, TaskStatus, OrchestratorConfig } from "@/lib/types";
+import type { Task, TaskStatus, OrchestratorConfig, AgentRuntime } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -61,6 +61,7 @@ export default function TaskDetailPage({
       description: task!.description,
       plan: task!.plan || "",
       agent: task!.agent,
+      agent_runner: task!.agent_runner || config?.default_agent_runner || "claude",
     });
     setEditing(true);
   }
@@ -183,6 +184,27 @@ export default function TaskDetailPage({
               </Select>
             </div>
             <div className="space-y-2">
+              <Label>Agent Runtime</Label>
+              <Select
+                value={form.agent_runner || config?.default_agent_runner || "claude"}
+                onValueChange={(v) =>
+                  v &&
+                  setForm({
+                    ...form,
+                    agent_runner: v as AgentRuntime,
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="claude">Claude Code</SelectItem>
+                  <SelectItem value="codex">Codex</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
               <Label>Description</Label>
               <MdEditor
                 value={form.description || ""}
@@ -278,9 +300,20 @@ export default function TaskDetailPage({
               <CardTitle className="text-base">Details</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div>
-                <span className="text-sm text-muted-foreground">Agent: </span>
-                <Badge variant="outline">{task.agent}</Badge>
+              <div className="flex flex-wrap gap-3">
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Agent:
+                  <Badge variant="outline">{task.agent}</Badge>
+                </span>
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Runtime:
+                  <Badge variant="outline">
+                    {(task.agent_runner || config?.default_agent_runner || "claude") ===
+                    "codex"
+                      ? "Codex"
+                      : "Claude Code"}
+                  </Badge>
+                </span>
               </div>
               <div>
                 <span className="text-sm text-muted-foreground">

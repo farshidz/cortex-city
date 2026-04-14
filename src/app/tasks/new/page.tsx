@@ -19,7 +19,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import type { OrchestratorConfig } from "@/lib/types";
+import type { AgentRuntime, OrchestratorConfig } from "@/lib/types";
 
 export default function NewTaskPage() {
   const router = useRouter();
@@ -29,12 +29,16 @@ export default function NewTaskPage() {
   const [plan, setPlan] = useState("");
   const [agent, setAgent] = useState("");
   const [branchName, setBranchName] = useState("");
+  const [agentRunner, setAgentRunner] = useState<AgentRuntime | "">("");
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     fetch("/api/config")
       .then((r) => r.json())
-      .then(setConfig);
+      .then((cfg) => {
+        setConfig(cfg);
+        setAgentRunner((prev) => prev || cfg.default_agent_runner);
+      });
   }, []);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -44,7 +48,14 @@ export default function NewTaskPage() {
     await fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, description, plan: plan || undefined, agent, branch_name: branchName || undefined }),
+      body: JSON.stringify({
+        title,
+        description,
+        plan: plan || undefined,
+        agent,
+        branch_name: branchName || undefined,
+        agent_runner: agentRunner || config?.default_agent_runner,
+      }),
     });
     router.push("/");
   }
@@ -93,6 +104,25 @@ export default function NewTaskPage() {
                   </a>
                 </p>
               )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="runtime">Agent Runtime</Label>
+              <Select
+                value={agentRunner || undefined}
+                onValueChange={(v) => v && setAgentRunner(v as AgentRuntime)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Use default" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="claude">Claude Code</SelectItem>
+                  <SelectItem value="codex">Codex</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Defaults to {config?.default_agent_runner || "claude"} if not set.
+              </p>
             </div>
 
             <div className="space-y-2">

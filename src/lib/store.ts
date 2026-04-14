@@ -79,10 +79,13 @@ export function readConfig(): OrchestratorConfig {
   }
   const raw = readFileSync(CONFIG_FILE, "utf-8");
   const parsed = JSON.parse(raw);
+  const { agent_runner: legacyRunner, ...rest } = parsed;
   return {
     ...defaults,
-    ...parsed,
-    agents: parsed.agents ?? {},
+    ...rest,
+    default_agent_runner:
+      rest.default_agent_runner || legacyRunner || defaults.default_agent_runner,
+    agents: rest.agents ?? {},
   };
 }
 
@@ -98,7 +101,7 @@ function getDefaultConfig(): OrchestratorConfig {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
     permission_mode: "bypassPermissions",
-    agent_runner: "claude",
+    default_agent_runner: "claude",
     agents: {},
   };
 }

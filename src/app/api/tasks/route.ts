@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { nanoid } from "nanoid";
-import { readTasks, createTask } from "@/lib/store";
+import { readTasks, createTask, readConfig } from "@/lib/store";
 import type { Task } from "@/lib/types";
 
 export async function GET(request: NextRequest) {
@@ -15,6 +15,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const body = await request.json();
   const now = new Date().toISOString();
+  const config = readConfig();
   const task: Task = {
     id: nanoid(10),
     title: body.title,
@@ -22,6 +23,7 @@ export async function POST(request: NextRequest) {
     plan: body.plan || undefined,
     status: "open",
     agent: body.agent,
+    agent_runner: body.agent_runner || config.default_agent_runner,
     branch_name: body.branch_name || undefined,
     created_at: now,
     updated_at: now,
