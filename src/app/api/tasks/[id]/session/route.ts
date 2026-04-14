@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readFileSync, existsSync, readdirSync } from "fs";
 import path from "path";
 import { getTask } from "@/lib/store";
+import type { Task } from "@/lib/types";
 
 const CLAUDE_PROJECTS_DIR = path.join(
   process.env.HOME || "~",
