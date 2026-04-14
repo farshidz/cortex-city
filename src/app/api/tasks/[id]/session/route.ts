@@ -206,11 +206,13 @@ interface CodexEvent {
   message?: string;
 }
 
+type CodexSessionMessage = SessionMessage & { agent_label?: string };
+
 function parseCodexLog(content: string, fallbackTimestamp?: string): {
   sessionId?: string;
-  messages: SessionMessage[];
+  messages: CodexSessionMessage[];
 } | null {
-  const messages: SessionMessage[] = [];
+  const messages: CodexSessionMessage[] = [];
   let sessionId: string | undefined;
   for (const rawLine of content.split("\n")) {
     const line = rawLine.trim();
