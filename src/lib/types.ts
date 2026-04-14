@@ -9,6 +9,16 @@ export interface AgentReport {
   assumptions: string[];
   blockers: string[];
   next_steps: string[];
+  create_tasks?: FollowupTaskRequest[];
+}
+
+export interface FollowupTaskRequest {
+  title: string;
+  description: string;
+  agent: string;
+  plan?: string;
+  agent_runner?: AgentRuntime;
+  permission_mode?: PermissionMode;
 }
 
 export interface Task {

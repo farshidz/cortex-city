@@ -2,7 +2,8 @@ import { spawn, execSync, type ChildProcess } from "child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
 import path from "path";
 import os from "os";
-import { readConfig, updateTask } from "./store";
+import { nanoid } from "nanoid";
+import { readConfig, updateTask, createTask } from "./store";
 import { buildInitialPrompt, buildReviewPrompt, buildCleanupPrompt } from "./prompt-builder";
 import { getPRStateHash, getSubmittedCommentIds } from "./github";
 import { createSessionLog } from "./logger";
@@ -12,6 +13,7 @@ import type {
   ClaudeRunResult,
   AgentRuntime,
   PermissionMode,
+  FollowupTaskRequest,
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
 
@@ -96,6 +98,35 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
       type: "array",
       items: { type: "string" },
       description: "Recommended follow-up actions for the task owner",
+    },
+    create_tasks: {
+      type: "array",
+      description:
+        "Optional list of follow-up tasks the operator should create (used sparingly for well-scoped TODOs)",
+      items: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short task title" },
+          description: { type: "string", description: "Detailed task description" },
+          agent: {
+            type: "string",
+            description: "Agent ID (from settings) that should own this task",
+          },
+          plan: { type: "string", description: "Optional execution plan" },
+          agent_runner: {
+            type: "string",
+            enum: ["claude", "codex"],
+            description: "Override runtime for this task (defaults to agent runner)",
+          },
+          permission_mode: {
+            type: "string",
+            enum: ["bypassPermissions", "acceptEdits", "default", "yolo"],
+            description: "Override permission mode (defaults to agent's settings)",
+          },
+        },
+        required: ["title", "description", "agent"],
+        additionalProperties: false,
+      },
     },
   },
   required: [
@@ -419,6 +450,46 @@ function parseCodexResult(stdout: string): ClaudeRunResult {
   };
 }
 
+async function createFollowupTasks(
+  parentTask: Task,
+  requests: FollowupTaskRequest[]
+): Promise<void> {
+  if (!requests || requests.length === 0) return;
+  const config = readConfig();
+  for (const req of requests) {
+    const title = (req.title || "").trim();
+    const description = (req.description || "").trim();
+    const agentId = (req.agent || parentTask.agent || "").trim();
+    if (!title || !description || !agentId) {
+      console.warn(
+        `[agent-runner] Skipping follow-up task with missing data (title="${req.title}", agent="${req.agent}")`
+      );
+      continue;
+    }
+
+    const now = new Date().toISOString();
+    const newTask: Task = {
+      id: nanoid(10),
+      title,
+      description,
+      plan: req.plan?.trim() || undefined,
+      status: "open",
+      agent: agentId,
+      agent_runner:
+        req.agent_runner || parentTask.agent_runner || config.default_agent_runner,
+      permission_mode:
+        req.permission_mode || parentTask.permission_mode || config.default_permission_mode,
+      created_at: now,
+      updated_at: now,
+    };
+
+    await createTask(newTask);
+    console.log(
+      `[agent-runner] Created follow-up task "${title}" (${newTask.id}) from parent task ${parentTask.id}`
+    );
+  }
+}
+
 async function handleRunComplete(
   taskId: string,
   exitCode: number | null,
@@ -489,6 +560,10 @@ async function handleRunComplete(
       updates.total_duration_ms =
         (currentTask.total_duration_ms || 0) + durationMs;
       updates.run_count = (currentTask.run_count || 0) + 1;
+
+      if (report?.create_tasks?.length) {
+        await createFollowupTasks(currentTask, report.create_tasks);
+      }
     }
 
     // Capture GH state hash AFTER run so we don't re-trigger on our own changes

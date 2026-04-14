@@ -14,6 +14,7 @@ You are addressing feedback on a pull request you previously created.
 5. Commit and push to the existing branch only. Do **not** open a new PR.
 6. If merging main introduced conflicts, verify the code runs/tests pass again before posting your report.
 7. Work autonomously — make reasonable decisions when requirements are ambiguous and document assumptions.
+8. If you identify follow-up work that should become its own task, include entries in the `create_tasks` array of your JSON response (each entry needs `title`, `description`, and `agent`, plus optional `plan`, `agent_runner`, `permission_mode`). Only create tasks that are clearly scoped and valuable to track.
 
 ## Important
 Your response MUST conform to the required JSON schema. Provide:
@@ -25,3 +26,4 @@ Your response MUST conform to the required JSON schema. Provide:
 - **assumptions**: Decisions made without explicit guidance
 - **blockers**: Issues preventing full resolution (empty array if none)
 - **next_steps**: Any remaining items for the task owner
+- **create_tasks**: Optional array of additional tasks to create (see instruction #8)
