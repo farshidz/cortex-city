@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useState, useEffect, useCallback } from "react";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import Link from "next/link";
@@ -65,8 +65,6 @@ export default function TaskDetailPage({
   const [savingNotes, setSavingNotes] = useState(false);
   const [notesDirty, setNotesDirty] = useState(false);
 
-  if (!task) return <div className="text-muted-foreground">Loading...</div>;
-
   function startEdit() {
     setForm({
       title: task!.title,
@@ -119,16 +117,28 @@ export default function TaskDetailPage({
     mutate();
   }
 
-  async function saveNotes() {
-    setSavingNotes(true);
-    await fetch(`/api/tasks/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ notes: notes || "" }),
-    });
-    mutate();
-    setSavingNotes(false);
-  }
+  const persistNotes = useCallback(
+    async (content: string) => {
+      setSavingNotes(true);
+      await fetch(`/api/tasks/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: content }),
+      });
+      mutate();
+      setSavingNotes(false);
+      setNotesDirty(false);
+    },
+    [id, mutate]
+  );
+
+  useEffect(() => {
+    if (!notesDirty) return;
+    const handle = setTimeout(() => {
+      persistNotes(notes ?? "");
+    }, 800);
+    return () => clearTimeout(handle);
+  }, [notes, notesDirty, persistNotes]);
 
   async function deleteTask() {
     const isFinal = task!.status === "merged" || task!.status === "closed";
@@ -143,6 +153,8 @@ export default function TaskDetailPage({
     await fetch(`/api/tasks/${id}`, { method: "DELETE" });
     router.push("/");
   }
+
+  if (!task) return <div className="text-muted-foreground">Loading...</div>;
 
   const agents = config ? Object.entries(config.agents) : [];
 
@@ -421,12 +433,6 @@ export default function TaskDetailPage({
                 onChange={(e) => {
                   setNotes(e.target.value);
                   setNotesDirty(true);
-                }}
-                onBlur={() => {
-                  if (notesDirty) {
-                    saveNotes();
-                    setNotesDirty(false);
-                  }
                 }}
                 placeholder="Add personal notes..."
               />
