@@ -15,7 +15,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Separator } from "@/components/ui/separator";
 import type { OrchestratorConfig } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -60,21 +59,25 @@ export default function AgentDetailPage({
   const agent = config?.agents[id];
 
   useEffect(() => {
-    if (promptData && !promptLoaded) {
+    if (!promptData || promptLoaded) return;
+    const handle = requestAnimationFrame(() => {
       setPromptContent(promptData.content);
       setPromptLoaded(true);
-    }
+    });
+    return () => cancelAnimationFrame(handle);
   }, [promptData, promptLoaded]);
 
   useEffect(() => {
-    if (envData && !envLoaded) {
+    if (!envData || envLoaded) return;
+    const handle = requestAnimationFrame(() => {
       const entries = Object.entries(envData.vars).map(([key, value]) => ({
         key,
         value,
       }));
       setEnvVars(entries.length > 0 ? entries : [{ key: "", value: "" }]);
       setEnvLoaded(true);
-    }
+    });
+    return () => cancelAnimationFrame(handle);
   }, [envData, envLoaded]);
 
   if (!config) return <div className="text-muted-foreground">Loading...</div>;

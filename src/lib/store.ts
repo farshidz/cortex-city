@@ -63,7 +63,6 @@ export async function updateTask(id: string, updates: Partial<Task>): Promise<Ta
 
 export async function deleteTask(id: string): Promise<void> {
   const tasks = readTasks();
-  const task = tasks.find((t) => t.id === id);
   const filtered = tasks.filter((t) => t.id !== id);
   if (filtered.length === tasks.length) throw new Error(`Task ${id} not found`);
   await writeTasks(filtered);

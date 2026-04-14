@@ -24,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import type { Task, TaskStatus, OrchestratorConfig, AgentConfig } from "@/lib/types";
+import type { Task, TaskStatus, OrchestratorConfig } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 

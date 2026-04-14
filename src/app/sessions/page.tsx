@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,11 +20,17 @@ export default function SessionsPage() {
     fetcher,
     { refreshInterval: 3000 }
   );
-  const { data: status, mutate: mutateStatus } = useSWR<OrchestratorStatus>(
+  const { data: status } = useSWR<OrchestratorStatus>(
     "/api/orchestrator",
     fetcher,
     { refreshInterval: 3000 }
   );
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   async function pollNow() {
     await fetch("/api/orchestrator", {
@@ -44,9 +51,7 @@ export default function SessionsPage() {
   }
 
   function formatDuration(startedAt: string): string {
-    const seconds = Math.floor(
-      (Date.now() - new Date(startedAt).getTime()) / 1000
-    );
+    const seconds = Math.floor((now - new Date(startedAt).getTime()) / 1000);
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
     return m > 0 ? `${m}m ${s}s` : `${s}s`;

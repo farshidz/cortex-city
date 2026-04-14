@@ -57,7 +57,9 @@ export default function SettingsPage() {
       ];
 
   useEffect(() => {
-    if (config && !form) setForm(config);
+    if (!config || form) return;
+    const handle = requestAnimationFrame(() => setForm(config));
+    return () => cancelAnimationFrame(handle);
   }, [config, form]);
 
   function handleRunnerChange(value: string) {

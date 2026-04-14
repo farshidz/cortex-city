@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "fs";
 import path from "path";
-import type { ActiveSession, OrchestratorStatus } from "./types";
+import type { ActiveSession, OrchestratorStatus, Task } from "./types";
+import { readConfig, readTasks, updateTask } from "./store";
 
 // The orchestrator now runs as a separate process (orchestrator-worker.ts).
 // This module just reads status for the API.
@@ -22,10 +23,13 @@ function readWorkerState(): WorkerState {
   return { running: false, active_sessions: 0, last_poll_at: null };
 }
 
+function hasActivePid(task: Task): task is Task & { current_run_pid: number } {
+  return typeof task.current_run_pid === "number";
+}
+
 export function getOrchestrator() {
   return {
     getStatus(): OrchestratorStatus {
-      const { readConfig } = require("./store");
       const config = readConfig();
       const state = readWorkerState();
       return {
@@ -38,11 +42,10 @@ export function getOrchestrator() {
 
     getActiveSessions(): ActiveSession[] {
       // Active sessions are tracked by PIDs in tasks.json
-      const { readTasks } = require("./store");
       const tasks = readTasks();
       return tasks
-        .filter((t: any) => t.current_run_pid)
-        .map((t: any) => ({
+        .filter(hasActivePid)
+        .map((t) => ({
           task_id: t.id,
           task_title: t.title,
           agent: t.agent,
@@ -54,9 +57,8 @@ export function getOrchestrator() {
     },
 
     killSession(taskId: string): boolean {
-      const { readTasks, updateTask } = require("./store");
       const tasks = readTasks();
-      const task = tasks.find((t: any) => t.id === taskId);
+      const task = tasks.find((t) => t.id === taskId);
       if (!task?.current_run_pid) return false;
       try {
         process.kill(task.current_run_pid, "SIGTERM");

@@ -6,6 +6,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import path from "path";
+import type { Task } from "./lib/types";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
@@ -26,7 +27,7 @@ installLogger();
 async function poll() {
   // Fresh imports every poll to pick up any code changes
   const { readTasks, readConfig, updateTask } = await import("./lib/store");
-  const { spawnAgentSession, removeWorktree } = await import("./lib/agent-runner");
+  const { spawnAgentSession } = await import("./lib/agent-runner");
   const { getPRStateHash, getPRStatus, isPRMergedOrClosed } =
     await import("./lib/github");
 
@@ -70,7 +71,7 @@ async function poll() {
   const PRUNE_AGE_MS = 12 * 60 * 60 * 1000;
   const now = Date.now();
   const toPrune = tasks.filter(
-    (t: any) =>
+    (t) =>
       (t.status === "merged" || t.status === "closed") &&
       !t.worktree_path &&
       !activePids.has(t.id) &&
@@ -78,7 +79,7 @@ async function poll() {
   );
   if (toPrune.length > 0) {
     const { writeTasks } = await import("./lib/store");
-    const remaining = tasks.filter((t: any) => !toPrune.some((p: any) => p.id === t.id));
+    const remaining = tasks.filter((t) => !toPrune.some((p) => p.id === t.id));
     console.log(`[worker] Pruning ${toPrune.length} old task(s)`);
     await writeTasks(remaining);
   }
@@ -88,8 +89,8 @@ async function poll() {
 
   // Pick open tasks
   const openTasks = tasks
-    .filter((t: any) => t.status === "open")
-    .sort((a: any, b: any) =>
+    .filter((t) => t.status === "open")
+    .sort((a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
     );
 
@@ -107,13 +108,13 @@ async function poll() {
 
   // Single pass over in_review tasks: check merged/closed, update status, trigger reviews
   const inReviewTasks = tasks.filter(
-    (t: any) => t.status === "in_review" && t.pr_url
+    (t): t is Task & { pr_url: string } => t.status === "in_review" && typeof t.pr_url === "string"
   );
 
-  const tasksToReview: any[] = [];
+  const tasksToReview: Task[] = [];
 
   await Promise.all(
-    inReviewTasks.map(async (task: any) => {
+    inReviewTasks.map(async (task) => {
       try {
         // Check merged/closed first (1 API call)
         const prState = await isPRMergedOrClosed(task.pr_url);
