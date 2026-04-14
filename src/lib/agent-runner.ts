@@ -99,34 +99,32 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
       items: { type: "string" },
       description: "Recommended follow-up actions for the task owner",
     },
-    create_tasks: {
-      type: "array",
+    tool_calls: {
+      type: "object",
       description:
-        "Optional list of follow-up tasks the operator should create (used sparingly for well-scoped TODOs)",
-      items: {
-        type: "object",
-        properties: {
-          title: { type: "string", description: "Short task title" },
-          description: { type: "string", description: "Detailed task description" },
-          agent: {
-            type: "string",
-            description: "Agent ID (from settings) that should own this task",
-          },
-          plan: { type: "string", description: "Optional execution plan" },
-          agent_runner: {
-            type: "string",
-            enum: ["claude", "codex"],
-            description: "Override runtime for this task (defaults to agent runner)",
-          },
-          permission_mode: {
-            type: "string",
-            enum: ["bypassPermissions", "acceptEdits", "default", "yolo"],
-            description: "Override permission mode (defaults to agent's settings)",
+        "Optional tool invocations to request operator actions (only specify tools actually used)",
+      properties: {
+        create_task: {
+          type: "array",
+          description:
+            "List of follow-up tasks to create via the agent orchestrator (use sparingly)",
+          items: {
+            type: "object",
+            properties: {
+              title: { type: "string", description: "Short task title" },
+              description: { type: "string", description: "Detailed task description" },
+              agent: {
+                type: "string",
+                description: "Agent ID (from settings) that should own this task",
+              },
+              plan: { type: "string", description: "Optional execution plan" },
+            },
+            required: ["title", "description", "agent"],
+            additionalProperties: false,
           },
         },
-        required: ["title", "description", "agent"],
-        additionalProperties: false,
       },
+      additionalProperties: false,
     },
   },
   required: [
@@ -456,6 +454,9 @@ async function createFollowupTasks(
 ): Promise<void> {
   if (!requests || requests.length === 0) return;
   const config = readConfig();
+  const inheritedRunner = parentTask.agent_runner || config.default_agent_runner;
+  const inheritedPermission =
+    parentTask.permission_mode || config.default_permission_mode;
   for (const req of requests) {
     const title = (req.title || "").trim();
     const description = (req.description || "").trim();
@@ -475,10 +476,8 @@ async function createFollowupTasks(
       plan: req.plan?.trim() || undefined,
       status: "open",
       agent: agentId,
-      agent_runner:
-        req.agent_runner || parentTask.agent_runner || config.default_agent_runner,
-      permission_mode:
-        req.permission_mode || parentTask.permission_mode || config.default_permission_mode,
+      agent_runner: inheritedRunner,
+      permission_mode: inheritedPermission,
       parent_task_id: parentTask.id,
       created_at: now,
       updated_at: now,
@@ -562,8 +561,9 @@ async function handleRunComplete(
         (currentTask.total_duration_ms || 0) + durationMs;
       updates.run_count = (currentTask.run_count || 0) + 1;
 
-      if (report?.create_tasks?.length) {
-        await createFollowupTasks(currentTask, report.create_tasks);
+      const followups = report?.tool_calls?.create_task;
+      if (followups?.length) {
+        await createFollowupTasks(currentTask, followups);
       }
     }
 
