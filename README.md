@@ -231,3 +231,7 @@ That includes things like:
 - worker state
 
 This directory is intentionally ignored by git so local machine state does not get committed.
+
+## License
+
+This project is licensed under the GNU GPLv3. See [LICENSE](/Users/farshid/code/cortex-city/LICENSE) for the full text.
