@@ -4,7 +4,7 @@ import path from "path";
 import os from "os";
 import { readConfig, updateTask } from "./store";
 import { buildInitialPrompt, buildReviewPrompt, buildCleanupPrompt } from "./prompt-builder";
-import { getPRStateHash, getSubmittedCommentIds, getPRComments } from "./github";
+import { getPRStateHash, getSubmittedCommentIds } from "./github";
 import { createSessionLog } from "./logger";
 import type {
   Task,
@@ -98,7 +98,16 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
       description: "Recommended follow-up actions for the task owner",
     },
   },
-  required: ["status", "summary", "files_changed", "assumptions", "blockers", "next_steps"],
+  required: [
+    "status",
+    "summary",
+    "pr_url",
+    "branch_name",
+    "files_changed",
+    "assumptions",
+    "blockers",
+    "next_steps"
+  ],
   additionalProperties: false,
 });
 
@@ -139,9 +148,7 @@ export async function spawnAgentSession(
   if (mode === "initial") {
     prompt = buildInitialPrompt(task);
   } else if (mode === "review") {
-    const comments = task.pr_url ? await getPRComments(task.pr_url) : undefined;
     prompt = buildReviewPrompt(task, {
-      prComments: comments,
       prStatus: task.pr_status,
       baseBranch: agentConfig?.default_branch || "main",
     });

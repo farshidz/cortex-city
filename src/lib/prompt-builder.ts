@@ -6,7 +6,6 @@ import { readConfig } from "./store";
 const PROMPTS_DIR = path.join(process.cwd(), "prompts");
 
 interface ReviewPromptOptions {
-  prComments?: string;
   prStatus?: string;
   baseBranch?: string;
 }
@@ -66,15 +65,12 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
   const agentConfig = config.agents[task.agent];
   const agentName = agentConfig?.name || task.agent;
   const template = loadTemplate("review.md");
-  const comments = options?.prComments?.trim() || "No recent PR comments were captured.";
   const mergeStatus = describeMergeStatus(options?.prStatus || task.pr_status);
   const baseBranch = options?.baseBranch || agentConfig?.default_branch || "main";
 
   return template
     .replace("{{PR_URL}}", task.pr_url || "Unknown")
     .replace("{{AGENT_NAME}}", agentName)
-    .replace("{{ORIGINAL_TASK}}", task.description)
-    .replace("{{PR_COMMENTS}}", comments)
     .replace("{{MERGE_STATUS}}", mergeStatus)
     .replace(/\{\{BASE_BRANCH\}\}/g, baseBranch);
 }

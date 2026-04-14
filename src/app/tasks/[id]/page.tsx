@@ -358,12 +358,16 @@ export default function TaskDetailPage({
                     </Button>
                   </a>
                 )}
-                {task.session_id && (
+                {task.session_id ? (
                   <Link href={`/tasks/${id}/session`}>
                     <Button size="sm" variant="outline">
                       View Session
                     </Button>
                   </Link>
+                ) : (
+                  <Button size="sm" variant="outline" disabled>
+                    View Session
+                  </Button>
                 )}
               </div>
             </CardContent>
@@ -399,6 +403,12 @@ export default function TaskDetailPage({
                           "bypassPermissions") as PermissionMode
                       ]
                     }
+                  </Badge>
+                </span>
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Session ID:
+                  <Badge variant="outline">
+                    {task.session_id || "Not available yet"}
                   </Badge>
                 </span>
               </div>
