@@ -165,17 +165,32 @@ function loadCodexSession(task: Task) {
     const fullPath = path.join(LOGS_DIR, file);
     const content = readFileSync(fullPath, "utf-8");
     if (task.session_id && !content.includes(task.session_id)) continue;
-    const parsed = parseCodexLog(content);
+    const startTimestamp = parseCodexStartTimestamp(content) || task.last_run_at;
+    const parsed = parseCodexLog(content, startTimestamp);
     if (parsed) {
+      const userMessage: SessionMessage = {
+        role: "user",
+        content:
+          task.description ||
+          "Task description unavailable. See task page for details.",
+        timestamp: startTimestamp || task.created_at,
+      };
+      const messages = [userMessage, ...parsed.messages];
       return {
         session_id: parsed.sessionId || task.session_id,
-        message_count: parsed.messages.length,
-        messages: parsed.messages,
+        message_count: messages.length,
+        messages,
         agent_runner: "codex" as const,
       };
     }
   }
   return null;
+}
+
+function parseCodexStartTimestamp(content: string): string | undefined {
+  const firstLine = content.split("\n")[0];
+  const match = firstLine.match(/Session started at (.+?) ---/);
+  return match ? match[1] : undefined;
 }
 
 interface CodexEvent {
@@ -191,7 +206,7 @@ interface CodexEvent {
   message?: string;
 }
 
-function parseCodexLog(content: string): {
+function parseCodexLog(content: string, fallbackTimestamp?: string): {
   sessionId?: string;
   messages: SessionMessage[];
 } | null {
@@ -213,7 +228,7 @@ function parseCodexLog(content: string): {
       messages.push({
         role: "assistant",
         content: entry.item.text || "",
-        timestamp: entry.timestamp,
+        timestamp: entry.timestamp || fallbackTimestamp,
         agent_label: "Codex",
       });
     }
@@ -223,7 +238,7 @@ function parseCodexLog(content: string): {
       messages.push({
         role: "assistant",
         content: text,
-        timestamp: entry.timestamp,
+        timestamp: entry.timestamp || fallbackTimestamp,
         agent_label: "Codex",
       });
     }
@@ -231,7 +246,7 @@ function parseCodexLog(content: string): {
       messages.push({
         role: "assistant",
         content: `Error: ${entry.message}`,
-        timestamp: entry.timestamp,
+        timestamp: entry.timestamp || fallbackTimestamp,
         agent_label: "Codex",
       });
     }
