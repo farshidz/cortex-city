@@ -168,14 +168,18 @@ function loadCodexSession(task: Task) {
     const startTimestamp = parseCodexStartTimestamp(content) || task.last_run_at;
     const parsed = parseCodexLog(content, startTimestamp);
     if (parsed) {
-      const userMessage: SessionMessage = {
-        role: "user",
-        content:
-          task.description ||
-          "Task description unavailable. See task page for details.",
-        timestamp: startTimestamp || task.created_at,
-      };
-      const messages = [userMessage, ...parsed.messages];
+      let messages = parsed.messages;
+      const hasUser = messages.some((msg) => msg.role === "user");
+      if (!hasUser) {
+        const fallbackUser: SessionMessage = {
+          role: "user",
+          content:
+            task.description ||
+            "Task description unavailable. See task page for details.",
+          timestamp: startTimestamp || task.created_at,
+        };
+        messages = [fallbackUser, ...messages];
+      }
       return {
         session_id: parsed.sessionId || task.session_id,
         message_count: messages.length,
@@ -197,6 +201,7 @@ interface CodexEvent {
   type: string;
   thread_id?: string;
   timestamp?: string;
+  mode?: string;
   item?: {
     type?: string;
     text?: string;
@@ -204,6 +209,7 @@ interface CodexEvent {
     aggregated_output?: string;
   };
   message?: string;
+  content?: string;
 }
 
 type CodexSessionMessage = SessionMessage & { agent_label?: string };
@@ -221,6 +227,18 @@ function parseCodexLog(content: string, fallbackTimestamp?: string): {
     try {
       entry = JSON.parse(line);
     } catch {
+      continue;
+    }
+    if (entry.type === "prompt") {
+      const modeLabel = entry.mode
+        ? `${entry.mode.charAt(0).toUpperCase()}${entry.mode.slice(1)} prompt`
+        : "Prompt";
+      const text = `### ${modeLabel}\n\n${entry.content || ""}`;
+      messages.push({
+        role: "user",
+        content: text,
+        timestamp: entry.timestamp || fallbackTimestamp,
+      });
       continue;
     }
     if (entry.type === "thread.started" && entry.thread_id) {

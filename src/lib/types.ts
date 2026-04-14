@@ -9,6 +9,11 @@ export interface AgentReport {
   assumptions: string[];
   blockers: string[];
   next_steps: string[];
+  tool_calls?: AgentToolCalls;
+}
+
+export interface AgentToolCalls {
+  create_task?: FollowupTaskRequest[];
 }
 
 export interface Task {
@@ -20,6 +25,8 @@ export interface Task {
   agent: string; // key from config.agents
   agent_runner?: AgentRuntime;
   permission_mode?: PermissionMode;
+  parent_task_id?: string;
+  child_tasks?: ChildTaskSummary[];
   created_at: string; // ISO 8601
   updated_at: string;
 
@@ -52,6 +59,7 @@ export interface AgentConfig {
   prompt_file: string; // relative path to agent's prompt file
   default_branch: string;
   env_file?: string; // optional path to .env file with agent-specific secrets
+  description?: string;
 }
 
 export type AgentRuntime = "claude" | "codex";
@@ -68,6 +76,20 @@ export interface OrchestratorConfig {
   default_permission_mode: PermissionMode;
   default_agent_runner: AgentRuntime;
   agents: Record<string, AgentConfig>;
+}
+
+export interface FollowupTaskRequest {
+  title: string;
+  description: string;
+  agent: string;
+  plan?: string;
+}
+
+export interface ChildTaskSummary {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  agent: string;
 }
 
 export interface ActiveSession {

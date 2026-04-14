@@ -1,21 +1,9 @@
 The task is complete and the PR has been {{FINAL_STATUS}}. Perform any cleanup needed.
 
-## Task
-{{TASK_TITLE}}: {{TASK_DESCRIPTION}}
-
-## PR
-{{PR_URL}}
-
-## Branch
-{{BRANCH_NAME}}
-
 ## Instructions
 1. Delete the local and remote branch if it still exists (the PR is already {{FINAL_STATUS}})
-2. Follow any agent-specific cleanup instructions below
-3. Do not create any new commits or PRs
-
-## Agent-Specific Cleanup Instructions
-{{REPO_CONTEXT}}
+2. Do not create any new commits or PRs
+3. Verify your workspace is clean and nothing is left running
 
 ## Important
 Your response MUST conform to the required JSON schema. Provide:
