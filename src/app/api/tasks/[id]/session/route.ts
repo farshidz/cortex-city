@@ -171,6 +171,7 @@ function loadCodexSession(task: Task) {
         session_id: parsed.sessionId || task.session_id,
         message_count: parsed.messages.length,
         messages: parsed.messages,
+        agent_runner: "codex" as const,
       };
     }
   }
@@ -213,6 +214,7 @@ function parseCodexLog(content: string): {
         role: "assistant",
         content: entry.item.text || "",
         timestamp: entry.timestamp,
+        agent_label: "Codex",
       });
     }
     if (entry.type === "item.completed" && entry.item?.type === "command_execution") {
@@ -222,6 +224,7 @@ function parseCodexLog(content: string): {
         role: "assistant",
         content: text,
         timestamp: entry.timestamp,
+        agent_label: "Codex",
       });
     }
     if (entry.type === "error" && entry.message) {
@@ -229,6 +232,7 @@ function parseCodexLog(content: string): {
         role: "assistant",
         content: `Error: ${entry.message}`,
         timestamp: entry.timestamp,
+        agent_label: "Codex",
       });
     }
   }

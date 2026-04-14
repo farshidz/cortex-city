@@ -22,6 +22,7 @@ interface SessionMessage {
   content: string;
   timestamp?: string;
   tool_calls?: ToolCall[];
+  agent_label?: string;
 }
 
 interface SessionData {
@@ -29,6 +30,7 @@ interface SessionData {
   message_count: number;
   messages: SessionMessage[];
   error?: string;
+  agent_runner?: "claude" | "codex";
 }
 
 export default function SessionViewPage({
@@ -43,6 +45,7 @@ export default function SessionViewPage({
     `/api/tasks/${id}/session`,
     fetcher
   );
+  const agentLabel = session?.agent_runner === "codex" ? "Codex" : "Claude";
 
   return (
     <div className="max-w-4xl space-y-4">
@@ -88,10 +91,8 @@ export default function SessionViewPage({
           <CardHeader className="py-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Badge
-                  variant={msg.role === "user" ? "default" : "secondary"}
-                >
-                  {msg.role === "user" ? "You" : "Claude"}
+                <Badge variant={msg.role === "user" ? "default" : "secondary"}>
+                  {msg.role === "user" ? "You" : msg.agent_label || agentLabel}
                 </Badge>
                 {msg.tool_calls && msg.tool_calls.length > 0 && (
                   <span className="text-xs text-muted-foreground">
