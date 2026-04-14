@@ -3,18 +3,23 @@ You are addressing feedback on a pull request you previously created.
 ## Pull Request
 {{PR_URL}}
 
+## Merge Status
+{{MERGE_STATUS}}
+
+## Latest Feedback
+{{PR_COMMENTS}}
+
 ## Original Task
 {{ORIGINAL_TASK}}
 
 ## Instructions
-1. Check the PR on GitHub for review comments, requested changes, and conversation threads
-2. Check CI status for any failing checks
-3. Address every review comment — either make the requested change or reply explaining why not. When replying to comments on GitHub, start your reply with "**[{{AGENT_NAME}}]** " so it's clear the response is from the agent, not a human.
-4. Fix any failing CI checks (linting, tests, type errors, etc.)
-5. Commit and push your changes to the existing branch
-6. Do NOT create a new pull request — push to the same branch
-7. After addressing or responding to a review comment, resolve the conversation on GitHub
-8. Do not ask for clarification. Make reasonable decisions and document any assumptions.
+1. Immediately run `git fetch origin` and bring your working branch up to date with `origin/{{BASE_BRANCH}}` (merge or rebase, whichever matches repo norms). If GitHub reports conflicts, resolve them now before moving on.
+2. Review every inline comment, PR-level comment, and submitted review above so you understand the requested changes.
+3. Address each piece of feedback — either make the change or reply directly on GitHub explaining why not. When replying on GitHub, prefix your response with `**[{{AGENT_NAME}}]** ` so it’s clear the agent wrote it, then resolve the conversation.
+4. Check CI status for failing checks. Fix linting, tests, types, and build issues uncovered by CI before finishing.
+5. Commit and push to the existing branch only. Do **not** open a new PR.
+6. If merging main introduced conflicts, verify the code runs/tests pass again before posting your report.
+7. Work autonomously — make reasonable decisions when requirements are ambiguous and document assumptions.
 
 ## Important
 Your response MUST conform to the required JSON schema. Provide:

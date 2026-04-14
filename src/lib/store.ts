@@ -73,13 +73,18 @@ export async function deleteTask(id: string): Promise<void> {
 
 export function readConfig(): OrchestratorConfig {
   ensureCortexDir();
+  const defaults = getDefaultConfig();
   if (!existsSync(CONFIG_FILE)) {
-    const defaults = getDefaultConfig();
     writeFileSync(CONFIG_FILE, JSON.stringify(defaults, null, 2));
     return defaults;
   }
   const raw = readFileSync(CONFIG_FILE, "utf-8");
-  return JSON.parse(raw);
+  const parsed = JSON.parse(raw);
+  return {
+    ...defaults,
+    ...parsed,
+    agents: parsed.agents ?? {},
+  };
 }
 
 export function writeConfig(config: OrchestratorConfig): Promise<void> {
@@ -94,6 +99,7 @@ function getDefaultConfig(): OrchestratorConfig {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
     permission_mode: "bypassPermissions",
+    agent_runner: "claude",
     agents: {},
   };
 }

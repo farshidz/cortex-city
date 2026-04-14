@@ -30,10 +30,52 @@ export default function SettingsPage() {
   );
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<OrchestratorConfig | null>(null);
+  const permissionOptions = form?.agent_runner === "codex"
+    ? [
+        {
+          value: "default",
+          label: "Prompt for every action",
+        },
+        {
+          value: "yolo",
+          label: "YOLO (no prompts, full autonomy)",
+        },
+      ]
+    : [
+        {
+          value: "bypassPermissions",
+          label: "Bypass Permissions (fully autonomous)",
+        },
+        {
+          value: "acceptEdits",
+          label: "Accept Edits (auto-approve edits, prompt for bash)",
+        },
+        {
+          value: "default",
+          label: "Default (prompt for everything)",
+        },
+      ];
 
   useEffect(() => {
     if (config && !form) setForm(config);
   }, [config, form]);
+
+  function handleRunnerChange(value: string) {
+    if (!form) return;
+    if (value !== "claude" && value !== "codex") return;
+    const allowed =
+      value === "codex"
+        ? ["default", "yolo"]
+        : ["bypassPermissions", "acceptEdits", "default"];
+    const nextPermission = allowed.includes(form.permission_mode)
+      ? form.permission_mode
+      : allowed[0];
+    setForm({
+      ...form,
+      agent_runner: value,
+      permission_mode: nextPermission,
+    });
+  }
 
   async function saveConfig() {
     if (!form) return;
@@ -92,24 +134,41 @@ export default function SettingsPage() {
           </div>
 
           <div className="space-y-2">
-            <Label>Permission Mode</Label>
+            <Label>Agent Runtime</Label>
             <Select
-              value={form.permission_mode}
-              onValueChange={(v) => v && setForm({ ...form, permission_mode: v })}
+              value={form.agent_runner}
+              onValueChange={(v) => handleRunnerChange(v)}
             >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="bypassPermissions">
-                  Bypass Permissions (fully autonomous)
-                </SelectItem>
-                <SelectItem value="acceptEdits">
-                  Accept Edits (auto-approve edits, prompt for bash)
-                </SelectItem>
-                <SelectItem value="default">
-                  Default (prompt for everything)
-                </SelectItem>
+                <SelectItem value="claude">Claude Code</SelectItem>
+                <SelectItem value="codex">Codex</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Permission Mode</Label>
+            <Select
+              value={form.permission_mode}
+              onValueChange={(v) =>
+                v && setForm({
+                  ...form,
+                  permission_mode: v,
+                })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {permissionOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>

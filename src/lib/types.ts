@@ -52,10 +52,19 @@ export interface AgentConfig {
   env_file?: string; // optional path to .env file with agent-specific secrets
 }
 
+export type AgentRuntime = "claude" | "codex";
+
+export type PermissionMode =
+  | "bypassPermissions"
+  | "acceptEdits"
+  | "default"
+  | "yolo";
+
 export interface OrchestratorConfig {
   max_parallel_sessions: number;
   poll_interval_seconds: number;
-  permission_mode: string;
+  permission_mode: PermissionMode;
+  agent_runner: AgentRuntime;
   agents: Record<string, AgentConfig>;
 }
 
