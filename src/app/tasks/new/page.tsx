@@ -129,7 +129,7 @@ export default function NewTaskPage() {
             <div className="space-y-2">
               <Label htmlFor="runtime">Agent Runtime</Label>
               <Select
-                value={agentRunner || undefined}
+                value={agentRunner || ""}
                 onValueChange={(v) => v && setAgentRunner(v as AgentRuntime)}
               >
                 <SelectTrigger>
@@ -148,7 +148,7 @@ export default function NewTaskPage() {
             <div className="space-y-2">
               <Label htmlFor="permission">Permission Mode</Label>
               <Select
-                value={permissionMode || undefined}
+                value={permissionMode || ""}
                 onValueChange={(v) =>
                   v && setPermissionMode(v as PermissionMode)
                 }

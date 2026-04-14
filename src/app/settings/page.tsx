@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import type { OrchestratorConfig } from "@/lib/types";
+import type { OrchestratorConfig, PermissionMode } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -65,12 +65,13 @@ export default function SettingsPage() {
   function handleRunnerChange(value: string) {
     if (!form) return;
     if (value !== "claude" && value !== "codex") return;
-    const allowed =
+    const allowed: PermissionMode[] =
       value === "codex"
-        ? ["default", "yolo"]
-        : ["bypassPermissions", "acceptEdits", "default"];
-    const nextPermission = allowed.includes(form.default_permission_mode)
-      ? form.default_permission_mode
+        ? (["default", "yolo"] as PermissionMode[])
+        : (["bypassPermissions", "acceptEdits", "default"] as PermissionMode[]);
+    const currentMode = form.default_permission_mode || allowed[0];
+    const nextPermission: PermissionMode = allowed.includes(currentMode)
+      ? currentMode
       : allowed[0];
     setForm({
       ...form,
@@ -138,9 +139,9 @@ export default function SettingsPage() {
           <div className="space-y-2">
               <Label>Default Agent Runtime</Label>
               <Select
-              value={form.default_agent_runner}
-              onValueChange={(v) => handleRunnerChange(v)}
-            >
+                value={form.default_agent_runner}
+                onValueChange={(v) => v && handleRunnerChange(v)}
+              >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>

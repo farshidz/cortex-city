@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
     status: "open",
     agent: body.agent,
     agent_runner: body.agent_runner || config.default_agent_runner,
+    permission_mode: body.permission_mode || config.default_permission_mode,
     branch_name: body.branch_name || undefined,
     created_at: now,
     updated_at: now,

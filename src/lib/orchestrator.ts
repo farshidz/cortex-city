@@ -59,12 +59,13 @@ export function getOrchestrator() {
     killSession(taskId: string): boolean {
       const tasks = readTasks();
       const task = tasks.find((t) => t.id === taskId);
-      if (!task?.current_run_pid) return false;
+      const pid = task?.current_run_pid;
+      if (!pid) return false;
       try {
-        process.kill(task.current_run_pid, "SIGTERM");
+        process.kill(pid, "SIGTERM");
         setTimeout(() => {
           try {
-            process.kill(task.current_run_pid, "SIGKILL");
+            process.kill(pid, "SIGKILL");
           } catch {}
         }, 5000);
         updateTask(taskId, { current_run_pid: undefined });
