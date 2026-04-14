@@ -69,13 +69,13 @@ export default function SettingsPage() {
       value === "codex"
         ? ["default", "yolo"]
         : ["bypassPermissions", "acceptEdits", "default"];
-    const nextPermission = allowed.includes(form.permission_mode)
-      ? form.permission_mode
+    const nextPermission = allowed.includes(form.default_permission_mode)
+      ? form.default_permission_mode
       : allowed[0];
     setForm({
       ...form,
       default_agent_runner: value,
-      permission_mode: nextPermission,
+      default_permission_mode: nextPermission,
     });
   }
 
@@ -152,13 +152,14 @@ export default function SettingsPage() {
           </div>
 
           <div className="space-y-2">
-            <Label>Permission Mode</Label>
+            <Label>Default Permission Mode</Label>
             <Select
-              value={form.permission_mode}
+              value={form.default_permission_mode}
               onValueChange={(v) =>
-                v && setForm({
+                v &&
+                setForm({
                   ...form,
-                  permission_mode: v,
+                  default_permission_mode: v,
                 })
               }
             >

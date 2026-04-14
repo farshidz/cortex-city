@@ -24,9 +24,21 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import type { Task, TaskStatus, OrchestratorConfig, AgentRuntime } from "@/lib/types";
+import type {
+  Task,
+  TaskStatus,
+  OrchestratorConfig,
+  AgentRuntime,
+  PermissionMode,
+} from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
+const PERMISSION_LABELS: Record<PermissionMode, string> = {
+  bypassPermissions: "Bypass Permissions",
+  acceptEdits: "Accept Edits",
+  default: "Prompt for everything",
+  yolo: "YOLO",
+};
 
 const ALL_STATUSES: TaskStatus[] = [
   "open",
@@ -62,6 +74,10 @@ export default function TaskDetailPage({
       plan: task!.plan || "",
       agent: task!.agent,
       agent_runner: task!.agent_runner || config?.default_agent_runner || "claude",
+      permission_mode:
+        task!.permission_mode ||
+        config?.default_permission_mode ||
+        "bypassPermissions",
     });
     setEditing(true);
   }
@@ -187,13 +203,24 @@ export default function TaskDetailPage({
               <Label>Agent Runtime</Label>
               <Select
                 value={form.agent_runner || config?.default_agent_runner || "claude"}
-                onValueChange={(v) =>
-                  v &&
+                onValueChange={(v) => {
+                  if (!v) return;
+                  const newRunner = v as AgentRuntime;
+                  const allowed =
+                    newRunner === "codex"
+                      ? ["default", "yolo"]
+                      : ["bypassPermissions", "acceptEdits", "default"];
+                  const nextPermission = allowed.includes(
+                    (form.permission_mode as PermissionMode) || ""
+                  )
+                    ? form.permission_mode
+                    : (allowed[0] as PermissionMode);
                   setForm({
                     ...form,
-                    agent_runner: v as AgentRuntime,
-                  })
-                }
+                    agent_runner: newRunner,
+                    permission_mode: nextPermission,
+                  });
+                }}
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -201,6 +228,42 @@ export default function TaskDetailPage({
                 <SelectContent>
                   <SelectItem value="claude">Claude Code</SelectItem>
                   <SelectItem value="codex">Codex</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Permission Mode</Label>
+              <Select
+                value={
+                  form.permission_mode ||
+                  config?.default_permission_mode ||
+                  "bypassPermissions"
+                }
+                onValueChange={(v) =>
+                  v &&
+                  setForm({
+                    ...form,
+                    permission_mode: v as PermissionMode,
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(form.agent_runner || config?.default_agent_runner || "claude") ===
+                  "codex" ? (
+                    <>
+                      <SelectItem value="default">Prompt for every action</SelectItem>
+                      <SelectItem value="yolo">YOLO (no prompts)</SelectItem>
+                    </>
+                  ) : (
+                    <>
+                      <SelectItem value="bypassPermissions">Bypass Permissions</SelectItem>
+                      <SelectItem value="acceptEdits">Accept Edits</SelectItem>
+                      <SelectItem value="default">Default</SelectItem>
+                    </>
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -312,6 +375,18 @@ export default function TaskDetailPage({
                     "codex"
                       ? "Codex"
                       : "Claude Code"}
+                  </Badge>
+                </span>
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Permission:
+                  <Badge variant="outline">
+                    {
+                      PERMISSION_LABELS[
+                        (task.permission_mode ||
+                          config?.default_permission_mode ||
+                          "bypassPermissions") as PermissionMode
+                      ]
+                    }
                   </Badge>
                 </span>
               </div>

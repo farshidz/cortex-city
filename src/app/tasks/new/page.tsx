@@ -19,7 +19,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import type { AgentRuntime, OrchestratorConfig } from "@/lib/types";
+import type { AgentRuntime, OrchestratorConfig, PermissionMode } from "@/lib/types";
 
 export default function NewTaskPage() {
   const router = useRouter();
@@ -30,6 +30,7 @@ export default function NewTaskPage() {
   const [agent, setAgent] = useState("");
   const [branchName, setBranchName] = useState("");
   const [agentRunner, setAgentRunner] = useState<AgentRuntime | "">("");
+  const [permissionMode, setPermissionMode] = useState<PermissionMode | "">("");
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -38,8 +39,26 @@ export default function NewTaskPage() {
       .then((cfg) => {
         setConfig(cfg);
         setAgentRunner((prev) => prev || cfg.default_agent_runner);
+        setPermissionMode((prev) => prev || cfg.default_permission_mode);
       });
   }, []);
+
+  useEffect(() => {
+    if (!config) return;
+    const runner = agentRunner || config.default_agent_runner;
+    const allowed =
+      runner === "codex"
+        ? (["default", "yolo"] as PermissionMode[])
+        : (["bypassPermissions", "acceptEdits", "default"] as PermissionMode[]);
+    const handle = requestAnimationFrame(() => {
+      setPermissionMode((prev) =>
+        prev && allowed.includes(prev)
+          ? prev
+          : (allowed[0] as PermissionMode)
+      );
+    });
+    return () => cancelAnimationFrame(handle);
+  }, [agentRunner, config]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -55,6 +74,7 @@ export default function NewTaskPage() {
         agent,
         branch_name: branchName || undefined,
         agent_runner: agentRunner || config?.default_agent_runner,
+        permission_mode: permissionMode || config?.default_permission_mode,
       }),
     });
     router.push("/");
@@ -122,6 +142,37 @@ export default function NewTaskPage() {
               </Select>
               <p className="text-xs text-muted-foreground">
                 Defaults to {config?.default_agent_runner || "claude"} if not set.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="permission">Permission Mode</Label>
+              <Select
+                value={permissionMode || undefined}
+                onValueChange={(v) =>
+                  v && setPermissionMode(v as PermissionMode)
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Use default" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(agentRunner || config?.default_agent_runner || "claude") === "codex" ? (
+                    <>
+                      <SelectItem value="default">Prompt for every action</SelectItem>
+                      <SelectItem value="yolo">YOLO (no prompts)</SelectItem>
+                    </>
+                  ) : (
+                    <>
+                      <SelectItem value="bypassPermissions">Bypass Permissions</SelectItem>
+                      <SelectItem value="acceptEdits">Accept Edits</SelectItem>
+                      <SelectItem value="default">Default</SelectItem>
+                    </>
+                  )}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Defaults to {config?.default_permission_mode || "bypassPermissions"} if not set.
               </p>
             </div>
 

@@ -19,6 +19,7 @@ export interface Task {
   status: TaskStatus;
   agent: string; // key from config.agents
   agent_runner?: AgentRuntime;
+  permission_mode?: PermissionMode;
   created_at: string; // ISO 8601
   updated_at: string;
 
@@ -64,7 +65,7 @@ export type PermissionMode =
 export interface OrchestratorConfig {
   max_parallel_sessions: number;
   poll_interval_seconds: number;
-  permission_mode: PermissionMode;
+  default_permission_mode: PermissionMode;
   default_agent_runner: AgentRuntime;
   agents: Record<string, AgentConfig>;
 }

@@ -14,7 +14,7 @@ This project is meant to help you operate an agent workflow from one place inste
 
 Before using Cortex City, make sure the host machine is set up with:
 
-- Either `Claude Code` (available on your shell as `claude`) or `Codex` (available as `codex`). Pick the default runtime from Settings; each task can override it when needed.
+- Either `Claude Code` (available on your shell as `claude`) or `Codex` (available as `codex`). Pick the default runtime and permission mode from Settings; each task can override them when needed.
 - `GitHub CLI` installed and authenticated as `gh`
 - A sandboxed host environment for running the agent CLI safely
 

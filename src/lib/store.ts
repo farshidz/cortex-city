@@ -85,6 +85,8 @@ export function readConfig(): OrchestratorConfig {
     ...rest,
     default_agent_runner:
       rest.default_agent_runner || legacyRunner || defaults.default_agent_runner,
+    default_permission_mode:
+      rest.default_permission_mode || rest.permission_mode || defaults.default_permission_mode,
     agents: rest.agents ?? {},
   };
 }
@@ -100,7 +102,7 @@ function getDefaultConfig(): OrchestratorConfig {
   return {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
-    permission_mode: "bypassPermissions",
+    default_permission_mode: "bypassPermissions",
     default_agent_runner: "claude",
     agents: {},
   };

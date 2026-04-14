@@ -117,6 +117,8 @@ export async function spawnAgentSession(
   const config = readConfig();
   const runtime: AgentRuntime =
     task.agent_runner || config.default_agent_runner || "claude";
+  const permissionMode: PermissionMode =
+    task.permission_mode || config.default_permission_mode || "bypassPermissions";
   const agentConfig = config.agents[task.agent];
 
   // Build prompt based on mode
@@ -143,7 +145,7 @@ export async function spawnAgentSession(
     "--json-schema",
     AGENT_REPORT_SCHEMA,
   ];
-  args.push(...buildPermissionArgs(runtime, config.permission_mode));
+  args.push(...buildPermissionArgs(runtime, permissionMode));
 
   // For follow-ups, use --continue to resume the most recent session in this
   // worktree directory. Each task has its own worktree so there's no ambiguity.
