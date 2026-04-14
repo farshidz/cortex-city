@@ -12,15 +12,6 @@ export interface AgentReport {
   create_tasks?: FollowupTaskRequest[];
 }
 
-export interface FollowupTaskRequest {
-  title: string;
-  description: string;
-  agent: string;
-  plan?: string;
-  agent_runner?: AgentRuntime;
-  permission_mode?: PermissionMode;
-}
-
 export interface Task {
   id: string;
   title: string;
@@ -30,6 +21,8 @@ export interface Task {
   agent: string; // key from config.agents
   agent_runner?: AgentRuntime;
   permission_mode?: PermissionMode;
+  parent_task_id?: string;
+  child_tasks?: ChildTaskSummary[];
   created_at: string; // ISO 8601
   updated_at: string;
 
@@ -62,6 +55,7 @@ export interface AgentConfig {
   prompt_file: string; // relative path to agent's prompt file
   default_branch: string;
   env_file?: string; // optional path to .env file with agent-specific secrets
+  description?: string;
 }
 
 export type AgentRuntime = "claude" | "codex";
@@ -78,6 +72,22 @@ export interface OrchestratorConfig {
   default_permission_mode: PermissionMode;
   default_agent_runner: AgentRuntime;
   agents: Record<string, AgentConfig>;
+}
+
+export interface FollowupTaskRequest {
+  title: string;
+  description: string;
+  agent: string;
+  plan?: string;
+  agent_runner?: AgentRuntime;
+  permission_mode?: PermissionMode;
+}
+
+export interface ChildTaskSummary {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  agent: string;
 }
 
 export interface ActiveSession {

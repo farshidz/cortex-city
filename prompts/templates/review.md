@@ -27,3 +27,6 @@ Your response MUST conform to the required JSON schema. Provide:
 - **blockers**: Issues preventing full resolution (empty array if none)
 - **next_steps**: Any remaining items for the task owner
 - **create_tasks**: Optional array of additional tasks to create (see instruction #8)
+
+## Available Agents
+{{AGENT_DIRECTORY}}

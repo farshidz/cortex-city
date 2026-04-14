@@ -32,3 +32,6 @@ Your response MUST conform to the required JSON schema. Provide:
 
 ## Repository Context
 {{REPO_CONTEXT}}
+
+## Available Agents
+{{AGENT_DIRECTORY}}

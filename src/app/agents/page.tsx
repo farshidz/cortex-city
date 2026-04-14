@@ -37,6 +37,7 @@ export default function AgentsPage() {
     prompt_file: "",
     default_branch: "main",
     prompt: "",
+    description: "",
   });
   const [newEnvVars, setNewEnvVars] = useState<{ key: string; value: string }[]>([]);
   const [showPreview, setShowPreview] = useState(false);
@@ -97,6 +98,7 @@ export default function AgentsPage() {
       prompt_file: "",
       default_branch: "main",
       prompt: "",
+      description: "",
     });
     setNewEnvVars([]);
     setShowAdd(false);
@@ -123,7 +125,8 @@ export default function AgentsPage() {
     .replace(
       "{{REPO_CONTEXT}}",
       newAgent.prompt || "(your agent prompt will appear here)"
-    );
+    )
+    .replace("{{AGENT_DIRECTORY}}", "(agents list will appear here)");
 
   const agents = config ? Object.entries(config.agents) : [];
 
@@ -194,6 +197,17 @@ export default function AgentsPage() {
                     })
                   }
                   placeholder="main"
+                />
+              </div>
+              <div className="col-span-2 space-y-1">
+                <Label className="text-xs">Description</Label>
+                <textarea
+                  className="w-full min-h-[90px] rounded-md border bg-transparent px-3 py-2 text-sm"
+                  value={newAgent.description}
+                  onChange={(e) =>
+                    setNewAgent({ ...newAgent, description: e.target.value })
+                  }
+                  placeholder="Short summary of when to use this agent"
                 />
               </div>
             </div>
@@ -364,6 +378,9 @@ export default function AgentsPage() {
                   <div className="text-sm text-muted-foreground">
                     Prompt: {agent.prompt_file || "none"} &middot; Branch:{" "}
                     {agent.default_branch}
+                  </div>
+                  <div className="text-sm text-muted-foreground">
+                    {agent.description?.trim() || "No description provided."}
                   </div>
                 </div>
                 <div className="flex gap-2">

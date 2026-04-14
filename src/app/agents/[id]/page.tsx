@@ -51,6 +51,7 @@ export default function AgentDetailPage({
     repo_slug: "",
     repo_path: "",
     default_branch: "",
+    description: "",
   });
   const [activeTab, setActiveTab] = useState("agent");
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
@@ -98,6 +99,7 @@ export default function AgentDetailPage({
       repo_slug: agent!.repo_slug,
       repo_path: agent!.repo_path,
       default_branch: agent!.default_branch,
+      description: agent!.description || "",
     });
     setEditingConfig(true);
   }
@@ -154,7 +156,8 @@ export default function AgentDetailPage({
     .replace(
       "{{REPO_CONTEXT}}",
       promptContent || "(your agent prompt goes here)"
-    );
+    )
+    .replace("{{AGENT_DIRECTORY}}", "(agents list will appear here)");
 
   return (
     <div className="max-w-4xl space-y-4">
@@ -227,6 +230,20 @@ export default function AgentDetailPage({
                         default_branch: e.target.value,
                       })
                     }
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Description</Label>
+                  <textarea
+                    className="w-full min-h-[80px] rounded-md border bg-transparent px-3 py-2 text-sm"
+                    value={configForm.description}
+                    onChange={(e) =>
+                      setConfigForm({
+                        ...configForm,
+                        description: e.target.value,
+                      })
+                    }
+                    placeholder="Short summary of this agent's responsibilities"
                   />
                 </div>
               </div>

@@ -479,6 +479,7 @@ async function createFollowupTasks(
         req.agent_runner || parentTask.agent_runner || config.default_agent_runner,
       permission_mode:
         req.permission_mode || parentTask.permission_mode || config.default_permission_mode,
+      parent_task_id: parentTask.id,
       created_at: now,
       updated_at: now,
     };

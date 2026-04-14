@@ -1,6 +1,6 @@
 import { readFileSync } from "fs";
 import path from "path";
-import type { Task } from "./types";
+import type { Task, AgentConfig, OrchestratorConfig } from "./types";
 import { readConfig } from "./store";
 
 const PROMPTS_DIR = path.join(process.cwd(), "prompts");
@@ -31,6 +31,7 @@ export function buildInitialPrompt(task: Task): string {
     : "No agent-specific context configured.";
 
   const agentName = agentConfig?.name || task.agent;
+  const agentDirectory = buildAgentDirectory(config, task.agent);
 
   return template
     .replace("{{TASK_TITLE}}", task.title)
@@ -40,7 +41,8 @@ export function buildInitialPrompt(task: Task): string {
       task.plan || "No detailed plan provided. Determine the best approach."
     )
     .replace("{{AGENT_NAME}}", agentName)
-    .replace("{{REPO_CONTEXT}}", repoContext);
+    .replace("{{REPO_CONTEXT}}", repoContext)
+    .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 
 function describeMergeStatus(status?: string): string {
@@ -67,12 +69,14 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
   const template = loadTemplate("review.md");
   const mergeStatus = describeMergeStatus(options?.prStatus || task.pr_status);
   const baseBranch = options?.baseBranch || agentConfig?.default_branch || "main";
+  const agentDirectory = buildAgentDirectory(config, task.agent);
 
   return template
     .replace("{{PR_URL}}", task.pr_url || "Unknown")
     .replace("{{AGENT_NAME}}", agentName)
     .replace("{{MERGE_STATUS}}", mergeStatus)
-    .replace(/\{\{BASE_BRANCH\}\}/g, baseBranch);
+    .replace(/\{\{BASE_BRANCH\}\}/g, baseBranch)
+    .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 
 export function buildCleanupPrompt(task: Task): string {
@@ -82,6 +86,7 @@ export function buildCleanupPrompt(task: Task): string {
   const repoContext = agentConfig
     ? loadAgentPrompt(agentConfig.prompt_file)
     : "No agent-specific cleanup instructions.";
+  const agentDirectory = buildAgentDirectory(config, task.agent);
 
   return template
     .replace(/\{\{FINAL_STATUS\}\}/g, task.status)
@@ -89,5 +94,32 @@ export function buildCleanupPrompt(task: Task): string {
     .replace("{{TASK_DESCRIPTION}}", task.description)
     .replace("{{PR_URL}}", task.pr_url || "None")
     .replace("{{BRANCH_NAME}}", task.branch_name || "Unknown")
-    .replace("{{REPO_CONTEXT}}", repoContext);
+    .replace("{{REPO_CONTEXT}}", repoContext)
+    .replace("{{AGENT_DIRECTORY}}", agentDirectory);
+}
+
+function buildAgentDirectory(
+  config: OrchestratorConfig,
+  currentAgentId: string
+): string {
+  const entries = Object.entries(config.agents);
+  if (entries.length === 0) {
+    return "No additional agents are configured. Add more agents in Settings when needed.";
+  }
+  return entries
+    .map(([id, agent]) => formatAgentDescription(id, agent, id === currentAgentId))
+    .join("\n");
+}
+
+function formatAgentDescription(
+  id: string,
+  agent: AgentConfig,
+  isCurrent: boolean
+): string {
+  const name = agent.name || id;
+  const description = agent.description?.trim() || "No description provided.";
+  const repo = agent.repo_slug ? `Repo: ${agent.repo_slug}` : "";
+  const currentTag = isCurrent ? " (current)" : "";
+  const detail = [description, repo].filter(Boolean).join(" — ");
+  return `- **${name}** (\`${id}\`)${currentTag}: ${detail}`;
 }

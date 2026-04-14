@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTask, updateTask, deleteTask } from "@/lib/store";
+import { getTask, updateTask, deleteTask, readTasks } from "@/lib/store";
 import { removeWorktree } from "@/lib/agent-runner";
 
 export async function GET(
@@ -9,7 +9,18 @@ export async function GET(
   const { id } = await params;
   const task = await getTask(id);
   if (!task) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json(task);
+
+  const allTasks = readTasks();
+  const childTasks = allTasks
+    .filter((t) => t.parent_task_id === id)
+    .map((t) => ({
+      id: t.id,
+      title: t.title,
+      status: t.status,
+      agent: t.agent,
+    }));
+
+  return NextResponse.json({ ...task, child_tasks: childTasks });
 }
 
 export async function PUT(

@@ -428,8 +428,50 @@ export default function TaskDetailPage({
                   </div>
                 </div>
               )}
+              {task.parent_task_id && (
+                <div>
+                  <span className="text-sm text-muted-foreground">
+                    Parent Task:
+                  </span>{" "}
+                  <Link
+                    href={`/tasks/${task.parent_task_id}`}
+                    className="text-sm font-medium underline"
+                  >
+                    View parent task
+                  </Link>
+                </div>
+              )}
             </CardContent>
           </Card>
+
+          {task.child_tasks && task.child_tasks.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Follow-up Tasks</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {task.child_tasks.map((child) => (
+                  <div
+                    key={child.id}
+                    className="flex items-center justify-between rounded-md border p-3"
+                  >
+                    <div>
+                      <Link
+                        href={`/tasks/${child.id}`}
+                        className="font-medium hover:underline"
+                      >
+                        {child.title}
+                      </Link>
+                      <div className="text-xs text-muted-foreground">
+                        Agent: {child.agent}
+                      </div>
+                    </div>
+                    <Badge variant="outline">{child.status}</Badge>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
 
           {/* Notes */}
           <Card>
