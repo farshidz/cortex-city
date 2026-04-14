@@ -1,10 +1,12 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { spawn } from "child_process";
 import path from "path";
 import type { Task, OrchestratorConfig } from "./types";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
+const GIT_DIR = path.join(CORTEX_DIR, ".git");
 
 function ensureCortexDir() {
   if (!existsSync(CORTEX_DIR)) {
@@ -21,6 +23,22 @@ function withWriteLock<T>(fn: () => T): Promise<T> {
   return result;
 }
 
+function autoSnapshotCortex(reason: string): void {
+  if (!existsSync(GIT_DIR)) return;
+  const sanitized = reason.replace(/"/g, '\\"');
+  const script = `cd "${CORTEX_DIR}" && ` +
+    `if [ -z "$(git status --porcelain 2>/dev/null)" ]; then exit 0; fi; ` +
+    `git add -A >/dev/null 2>&1 && ` +
+    `if git diff --cached --quiet 2>/dev/null; then exit 0; fi; ` +
+    `git commit -m "Auto snapshot: ${sanitized}" >/dev/null 2>&1 || exit 0; ` +
+    `if git remote >/dev/null 2>&1 && [ -n "$(git remote)" ]; then git push >/dev/null 2>&1 || true; fi;`;
+  const child = spawn("bash", ["-lc", script], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+}
+
 // --- Tasks ---
 
 export function readTasks(): Task[] {
@@ -34,6 +52,7 @@ export function writeTasks(tasks: Task[]): Promise<void> {
   return withWriteLock(() => {
     ensureCortexDir();
     writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
+    autoSnapshotCortex("tasks");
   });
 }
 
@@ -95,6 +114,7 @@ export function writeConfig(config: OrchestratorConfig): Promise<void> {
   return withWriteLock(() => {
     ensureCortexDir();
     writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+    autoSnapshotCortex("config");
   });
 }
 
