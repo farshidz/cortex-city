@@ -1,6 +1,7 @@
 import { spawn, execSync, type ChildProcess } from "child_process";
-import { readFileSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
 import path from "path";
+import os from "os";
 import { readConfig, updateTask } from "./store";
 import { buildInitialPrompt, buildReviewPrompt, buildCleanupPrompt } from "./prompt-builder";
 import { getPRStateHash, getSubmittedCommentIds, getPRComments } from "./github";
@@ -98,16 +99,27 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
     },
   },
   required: ["status", "summary", "files_changed", "assumptions", "blockers", "next_steps"],
+  additionalProperties: false,
 });
 
 function buildPermissionArgs(runtime: AgentRuntime, mode: PermissionMode): string[] {
-  if (mode === "yolo") {
-    if (runtime === "codex") {
-      return ["--yolo"];
+  if (runtime === "codex") {
+    if (mode === "yolo" || mode === "bypassPermissions") {
+      return ["--dangerously-bypass-approvals-and-sandbox"];
     }
+    return ["--full-auto"];
+  }
+  if (mode === "yolo") {
     return ["--permission-mode", "bypassPermissions"];
   }
   return ["--permission-mode", mode];
+}
+
+function writeSchemaFile(schema: string): string {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "codex-schema-"));
+  const schemaPath = path.join(dir, "schema.json");
+  writeFileSync(schemaPath, schema, "utf-8");
+  return schemaPath;
 }
 
 export async function spawnAgentSession(
@@ -138,21 +150,32 @@ export async function spawnAgentSession(
   }
 
   // Build CLI args
-  const args: string[] = [
-    "-p",
-    prompt,
-    "--output-format",
-    "json",
-    "--json-schema",
-    AGENT_REPORT_SCHEMA,
-  ];
+  const args: string[] = [];
+  if (runtime === "codex") {
+    args.push("exec", "--json");
+    const schemaPath = writeSchemaFile(AGENT_REPORT_SCHEMA);
+    args.push("--output-schema", schemaPath);
+  } else {
+    args.push(
+      "-p",
+      prompt,
+      "--output-format",
+      "json",
+      "--json-schema",
+      AGENT_REPORT_SCHEMA
+    );
+  }
   args.push(...buildPermissionArgs(runtime, permissionMode));
+
+  if (runtime === "codex") {
+    args.push(prompt);
+  }
 
   // For follow-ups, use --continue to resume the most recent session in this
   // worktree directory. Each task has its own worktree so there's no ambiguity.
   // --session-id and --resume both error with "already in use" for completed
   // sessions, but --continue resolves by directory and works reliably.
-  if (mode === "review" && task.session_id) {
+  if (runtime !== "codex" && mode === "review" && task.session_id) {
     args.push("--continue");
   }
 
@@ -206,7 +229,15 @@ export async function spawnAgentSession(
     console.log(
       `[agent-runner] Session for task "${task.title}" exited with code ${code} (${Math.round(durationMs / 1000)}s)`
     );
-    await handleRunComplete(task.id, code, stdout, stderr, durationMs, preRunCommentIds);
+    await handleRunComplete(
+      task.id,
+      code,
+      stdout,
+      stderr,
+      durationMs,
+      preRunCommentIds,
+      runtime
+    );
     onComplete(task.id);
   });
 
@@ -318,16 +349,81 @@ export function removeWorktree(task: Task): void {
   }
 }
 
+interface CodexEvent {
+  type: string;
+  thread_id?: string;
+  item?: {
+    type?: string;
+    text?: string;
+  };
+  usage?: {
+    input_tokens?: number;
+    cached_input_tokens?: number;
+    output_tokens?: number;
+  };
+}
+
+function parseCodexResult(stdout: string): ClaudeRunResult {
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const events = lines
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean) as CodexEvent[];
+  const threadEvent = events.find((evt) => evt.type === "thread.started");
+  const agentMessages = events.filter(
+    (evt) => evt.type === "item.completed" && evt.item?.type === "agent_message"
+  );
+  const finalMessage = agentMessages[agentMessages.length - 1];
+  let structured: AgentReport | undefined;
+  const resultText = finalMessage?.item?.text || "";
+  if (resultText) {
+    try {
+      structured = JSON.parse(resultText);
+    } catch {
+      structured = undefined;
+    }
+  }
+  const usageEvent = events.find((evt) => evt.type === "turn.completed");
+  const usage = usageEvent?.usage || {};
+  return {
+    type: "codex",
+    subtype: "exec",
+    is_error: false,
+    duration_ms: 0,
+    result: resultText || stdout,
+    session_id: threadEvent?.thread_id || "",
+    terminal_reason: "completed",
+    total_cost_usd: 0,
+    num_turns: 1,
+    structured_output: structured,
+    usage: {
+      input_tokens: usage.input_tokens || 0,
+      output_tokens: usage.output_tokens || 0,
+      cache_read_input_tokens: usage.cached_input_tokens || 0,
+    },
+  };
+}
+
 async function handleRunComplete(
   taskId: string,
   exitCode: number | null,
   stdout: string,
   _stderr: string,
   durationMs: number,
-  preRunCommentIds: number[]
+  preRunCommentIds: number[],
+  runtime: AgentRuntime
 ) {
   try {
-    const result: ClaudeRunResult = JSON.parse(stdout);
+    const result: ClaudeRunResult =
+      runtime === "codex" ? parseCodexResult(stdout) : JSON.parse(stdout);
 
     const inputTokens = (result.usage?.input_tokens || 0) + (result.usage?.cache_read_input_tokens || 0);
     const outputTokens = result.usage?.output_tokens || 0;
