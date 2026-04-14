@@ -9,6 +9,10 @@ function getEnvPath(envFile: string): string {
     : path.join(process.cwd(), envFile);
 }
 
+function defaultEnvFile(id: string): string {
+  return `.cortex/prompts/agents/${id}.env`;
+}
+
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -59,7 +63,7 @@ export async function PUT(
   const { vars } = await request.json() as { vars: Record<string, string> };
 
   // Auto-create env_file path if not set
-  const envFile = agent.env_file || `.env.${id}`;
+  const envFile = agent.env_file || defaultEnvFile(id);
   if (!agent.env_file) {
     config.agents[id] = { ...agent, env_file: envFile };
     await writeConfig(config);
@@ -75,6 +79,6 @@ export async function PUT(
     .map(([k, v]) => `${k}=${v}`);
   writeFileSync(envPath, lines.join("\n") + "\n", "utf-8");
 
-  // Explicitly do NOT commit — secrets stay local
+  // Explicitly do NOT commit secrets
   return NextResponse.json({ ok: true, path: envFile });
 }
