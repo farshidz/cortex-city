@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useState, useEffect, useCallback } from "react";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import Link from "next/link";
@@ -24,9 +24,21 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import type { Task, TaskStatus, OrchestratorConfig, AgentConfig } from "@/lib/types";
+import type {
+  Task,
+  TaskStatus,
+  OrchestratorConfig,
+  AgentRuntime,
+  PermissionMode,
+} from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
+const PERMISSION_LABELS: Record<PermissionMode, string> = {
+  bypassPermissions: "Bypass Permissions",
+  acceptEdits: "Accept Edits",
+  default: "Prompt for everything",
+  yolo: "YOLO",
+};
 
 const ALL_STATUSES: TaskStatus[] = [
   "open",
@@ -53,14 +65,17 @@ export default function TaskDetailPage({
   const [savingNotes, setSavingNotes] = useState(false);
   const [notesDirty, setNotesDirty] = useState(false);
 
-  if (!task) return <div className="text-muted-foreground">Loading...</div>;
-
   function startEdit() {
     setForm({
       title: task!.title,
       description: task!.description,
       plan: task!.plan || "",
       agent: task!.agent,
+      agent_runner: task!.agent_runner || config?.default_agent_runner || "claude",
+      permission_mode:
+        task!.permission_mode ||
+        config?.default_permission_mode ||
+        "bypassPermissions",
     });
     setEditing(true);
   }
@@ -102,16 +117,28 @@ export default function TaskDetailPage({
     mutate();
   }
 
-  async function saveNotes() {
-    setSavingNotes(true);
-    await fetch(`/api/tasks/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ notes: notes || "" }),
-    });
-    mutate();
-    setSavingNotes(false);
-  }
+  const persistNotes = useCallback(
+    async (content: string) => {
+      setSavingNotes(true);
+      await fetch(`/api/tasks/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: content }),
+      });
+      mutate();
+      setSavingNotes(false);
+      setNotesDirty(false);
+    },
+    [id, mutate]
+  );
+
+  useEffect(() => {
+    if (!notesDirty) return;
+    const handle = setTimeout(() => {
+      persistNotes(notes ?? "");
+    }, 800);
+    return () => clearTimeout(handle);
+  }, [notes, notesDirty, persistNotes]);
 
   async function deleteTask() {
     const isFinal = task!.status === "merged" || task!.status === "closed";
@@ -126,6 +153,8 @@ export default function TaskDetailPage({
     await fetch(`/api/tasks/${id}`, { method: "DELETE" });
     router.push("/");
   }
+
+  if (!task) return <div className="text-muted-foreground">Loading...</div>;
 
   const agents = config ? Object.entries(config.agents) : [];
 
@@ -179,6 +208,74 @@ export default function TaskDetailPage({
                       {a.name}
                     </SelectItem>
                   ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Agent Runtime</Label>
+              <Select
+                value={form.agent_runner || config?.default_agent_runner || "claude"}
+                onValueChange={(v) => {
+                  if (!v) return;
+                  const newRunner = v as AgentRuntime;
+                  const allowed =
+                    newRunner === "codex"
+                      ? ["default", "yolo"]
+                      : ["bypassPermissions", "acceptEdits", "default"];
+                  const nextPermission = allowed.includes(
+                    (form.permission_mode as PermissionMode) || ""
+                  )
+                    ? form.permission_mode
+                    : (allowed[0] as PermissionMode);
+                  setForm({
+                    ...form,
+                    agent_runner: newRunner,
+                    permission_mode: nextPermission,
+                  });
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="claude">Claude Code</SelectItem>
+                  <SelectItem value="codex">Codex</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Permission Mode</Label>
+              <Select
+                value={
+                  form.permission_mode ||
+                  config?.default_permission_mode ||
+                  "bypassPermissions"
+                }
+                onValueChange={(v) =>
+                  v &&
+                  setForm({
+                    ...form,
+                    permission_mode: v as PermissionMode,
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(form.agent_runner || config?.default_agent_runner || "claude") ===
+                  "codex" ? (
+                    <>
+                      <SelectItem value="default">Prompt for every action</SelectItem>
+                      <SelectItem value="yolo">YOLO (no prompts)</SelectItem>
+                    </>
+                  ) : (
+                    <>
+                      <SelectItem value="bypassPermissions">Bypass Permissions</SelectItem>
+                      <SelectItem value="acceptEdits">Accept Edits</SelectItem>
+                      <SelectItem value="default">Default</SelectItem>
+                    </>
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -261,12 +358,16 @@ export default function TaskDetailPage({
                     </Button>
                   </a>
                 )}
-                {task.session_id && (
+                {task.session_id ? (
                   <Link href={`/tasks/${id}/session`}>
                     <Button size="sm" variant="outline">
                       View Session
                     </Button>
                   </Link>
+                ) : (
+                  <Button size="sm" variant="outline" disabled>
+                    View Session
+                  </Button>
                 )}
               </div>
             </CardContent>
@@ -278,9 +379,38 @@ export default function TaskDetailPage({
               <CardTitle className="text-base">Details</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div>
-                <span className="text-sm text-muted-foreground">Agent: </span>
-                <Badge variant="outline">{task.agent}</Badge>
+              <div className="flex flex-wrap gap-3">
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Agent:
+                  <Badge variant="outline">{task.agent}</Badge>
+                </span>
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Runtime:
+                  <Badge variant="outline">
+                    {(task.agent_runner || config?.default_agent_runner || "claude") ===
+                    "codex"
+                      ? "Codex"
+                      : "Claude Code"}
+                  </Badge>
+                </span>
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Permission:
+                  <Badge variant="outline">
+                    {
+                      PERMISSION_LABELS[
+                        (task.permission_mode ||
+                          config?.default_permission_mode ||
+                          "bypassPermissions") as PermissionMode
+                      ]
+                    }
+                  </Badge>
+                </span>
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Session ID:
+                  <Badge variant="outline">
+                    {task.session_id || "Not available yet"}
+                  </Badge>
+                </span>
               </div>
               <div>
                 <span className="text-sm text-muted-foreground">
@@ -313,12 +443,6 @@ export default function TaskDetailPage({
                 onChange={(e) => {
                   setNotes(e.target.value);
                   setNotesDirty(true);
-                }}
-                onBlur={() => {
-                  if (notesDirty) {
-                    saveNotes();
-                    setNotesDirty(false);
-                  }
                 }}
                 placeholder="Add personal notes..."
               />

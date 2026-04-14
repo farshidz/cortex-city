@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import path from "path";
 import type { Task, OrchestratorConfig } from "./types";
+import { snapshotCortex } from "./cortex-git";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
@@ -34,6 +35,7 @@ export function writeTasks(tasks: Task[]): Promise<void> {
   return withWriteLock(() => {
     ensureCortexDir();
     writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
+    snapshotCortex("tasks");
   });
 }
 
@@ -63,7 +65,6 @@ export async function updateTask(id: string, updates: Partial<Task>): Promise<Ta
 
 export async function deleteTask(id: string): Promise<void> {
   const tasks = readTasks();
-  const task = tasks.find((t) => t.id === id);
   const filtered = tasks.filter((t) => t.id !== id);
   if (filtered.length === tasks.length) throw new Error(`Task ${id} not found`);
   await writeTasks(filtered);
@@ -73,19 +74,30 @@ export async function deleteTask(id: string): Promise<void> {
 
 export function readConfig(): OrchestratorConfig {
   ensureCortexDir();
+  const defaults = getDefaultConfig();
   if (!existsSync(CONFIG_FILE)) {
-    const defaults = getDefaultConfig();
     writeFileSync(CONFIG_FILE, JSON.stringify(defaults, null, 2));
     return defaults;
   }
   const raw = readFileSync(CONFIG_FILE, "utf-8");
-  return JSON.parse(raw);
+  const parsed = JSON.parse(raw);
+  const { agent_runner: legacyRunner, ...rest } = parsed;
+  return {
+    ...defaults,
+    ...rest,
+    default_agent_runner:
+      rest.default_agent_runner || legacyRunner || defaults.default_agent_runner,
+    default_permission_mode:
+      rest.default_permission_mode || rest.permission_mode || defaults.default_permission_mode,
+    agents: rest.agents ?? {},
+  };
 }
 
 export function writeConfig(config: OrchestratorConfig): Promise<void> {
   return withWriteLock(() => {
     ensureCortexDir();
     writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+    snapshotCortex("config");
   });
 }
 
@@ -93,7 +105,8 @@ function getDefaultConfig(): OrchestratorConfig {
   return {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
-    permission_mode: "bypassPermissions",
+    default_permission_mode: "bypassPermissions",
+    default_agent_runner: "claude",
     agents: {},
   };
 }

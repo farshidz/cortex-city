@@ -2,12 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { readFileSync, existsSync, readdirSync } from "fs";
 import path from "path";
 import { getTask } from "@/lib/store";
+import type { Task } from "@/lib/types";
 
 const CLAUDE_PROJECTS_DIR = path.join(
   process.env.HOME || "~",
   ".claude",
   "projects"
 );
+const LOGS_DIR = path.join(process.cwd(), "logs");
 
 // Claude encodes the project path by replacing / with -
 function worktreeToProjectId(worktreePath: string): string {
@@ -32,12 +34,25 @@ export async function GET(
   if (!task.session_id)
     return NextResponse.json({ error: "No session data" }, { status: 404 });
 
-  // Find the session JSONL file
-  // Strategy 1: derive from worktree_path
-  // Strategy 2: search all project dirs for the session ID
+  const runtime = task.agent_runner || "claude";
+  if (runtime === "codex") {
+    const codexResult = loadCodexSession(task);
+    if (codexResult) return NextResponse.json(codexResult);
+  } else {
+    const claudeResult = loadClaudeSession(task);
+    if (claudeResult) return NextResponse.json(claudeResult);
+  }
+
+  return NextResponse.json({ error: "No session files found" }, { status: 404 });
+}
+
+function loadClaudeSession(task: Task) {
   let jsonlFiles: string[] = [];
   let projectDir = "";
 
+  // Find the session JSONL file
+  // Strategy 1: derive from worktree_path
+  // Strategy 2: search all project dirs for the session ID
   if (task.worktree_path) {
     const projectId = worktreeToProjectId(task.worktree_path);
     projectDir = path.join(CLAUDE_PROJECTS_DIR, projectId);
@@ -59,10 +74,7 @@ export async function GET(
     }
   }
   if (jsonlFiles.length === 0) {
-    return NextResponse.json(
-      { error: "No session files found" },
-      { status: 404 }
-    );
+    return null;
   }
 
   // Parse all sessions, most recent first
@@ -136,9 +148,111 @@ export async function GET(
     }
   }
 
-  return NextResponse.json({
+  return {
     session_id: task.session_id,
     message_count: messages.length,
     messages,
-  });
+  };
+}
+
+function loadCodexSession(task: Task) {
+  if (!existsSync(LOGS_DIR)) return null;
+  const logFiles = readdirSync(LOGS_DIR)
+    .filter((file) => file.startsWith(`task-${task.id}-`) && file.endsWith(".log"))
+    .sort()
+    .reverse();
+  for (const file of logFiles) {
+    const fullPath = path.join(LOGS_DIR, file);
+    const content = readFileSync(fullPath, "utf-8");
+    if (task.session_id && !content.includes(task.session_id)) continue;
+    const startTimestamp = parseCodexStartTimestamp(content) || task.last_run_at;
+    const parsed = parseCodexLog(content, startTimestamp);
+    if (parsed) {
+      const userMessage: SessionMessage = {
+        role: "user",
+        content:
+          task.description ||
+          "Task description unavailable. See task page for details.",
+        timestamp: startTimestamp || task.created_at,
+      };
+      const messages = [userMessage, ...parsed.messages];
+      return {
+        session_id: parsed.sessionId || task.session_id,
+        message_count: messages.length,
+        messages,
+        agent_runner: "codex" as const,
+      };
+    }
+  }
+  return null;
+}
+
+function parseCodexStartTimestamp(content: string): string | undefined {
+  const firstLine = content.split("\n")[0];
+  const match = firstLine.match(/Session started at (.+?) ---/);
+  return match ? match[1] : undefined;
+}
+
+interface CodexEvent {
+  type: string;
+  thread_id?: string;
+  timestamp?: string;
+  item?: {
+    type?: string;
+    text?: string;
+    command?: string;
+    aggregated_output?: string;
+  };
+  message?: string;
+}
+
+type CodexSessionMessage = SessionMessage & { agent_label?: string };
+
+function parseCodexLog(content: string, fallbackTimestamp?: string): {
+  sessionId?: string;
+  messages: CodexSessionMessage[];
+} | null {
+  const messages: CodexSessionMessage[] = [];
+  let sessionId: string | undefined;
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.trim();
+    if (!line.startsWith("{")) continue;
+    let entry: CodexEvent;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry.type === "thread.started" && entry.thread_id) {
+      sessionId = entry.thread_id;
+    }
+    if (entry.type === "item.completed" && entry.item?.type === "agent_message") {
+      messages.push({
+        role: "assistant",
+        content: entry.item.text || "",
+        timestamp: entry.timestamp || fallbackTimestamp,
+        agent_label: "Codex",
+      });
+    }
+    if (entry.type === "item.completed" && entry.item?.type === "command_execution") {
+      const output = entry.item.aggregated_output?.trim();
+      const text = `Ran command: ${entry.item.command}\n${output ? `Output:\n${output}` : ""}`.trim();
+      messages.push({
+        role: "assistant",
+        content: text,
+        timestamp: entry.timestamp || fallbackTimestamp,
+        agent_label: "Codex",
+      });
+    }
+    if (entry.type === "error" && entry.message) {
+      messages.push({
+        role: "assistant",
+        content: `Error: ${entry.message}`,
+        timestamp: entry.timestamp || fallbackTimestamp,
+        agent_label: "Codex",
+      });
+    }
+  }
+  if (messages.length === 0) return null;
+  return { sessionId, messages };
 }

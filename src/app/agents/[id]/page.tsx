@@ -15,7 +15,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Separator } from "@/components/ui/separator";
 import type { OrchestratorConfig } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -60,21 +59,25 @@ export default function AgentDetailPage({
   const agent = config?.agents[id];
 
   useEffect(() => {
-    if (promptData && !promptLoaded) {
+    if (!promptData || promptLoaded) return;
+    const handle = requestAnimationFrame(() => {
       setPromptContent(promptData.content);
       setPromptLoaded(true);
-    }
+    });
+    return () => cancelAnimationFrame(handle);
   }, [promptData, promptLoaded]);
 
   useEffect(() => {
-    if (envData && !envLoaded) {
+    if (!envData || envLoaded) return;
+    const handle = requestAnimationFrame(() => {
       const entries = Object.entries(envData.vars).map(([key, value]) => ({
         key,
         value,
       }));
       setEnvVars(entries.length > 0 ? entries : [{ key: "", value: "" }]);
       setEnvLoaded(true);
-    }
+    });
+    return () => cancelAnimationFrame(handle);
   }, [envData, envLoaded]);
 
   if (!config) return <div className="text-muted-foreground">Loading...</div>;
@@ -84,6 +87,10 @@ export default function AgentDetailPage({
         Agent &quot;{id}&quot; not found.
       </div>
     );
+
+  const normalizedPrompt = (agent.prompt_file || `.cortex/prompts/agents/${id}.md`).replace(/\\/g, "/");
+  const slashIndex = normalizedPrompt.lastIndexOf("/");
+  const envDisplayPath = `${slashIndex === -1 ? "" : `${normalizedPrompt.slice(0, slashIndex)}/`}.env.${id}`;
 
   function startEditConfig() {
     setConfigForm({
@@ -274,7 +281,7 @@ export default function AgentDetailPage({
             These are passed as environment variables when Claude runs. Stored
             locally in{" "}
             <code className="bg-muted px-1 rounded">
-              {agent.env_file || `.env.${id}`}
+              {envDisplayPath}
             </code>{" "}
             and never committed to git. A global{" "}
             <code className="bg-muted px-1 rounded">.env</code> is also loaded

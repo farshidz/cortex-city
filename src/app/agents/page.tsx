@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -55,7 +55,6 @@ export default function AgentsPage() {
         [key]: {
           ...agentConfig,
           prompt_file,
-          ...(hasEnvVars ? { env_file: `.env.${key}` } : {}),
         },
       },
     };

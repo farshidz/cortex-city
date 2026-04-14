@@ -18,6 +18,8 @@ export interface Task {
   plan?: string;
   status: TaskStatus;
   agent: string; // key from config.agents
+  agent_runner?: AgentRuntime;
+  permission_mode?: PermissionMode;
   created_at: string; // ISO 8601
   updated_at: string;
 
@@ -52,10 +54,19 @@ export interface AgentConfig {
   env_file?: string; // optional path to .env file with agent-specific secrets
 }
 
+export type AgentRuntime = "claude" | "codex";
+
+export type PermissionMode =
+  | "bypassPermissions"
+  | "acceptEdits"
+  | "default"
+  | "yolo";
+
 export interface OrchestratorConfig {
   max_parallel_sessions: number;
   poll_interval_seconds: number;
-  permission_mode: string;
+  default_permission_mode: PermissionMode;
+  default_agent_runner: AgentRuntime;
   agents: Record<string, AgentConfig>;
 }
 

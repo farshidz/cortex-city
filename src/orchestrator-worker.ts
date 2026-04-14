@@ -6,6 +6,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import path from "path";
+import type { Task } from "./lib/types";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
@@ -26,8 +27,8 @@ installLogger();
 async function poll() {
   // Fresh imports every poll to pick up any code changes
   const { readTasks, readConfig, updateTask } = await import("./lib/store");
-  const { spawnClaudeSession, removeWorktree } = await import("./lib/claude-runner");
-  const { getPRStateHash, getPRStatus, isPRMergedOrClosed, hasPendingChecks } =
+  const { spawnAgentSession } = await import("./lib/agent-runner");
+  const { getPRStateHash, getPRStatus, isPRMergedOrClosed } =
     await import("./lib/github");
 
   const tasks = readTasks();
@@ -52,10 +53,10 @@ async function poll() {
       !activePids.has(task.id)
     ) {
       console.log(`[worker] Running cleanup for task "${task.title}" (${task.id})`);
-      const { pid } = await spawnClaudeSession(task, "cleanup", async (taskId: string) => {
+      const { pid } = await spawnAgentSession(task, "cleanup", async (taskId: string) => {
         activePids.delete(taskId);
         const { getTask, updateTask: ut } = await import("./lib/store");
-        const { removeWorktree: rw } = await import("./lib/claude-runner");
+        const { removeWorktree: rw } = await import("./lib/agent-runner");
         const t = await getTask(taskId);
         if (t?.worktree_path) {
           rw(t);
@@ -70,7 +71,7 @@ async function poll() {
   const PRUNE_AGE_MS = 12 * 60 * 60 * 1000;
   const now = Date.now();
   const toPrune = tasks.filter(
-    (t: any) =>
+    (t) =>
       (t.status === "merged" || t.status === "closed") &&
       !t.worktree_path &&
       !activePids.has(t.id) &&
@@ -78,7 +79,7 @@ async function poll() {
   );
   if (toPrune.length > 0) {
     const { writeTasks } = await import("./lib/store");
-    const remaining = tasks.filter((t: any) => !toPrune.some((p: any) => p.id === t.id));
+    const remaining = tasks.filter((t) => !toPrune.some((p) => p.id === t.id));
     console.log(`[worker] Pruning ${toPrune.length} old task(s)`);
     await writeTasks(remaining);
   }
@@ -88,8 +89,8 @@ async function poll() {
 
   // Pick open tasks
   const openTasks = tasks
-    .filter((t: any) => t.status === "open")
-    .sort((a: any, b: any) =>
+    .filter((t) => t.status === "open")
+    .sort((a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
     );
 
@@ -97,7 +98,7 @@ async function poll() {
     if (availableSlots <= 0) break;
     console.log(`[worker] Picking up task "${task.title}" (${task.id}) [initial]`);
     await updateTask(task.id, { status: "in_progress" });
-    const { pid } = await spawnClaudeSession(task, "initial", (taskId: string) => {
+    const { pid } = await spawnAgentSession(task, "initial", (taskId: string) => {
       activePids.delete(taskId);
     });
     await updateTask(task.id, { current_run_pid: pid });
@@ -107,13 +108,13 @@ async function poll() {
 
   // Single pass over in_review tasks: check merged/closed, update status, trigger reviews
   const inReviewTasks = tasks.filter(
-    (t: any) => t.status === "in_review" && t.pr_url
+    (t): t is Task & { pr_url: string } => t.status === "in_review" && typeof t.pr_url === "string"
   );
 
-  const tasksToReview: any[] = [];
+  const tasksToReview: Task[] = [];
 
   await Promise.all(
-    inReviewTasks.map(async (task: any) => {
+    inReviewTasks.map(async (task) => {
       try {
         // Check merged/closed first (1 API call)
         const prState = await isPRMergedOrClosed(task.pr_url);
@@ -128,16 +129,18 @@ async function poll() {
         const prStatus = await getPRStatus(task.pr_url);
         if (prStatus !== "unknown" && prStatus !== task.pr_status) {
           await updateTask(task.id, { pr_status: prStatus });
+          task.pr_status = prStatus;
         }
 
         // Skip if checks pending, active session, or no PR
         if (prStatus === "checks_pending") return;
         if (activePids.has(task.id)) return;
 
-        // Check GH state hash
         const ghState = await getPRStateHash(task.pr_url);
         if (!ghState) return; // API failed — skip
-        if (ghState === task.last_review_gh_state) return;
+
+        const hasConflicts = prStatus === "conflicts";
+        if (!hasConflicts && ghState === task.last_review_gh_state) return;
 
         tasksToReview.push(task);
       } catch (err) {
@@ -150,7 +153,7 @@ async function poll() {
   for (const task of tasksToReview) {
     if (availableSlots <= 0) break;
     console.log(`[worker] Picking up task "${task.title}" (${task.id}) [review]`);
-    const { pid } = await spawnClaudeSession(task, "review", (taskId: string) => {
+    const { pid } = await spawnAgentSession(task, "review", (taskId: string) => {
       activePids.delete(taskId);
     });
     await updateTask(task.id, { current_run_pid: pid });

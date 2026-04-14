@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import path from "path";
 import { readConfig } from "@/lib/store";
+import { snapshotCortex } from "@/lib/cortex-git";
 
 export async function GET(
   _request: NextRequest,
@@ -40,5 +41,6 @@ export async function PUT(
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
   writeFileSync(fullPath, content, "utf-8");
+  snapshotCortex(`prompt:${id}`);
   return NextResponse.json({ ok: true, path: filePath });
 }

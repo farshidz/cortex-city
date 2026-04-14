@@ -33,30 +33,6 @@ function exec(cmd: string): Promise<string> {
   });
 }
 
-export async function getPRComments(prUrl: string): Promise<string> {
-  const pr = parsePRUrl(prUrl);
-  if (!pr) return "Could not parse PR URL.";
-
-  const [reviewComments, issueComments, reviews] = await Promise.all([
-    exec(
-      `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments --jq '.[] | "**\\(.user.login)** on \\(.path):\\(.line // .original_line):\\n\\(.body)\\n"'`
-    ),
-    exec(
-      `gh api repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments --jq '.[] | "**\\(.user.login)**:\\n\\(.body)\\n"'`
-    ),
-    exec(
-      `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews --jq '.[] | select(.body != "") | "**\\(.user.login)** (\\(.state)):\\n\\(.body)\\n"'`
-    ),
-  ]);
-
-  const parts: string[] = [];
-  if (reviewComments) parts.push("### Inline Comments\n" + reviewComments);
-  if (issueComments) parts.push("### PR Comments\n" + issueComments);
-  if (reviews) parts.push("### Reviews\n" + reviews);
-
-  return parts.join("\n\n") || "No comments found.";
-}
-
 export async function getCIStatus(prUrl: string): Promise<string> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return "Could not parse PR URL.";

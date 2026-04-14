@@ -14,13 +14,13 @@ This project is meant to help you operate an agent workflow from one place inste
 
 Before using Cortex City, make sure the host machine is set up with:
 
-- `Claude Code` installed and available on your shell as `claude`
+- Either `Claude Code` (available on your shell as `claude`) or `Codex` (available as `codex`). Pick the default runtime and permission mode from Settings; each task can override them when needed.
 - `GitHub CLI` installed and authenticated as `gh`
-- A sandboxed host environment for running Claude Code safely
+- A sandboxed host environment for running the agent CLI safely
 
-Cortex City runs Claude as an autonomous worker against local repositories. In practice that means Claude itself needs to run without interactive permission prompts so it can edit files, run git commands, and use the shell autonomously.
+Cortex City runs the configured agent runtime (Claude or Codex) as an autonomous worker against local repositories. In practice that means the worker itself needs to run without interactive permission prompts so it can edit files, run git commands, and use the shell autonomously.
 
-Because Cortex uses `--dangerously-skip-permissions`, you should run it inside a sandboxed environment that is already scoped and safe. The safety boundary should come from the environment around Claude, not from per-command permission prompts inside Claude itself.
+Because Cortex uses `--dangerously-skip-permissions` (Claude) or `--yolo` (Codex), you should run it inside a sandboxed environment that is already scoped and safe. The safety boundary should come from the environment around the agent, not from per-command permission prompts inside the agent itself.
 
 ## Core Concepts
 

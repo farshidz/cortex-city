@@ -1,11 +1,19 @@
 import { spawn, execSync, type ChildProcess } from "child_process";
-import { readFileSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
 import path from "path";
+import os from "os";
 import { readConfig, updateTask } from "./store";
 import { buildInitialPrompt, buildReviewPrompt, buildCleanupPrompt } from "./prompt-builder";
 import { getPRStateHash, getSubmittedCommentIds } from "./github";
 import { createSessionLog } from "./logger";
-import type { Task, AgentReport, ClaudeRunResult } from "./types";
+import type {
+  Task,
+  AgentReport,
+  ClaudeRunResult,
+  AgentRuntime,
+  PermissionMode,
+} from "./types";
+import { resolveEnvPath } from "./agent-files";
 
 const GLOBAL_ENV_FILE = path.join(process.cwd(), ".env");
 
@@ -90,15 +98,49 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
       description: "Recommended follow-up actions for the task owner",
     },
   },
-  required: ["status", "summary", "files_changed", "assumptions", "blockers", "next_steps"],
+  required: [
+    "status",
+    "summary",
+    "pr_url",
+    "branch_name",
+    "files_changed",
+    "assumptions",
+    "blockers",
+    "next_steps"
+  ],
+  additionalProperties: false,
 });
 
-export async function spawnClaudeSession(
+function buildPermissionArgs(runtime: AgentRuntime, mode: PermissionMode): string[] {
+  if (runtime === "codex") {
+    if (mode === "yolo" || mode === "bypassPermissions") {
+      return ["--dangerously-bypass-approvals-and-sandbox"];
+    }
+    return ["--full-auto"];
+  }
+  if (mode === "yolo") {
+    return ["--permission-mode", "bypassPermissions"];
+  }
+  return ["--permission-mode", mode];
+}
+
+function writeSchemaFile(schema: string): string {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "codex-schema-"));
+  const schemaPath = path.join(dir, "schema.json");
+  writeFileSync(schemaPath, schema, "utf-8");
+  return schemaPath;
+}
+
+export async function spawnAgentSession(
   task: Task,
   mode: "initial" | "review" | "cleanup",
   onComplete: (taskId: string) => void
 ): Promise<{ pid: number; child: ChildProcess }> {
   const config = readConfig();
+  const runtime: AgentRuntime =
+    task.agent_runner || config.default_agent_runner || "claude";
+  const permissionMode: PermissionMode =
+    task.permission_mode || config.default_permission_mode || "bypassPermissions";
   const agentConfig = config.agents[task.agent];
 
   // Build prompt based on mode
@@ -106,28 +148,41 @@ export async function spawnClaudeSession(
   if (mode === "initial") {
     prompt = buildInitialPrompt(task);
   } else if (mode === "review") {
-    prompt = buildReviewPrompt(task);
+    prompt = buildReviewPrompt(task, {
+      prStatus: task.pr_status,
+      baseBranch: agentConfig?.default_branch || "main",
+    });
   } else {
     prompt = buildCleanupPrompt(task);
   }
 
   // Build CLI args
-  const args: string[] = [
-    "-p",
-    prompt,
-    "--output-format",
-    "json",
-    "--json-schema",
-    AGENT_REPORT_SCHEMA,
-    "--permission-mode",
-    config.permission_mode,
-  ];
+  const args: string[] = [];
+  if (runtime === "codex") {
+    args.push("exec", "--json");
+    const schemaPath = writeSchemaFile(AGENT_REPORT_SCHEMA);
+    args.push("--output-schema", schemaPath);
+  } else {
+    args.push(
+      "-p",
+      prompt,
+      "--output-format",
+      "json",
+      "--json-schema",
+      AGENT_REPORT_SCHEMA
+    );
+  }
+  args.push(...buildPermissionArgs(runtime, permissionMode));
+
+  if (runtime === "codex") {
+    args.push(prompt);
+  }
 
   // For follow-ups, use --continue to resume the most recent session in this
   // worktree directory. Each task has its own worktree so there's no ambiguity.
   // --session-id and --resume both error with "already in use" for completed
   // sessions, but --continue resolves by directory and works reliably.
-  if (mode === "review" && task.session_id) {
+  if (runtime !== "codex" && mode === "review" && task.session_id) {
     args.push("--continue");
   }
 
@@ -136,8 +191,9 @@ export async function spawnClaudeSession(
   // Create or reuse a git worktree for isolation
   const cwd = ensureWorktree(task, repoPath, agentConfig?.default_branch || "main");
 
+  const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
   console.log(
-    `[claude-runner] Spawning session for task "${task.title}" (${task.id}) in worktree ${cwd}`
+    `[agent-runner] Spawning ${runtimeLabel} session for task "${task.title}" (${task.id}) in worktree ${cwd}`
   );
 
   // Capture submitted comment IDs before the run to detect mid-run additions
@@ -147,13 +203,14 @@ export async function spawnClaudeSession(
 
   // Stream session output to disk in real-time
   const sessionLog = createSessionLog(task.id);
-  console.log(`[claude-runner] Session log: ${sessionLog.path}`);
+  console.log(`[agent-runner] Session log: ${sessionLog.path}`);
 
   const spawnedAt = Date.now();
 
-  const child = spawn("claude", args, {
+  const envFile = resolveEnvPath(agentConfig, task.agent);
+  const child = spawn(runtime === "codex" ? "codex" : "claude", args, {
     cwd,
-    env: buildEnv(agentConfig?.env_file),
+    env: buildEnv(envFile),
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -177,9 +234,17 @@ export async function spawnClaudeSession(
     sessionLog.stderr.end();
     const durationMs = Date.now() - spawnedAt;
     console.log(
-      `[claude-runner] Session for task "${task.title}" exited with code ${code} (${Math.round(durationMs / 1000)}s)`
+      `[agent-runner] Session for task "${task.title}" exited with code ${code} (${Math.round(durationMs / 1000)}s)`
     );
-    await handleRunComplete(task.id, code, stdout, stderr, durationMs, preRunCommentIds);
+    await handleRunComplete(
+      task.id,
+      code,
+      stdout,
+      stderr,
+      durationMs,
+      preRunCommentIds,
+      runtime
+    );
     onComplete(task.id);
   });
 
@@ -187,7 +252,7 @@ export async function spawnClaudeSession(
     sessionLog.stdout.end();
     sessionLog.stderr.end();
     console.error(
-      `[claude-runner] Failed to spawn for task "${task.title}":`,
+      `[agent-runner] Failed to spawn for task "${task.title}":`,
       err
     );
     await updateTask(task.id, {
@@ -212,7 +277,7 @@ function slugify(title: string, maxLen: number): string {
 function ensureWorktree(task: Task, repoPath: string, defaultBranch: string): string {
   // Reuse existing worktree if it still exists on disk
   if (task.worktree_path && existsSync(task.worktree_path)) {
-    console.log(`[claude-runner] Reusing existing worktree at ${task.worktree_path}`);
+    console.log(`[agent-runner] Reusing existing worktree at ${task.worktree_path}`);
     return task.worktree_path;
   }
 
@@ -220,7 +285,7 @@ function ensureWorktree(task: Task, repoPath: string, defaultBranch: string): st
   try {
     execSync(`git fetch origin ${defaultBranch}`, { cwd: repoPath, stdio: "pipe" });
   } catch (err) {
-    console.error(`[claude-runner] git fetch failed:`, err);
+    console.error(`[agent-runner] git fetch failed:`, err);
   }
 
   // Worktrees live in a sibling directory: <repo>/../.worktrees/<slug>
@@ -239,7 +304,7 @@ function ensureWorktree(task: Task, repoPath: string, defaultBranch: string): st
   try {
     if (existsSync(worktreePath)) {
       // Worktree directory exists but wasn't tracked — reuse it and persist
-      console.log(`[claude-runner] Found worktree directory at ${worktreePath}`);
+      console.log(`[agent-runner] Found worktree directory at ${worktreePath}`);
       if (!task.worktree_path) {
         updateTask(task.id, { worktree_path: worktreePath, branch_name: branchName });
       }
@@ -260,9 +325,9 @@ function ensureWorktree(task: Task, repoPath: string, defaultBranch: string): st
       );
     }
 
-    console.log(`[claude-runner] Created worktree at ${worktreePath} (branch: ${branchName})`);
+    console.log(`[agent-runner] Created worktree at ${worktreePath} (branch: ${branchName})`);
   } catch (err) {
-    console.error(`[claude-runner] Failed to create worktree:`, err);
+    console.error(`[agent-runner] Failed to create worktree:`, err);
     // Fall back to the main repo path
     return repoPath;
   }
@@ -285,10 +350,73 @@ export function removeWorktree(task: Task): void {
       cwd: repoPath,
       stdio: "pipe",
     });
-    console.log(`[claude-runner] Removed worktree at ${task.worktree_path}`);
+    console.log(`[agent-runner] Removed worktree at ${task.worktree_path}`);
   } catch (err) {
-    console.error(`[claude-runner] Failed to remove worktree at ${task.worktree_path}:`, err);
+    console.error(`[agent-runner] Failed to remove worktree at ${task.worktree_path}:`, err);
   }
+}
+
+interface CodexEvent {
+  type: string;
+  thread_id?: string;
+  item?: {
+    type?: string;
+    text?: string;
+  };
+  usage?: {
+    input_tokens?: number;
+    cached_input_tokens?: number;
+    output_tokens?: number;
+  };
+}
+
+function parseCodexResult(stdout: string): ClaudeRunResult {
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const events = lines
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean) as CodexEvent[];
+  const threadEvent = events.find((evt) => evt.type === "thread.started");
+  const agentMessages = events.filter(
+    (evt) => evt.type === "item.completed" && evt.item?.type === "agent_message"
+  );
+  const finalMessage = agentMessages[agentMessages.length - 1];
+  let structured: AgentReport | undefined;
+  const resultText = finalMessage?.item?.text || "";
+  if (resultText) {
+    try {
+      structured = JSON.parse(resultText);
+    } catch {
+      structured = undefined;
+    }
+  }
+  const usageEvent = events.find((evt) => evt.type === "turn.completed");
+  const usage = usageEvent?.usage || {};
+  return {
+    type: "codex",
+    subtype: "exec",
+    is_error: false,
+    duration_ms: 0,
+    result: resultText || stdout,
+    session_id: threadEvent?.thread_id || "",
+    terminal_reason: "completed",
+    total_cost_usd: 0,
+    num_turns: 1,
+    structured_output: structured,
+    usage: {
+      input_tokens: usage.input_tokens || 0,
+      output_tokens: usage.output_tokens || 0,
+      cache_read_input_tokens: usage.cached_input_tokens || 0,
+    },
+  };
 }
 
 async function handleRunComplete(
@@ -297,10 +425,12 @@ async function handleRunComplete(
   stdout: string,
   _stderr: string,
   durationMs: number,
-  preRunCommentIds: number[]
+  preRunCommentIds: number[],
+  runtime: AgentRuntime
 ) {
   try {
-    const result: ClaudeRunResult = JSON.parse(stdout);
+    const result: ClaudeRunResult =
+      runtime === "codex" ? parseCodexResult(stdout) : JSON.parse(stdout);
 
     const inputTokens = (result.usage?.input_tokens || 0) + (result.usage?.cache_read_input_tokens || 0);
     const outputTokens = result.usage?.output_tokens || 0;
@@ -369,7 +499,7 @@ async function handleRunComplete(
       const newComments = postRunCommentIds.filter((id) => !preRunCommentIds.includes(id));
       if (newComments.length > 0) {
         console.log(
-          `[claude-runner] ${newComments.length} new comment(s) added during run for task ${taskId} — skipping hash update`
+          `[agent-runner] ${newComments.length} new comment(s) added during run for task ${taskId} — skipping hash update`
         );
       } else {
         const newHash = await getPRStateHash(prUrl);

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTask, updateTask, deleteTask } from "@/lib/store";
-import { removeWorktree } from "@/lib/claude-runner";
+import { removeWorktree } from "@/lib/agent-runner";
 
 export async function GET(
   _request: NextRequest,
