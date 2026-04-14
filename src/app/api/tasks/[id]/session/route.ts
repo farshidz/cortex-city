@@ -33,13 +33,13 @@ export async function GET(
   if (!task.session_id)
     return NextResponse.json({ error: "No session data" }, { status: 404 });
 
-  // Attempt to read Claude session files first
-  const claudeResult = loadClaudeSession(task);
-  if (claudeResult) return NextResponse.json(claudeResult);
-
-  if (task.agent_runner === "codex") {
+  const runtime = task.agent_runner || "claude";
+  if (runtime === "codex") {
     const codexResult = loadCodexSession(task);
     if (codexResult) return NextResponse.json(codexResult);
+  } else {
+    const claudeResult = loadClaudeSession(task);
+    if (claudeResult) return NextResponse.json(claudeResult);
   }
 
   return NextResponse.json({ error: "No session files found" }, { status: 404 });
