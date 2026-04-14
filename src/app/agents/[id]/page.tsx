@@ -88,6 +88,10 @@ export default function AgentDetailPage({
       </div>
     );
 
+  const normalizedPrompt = (agent.prompt_file || `.cortex/prompts/agents/${id}.md`).replace(/\\/g, "/");
+  const slashIndex = normalizedPrompt.lastIndexOf("/");
+  const envDisplayPath = `${slashIndex === -1 ? "" : `${normalizedPrompt.slice(0, slashIndex)}/`}.env.${id}`;
+
   function startEditConfig() {
     setConfigForm({
       name: agent!.name,
@@ -277,7 +281,7 @@ export default function AgentDetailPage({
             These are passed as environment variables when Claude runs. Stored
             locally in{" "}
             <code className="bg-muted px-1 rounded">
-              {agent.env_file || `.env.${id}`}
+              {envDisplayPath}
             </code>{" "}
             and never committed to git. A global{" "}
             <code className="bg-muted px-1 rounded">.env</code> is also loaded

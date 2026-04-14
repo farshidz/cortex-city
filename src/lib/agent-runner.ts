@@ -12,6 +12,7 @@ import type {
   AgentRuntime,
   PermissionMode,
 } from "./types";
+import { resolveEnvPath } from "./agent-files";
 
 const GLOBAL_ENV_FILE = path.join(process.cwd(), ".env");
 
@@ -176,9 +177,10 @@ export async function spawnAgentSession(
 
   const spawnedAt = Date.now();
 
+  const envFile = resolveEnvPath(agentConfig, task.agent);
   const child = spawn(runtime === "codex" ? "codex" : "claude", args, {
     cwd,
-    env: buildEnv(agentConfig?.env_file),
+    env: buildEnv(envFile),
     stdio: ["pipe", "pipe", "pipe"],
   });
 

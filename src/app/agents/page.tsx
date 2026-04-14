@@ -55,7 +55,6 @@ export default function AgentsPage() {
         [key]: {
           ...agentConfig,
           prompt_file,
-          ...(hasEnvVars ? { env_file: `.env.${key}` } : {}),
         },
       },
     };

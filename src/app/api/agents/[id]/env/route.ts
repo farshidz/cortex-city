@@ -1,17 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import path from "path";
-import { readConfig, writeConfig } from "@/lib/store";
-
-function getEnvPath(envFile: string): string {
-  return path.isAbsolute(envFile)
-    ? envFile
-    : path.join(process.cwd(), envFile);
-}
-
-function defaultEnvFile(id: string): string {
-  return `.cortex/prompts/agents/${id}.env`;
-}
+import { readConfig } from "@/lib/store";
+import { resolveEnvPath, relativeFromCwd } from "@/lib/agent-files";
 
 export async function GET(
   _request: NextRequest,
@@ -22,11 +13,7 @@ export async function GET(
   const agent = config.agents[id];
   if (!agent) return NextResponse.json({ error: "Agent not found" }, { status: 404 });
 
-  if (!agent.env_file) {
-    return NextResponse.json({ vars: {}, path: null });
-  }
-
-  const envPath = getEnvPath(agent.env_file);
+  const envPath = resolveEnvPath(agent, id);
   const vars: Record<string, string> = {};
   try {
     const content = readFileSync(envPath, "utf-8");
@@ -48,7 +35,7 @@ export async function GET(
   } catch {
     // File doesn't exist yet
   }
-  return NextResponse.json({ vars, path: agent.env_file });
+  return NextResponse.json({ vars, path: relativeFromCwd(envPath) });
 }
 
 export async function PUT(
@@ -60,16 +47,9 @@ export async function PUT(
   const agent = config.agents[id];
   if (!agent) return NextResponse.json({ error: "Agent not found" }, { status: 404 });
 
-  const { vars } = await request.json() as { vars: Record<string, string> };
+  const { vars } = (await request.json()) as { vars: Record<string, string> };
 
-  // Auto-create env_file path if not set
-  const envFile = agent.env_file || defaultEnvFile(id);
-  if (!agent.env_file) {
-    config.agents[id] = { ...agent, env_file: envFile };
-    await writeConfig(config);
-  }
-
-  const envPath = getEnvPath(envFile);
+  const envPath = resolveEnvPath(agent, id);
   const dir = path.dirname(envPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
@@ -80,5 +60,5 @@ export async function PUT(
   writeFileSync(envPath, lines.join("\n") + "\n", "utf-8");
 
   // Explicitly do NOT commit secrets
-  return NextResponse.json({ ok: true, path: envFile });
+  return NextResponse.json({ ok: true, path: relativeFromCwd(envPath) });
 }
