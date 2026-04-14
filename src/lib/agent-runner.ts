@@ -99,7 +99,9 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
       items: { type: "string" },
       description: "Recommended follow-up actions for the task owner",
     },
-    tool_calls: {
+  },
+  patternProperties: {
+    "^tool_calls$": {
       type: "object",
       description:
         "Optional tool invocations to request operator actions (only specify tools actually used)",
@@ -117,13 +119,19 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
                 type: "string",
                 description: "Agent ID (from settings) that should own this task",
               },
-              plan: { type: "string", description: "Optional execution plan" },
+            },
+            patternProperties: {
+              "^plan$": {
+                type: "string",
+                description: "Optional execution plan or checklist",
+              },
             },
             required: ["title", "description", "agent"],
             additionalProperties: false,
           },
         },
       },
+      required: ["create_task"],
       additionalProperties: false,
     },
   },
@@ -233,6 +241,17 @@ export async function spawnAgentSession(
   // Stream session output to disk in real-time
   const sessionLog = createSessionLog(task.id);
   console.log(`[agent-runner] Session log: ${sessionLog.path}`);
+
+  if (runtime === "codex") {
+    sessionLog.stdout.write(
+      `${JSON.stringify({
+        type: "prompt",
+        mode,
+        timestamp: new Date().toISOString(),
+        content: prompt,
+      })}\n`
+    );
+  }
 
   const spawnedAt = Date.now();
 
