@@ -93,7 +93,7 @@ async function poll() {
         !activePids.has(t.id) &&
         !t.current_run_pid &&
         Boolean(t.session_id) &&
-        (t.status === "open" || t.status === "in_progress" || t.status === "in_review")
+        (t.status === "open" || t.status === "in_progress")
     )
     .sort((a, b) =>
       new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime()
@@ -101,14 +101,13 @@ async function poll() {
 
   for (const task of resumableTasks) {
     if (availableSlots <= 0) break;
-    const mode = task.status === "in_review" ? "review" : "initial";
     console.log(
-      `[worker] Resuming task "${task.title}" (${task.id}) [${mode}]`
+      `[worker] Resuming task "${task.title}" (${task.id}) [initial]`
     );
     if (task.status === "open") {
       await updateTask(task.id, { status: "in_progress" });
     }
-    const { pid } = await spawnAgentSession(task, mode, (taskId: string) => {
+    const { pid } = await spawnAgentSession(task, "initial", (taskId: string) => {
       activePids.delete(taskId);
     });
     await updateTask(task.id, { current_run_pid: pid });
