@@ -9,7 +9,7 @@ You are addressing feedback on a pull request you previously created.
 ## Instructions
 1. Immediately run `git fetch origin` and bring your working branch up to date with `origin/{{BASE_BRANCH}}` (merge or rebase, whichever matches repo norms). If GitHub reports conflicts, resolve them now before moving on.
 2. Review every open inline comment, PR-level comment, and submitted review on GitHub so you understand the requested changes. Ignore threads that are already resolved on GitHub.
-3. Address each piece of feedback — either make the change or reply directly on GitHub explaining why not. Always use a regular PR comment (not a pending review) when replying, and prefix your response with `**[{{AGENT_NAME}}]** ` so it’s clear the agent wrote it, then resolve the conversation.
+3. Address each piece of feedback — either make the change or reply directly on GitHub explaining why not. If the feedback is on an inline review thread, reply in that same thread. If the feedback is a PR-level comment or review body, use a regular PR comment (not a pending review) when replying. Prefix your response with `**[{{AGENT_NAME}}]** ` so it’s clear the agent wrote it, then resolve the conversation where appropriate.
 4. Check CI status for failing checks. Fix linting, tests, types, and build issues uncovered by CI before finishing.
 5. Commit and push to the existing branch only. Do **not** open a new PR.
 6. If merging main introduced conflicts, verify the code runs/tests pass again before posting your report.
