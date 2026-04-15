@@ -9,7 +9,7 @@
     "worker": "tsx src/orchestrator-worker.ts",
     "worker:supervisor": "tsx src/orchestrator-supervisor.ts",
     "lint": "eslint",
-    "test": "tsx --test src/lib/**/*.test.ts",
+    "test": "node scripts/run-unit-tests.mjs",
     "test:integration": "node scripts/run-integration-tests.mjs",
     "test:integration:serial": "INTEGRATION_TEST_CONCURRENCY=1 node scripts/run-integration-tests.mjs"
   },
