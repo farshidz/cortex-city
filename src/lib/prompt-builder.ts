@@ -47,6 +47,22 @@ export function buildInitialPrompt(task: Task): string {
   return appendManualInstruction(prompt, task);
 }
 
+export function buildResumePrompt(
+  task: Task,
+  mode: "initial" | "review"
+): string {
+  const manualInstruction = task.pending_manual_instruction?.trim();
+  if (manualInstruction) {
+    return `Continue this existing session and follow the manual instruction below.\n\n## Manual Instruction\n\n${manualInstruction}`;
+  }
+
+  if (mode === "review") {
+    return "Continue this existing session. Re-check the PR state, review feedback, mergeability, and CI, then continue from where you left off.";
+  }
+
+  return "Continue this existing session from where you left off and keep working on the task.";
+}
+
 function describeMergeStatus(status?: string): string {
   switch (status) {
     case "conflicts":

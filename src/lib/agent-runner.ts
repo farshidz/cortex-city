@@ -4,7 +4,12 @@ import path from "path";
 import os from "os";
 import { nanoid } from "nanoid";
 import { readConfig, updateTask, createTask } from "./store";
-import { buildInitialPrompt, buildReviewPrompt, buildCleanupPrompt } from "./prompt-builder";
+import {
+  buildInitialPrompt,
+  buildReviewPrompt,
+  buildCleanupPrompt,
+  buildResumePrompt,
+} from "./prompt-builder";
 import { getPRStateHash, getSubmittedCommentIds } from "./github";
 import { createSessionLog } from "./logger";
 import type {
@@ -183,7 +188,9 @@ export async function spawnAgentSession(
 
   // Build prompt based on mode
   let prompt: string;
-  if (mode === "initial") {
+  if (shouldResume) {
+    prompt = buildResumePrompt(task, mode);
+  } else if (mode === "initial") {
     prompt = buildInitialPrompt(task);
   } else if (mode === "review") {
     prompt = buildReviewPrompt(task, {
@@ -250,7 +257,7 @@ export async function spawnAgentSession(
     sessionLog.stdout.write(
       `${JSON.stringify({
         type: "prompt",
-        mode,
+        mode: shouldResume ? "resume" : mode,
         timestamp: new Date().toISOString(),
         content: prompt,
       })}\n`
