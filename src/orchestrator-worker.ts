@@ -93,6 +93,7 @@ async function poll() {
         !activePids.has(t.id) &&
         !t.current_run_pid &&
         Boolean(t.session_id) &&
+        Boolean(t.resume_requested || t.pending_manual_instruction) &&
         (t.status === "open" || t.status === "in_progress")
     )
     .sort((a, b) =>
@@ -110,7 +111,11 @@ async function poll() {
     const { pid } = await spawnAgentSession(task, "initial", (taskId: string) => {
       activePids.delete(taskId);
     });
-    await updateTask(task.id, { current_run_pid: pid });
+    await updateTask(task.id, {
+      current_run_pid: pid,
+      resume_requested: undefined,
+      pending_manual_instruction: undefined,
+    });
     activePids.set(task.id, pid);
     availableSlots--;
   }
@@ -119,7 +124,11 @@ async function poll() {
 
   // Pick open tasks
   const openTasks = tasks
-    .filter((t) => t.status === "open" && !t.session_id)
+    .filter(
+      (t) =>
+        t.status === "open" &&
+        (!t.session_id || Boolean(t.pending_manual_instruction))
+    )
     .sort((a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
     );
@@ -131,7 +140,10 @@ async function poll() {
     const { pid } = await spawnAgentSession(task, "initial", (taskId: string) => {
       activePids.delete(taskId);
     });
-    await updateTask(task.id, { current_run_pid: pid });
+    await updateTask(task.id, {
+      current_run_pid: pid,
+      pending_manual_instruction: undefined,
+    });
     activePids.set(task.id, pid);
     availableSlots--;
   }
@@ -146,6 +158,8 @@ async function poll() {
   await Promise.all(
     inReviewTasks.map(async (task) => {
       try {
+        const hasManualInstruction = Boolean(task.pending_manual_instruction);
+
         // Check merged/closed first (1 API call)
         const prState = await isPRMergedOrClosed(task.pr_url);
         if (prState) {
@@ -163,14 +177,16 @@ async function poll() {
         }
 
         // Skip if checks pending, active session, or no PR
-        if (prStatus === "checks_pending") return;
+        if (prStatus === "checks_pending" && !hasManualInstruction) return;
         if (activePids.has(task.id)) return;
 
         const ghState = await getPRStateHash(task.pr_url);
-        if (!ghState) return; // API failed — skip
+        if (!ghState && !hasManualInstruction) return; // API failed — skip
 
         const hasConflicts = prStatus === "conflicts";
-        if (!hasConflicts && ghState === task.last_review_gh_state) return;
+        if (!hasManualInstruction && !hasConflicts && ghState === task.last_review_gh_state) {
+          return;
+        }
 
         tasksToReview.push(task);
       } catch (err) {
@@ -186,7 +202,10 @@ async function poll() {
     const { pid } = await spawnAgentSession(task, "review", (taskId: string) => {
       activePids.delete(taskId);
     });
-    await updateTask(task.id, { current_run_pid: pid });
+    await updateTask(task.id, {
+      current_run_pid: pid,
+      pending_manual_instruction: undefined,
+    });
     activePids.set(task.id, pid);
     availableSlots--;
   }

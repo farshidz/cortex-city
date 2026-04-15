@@ -62,7 +62,10 @@ export function getOrchestrator() {
       const task = tasks.find((t) => t.id === taskId);
       const pid = task?.current_run_pid;
       if (!pid) return false;
-      const updates: Partial<Task> = { current_run_pid: undefined };
+      const updates: Partial<Task> = {
+        current_run_pid: undefined,
+        resume_requested: true,
+      };
       try {
         process.kill(pid, "SIGTERM");
         setTimeout(() => {
@@ -77,6 +80,15 @@ export function getOrchestrator() {
         return false;
       }
     },
-
+    requestPoll(): boolean {
+      const state = readWorkerState();
+      if (!state.running || !state.pid) return false;
+      try {
+        process.kill(state.pid, "SIGUSR1");
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }
