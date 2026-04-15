@@ -185,7 +185,7 @@ export async function spawnAgentSession(
   const permissionMode: PermissionMode =
     task.permission_mode || config.default_permission_mode || "bypassPermissions";
   const agentConfig = config.agents[task.agent];
-  const shouldResume = mode !== "cleanup" && Boolean(task.session_id);
+  const shouldResume = Boolean(task.session_id);
   const hasManualInstruction = Boolean(task.pending_manual_instruction?.trim());
   const isResumeAfterKill = Boolean(task.resume_requested);
   const runReason =
