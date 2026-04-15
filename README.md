@@ -224,6 +224,22 @@ npm run worker
 
 Then open `http://localhost:3000`.
 
+## Tests
+
+Run the fast library test suite:
+
+```bash
+npm test
+```
+
+Run the isolated integration suite:
+
+```bash
+npm run test:integration
+```
+
+Integration tests spin up temporary repositories, fake `codex` and `claude` CLIs, and the real orchestrator worker. The runner executes test files in parallel by default; set `INTEGRATION_TEST_CONCURRENCY=1` or use `npm run test:integration:serial` if you need a single-worker run.
+
 ## Local State
 
 Cortex City keeps its local runtime state under `.cortex/`.

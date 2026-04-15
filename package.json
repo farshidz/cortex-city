@@ -9,7 +9,9 @@
     "worker": "tsx src/orchestrator-worker.ts",
     "worker:supervisor": "tsx src/orchestrator-supervisor.ts",
     "lint": "eslint",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test src/lib/**/*.test.ts",
+    "test:integration": "node scripts/run-integration-tests.mjs",
+    "test:integration:serial": "INTEGRATION_TEST_CONCURRENCY=1 node scripts/run-integration-tests.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
