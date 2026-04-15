@@ -159,36 +159,45 @@ function loadCodexSession(task: Task) {
   if (!existsSync(LOGS_DIR)) return null;
   const logFiles = readdirSync(LOGS_DIR)
     .filter((file) => file.startsWith(`task-${task.id}-`) && file.endsWith(".log"))
-    .sort()
-    .reverse();
+    .sort();
+  const messages: CodexSessionMessage[] = [];
+  let sessionId: string | undefined;
+  let matched = false;
   for (const file of logFiles) {
     const fullPath = path.join(LOGS_DIR, file);
     const content = readFileSync(fullPath, "utf-8");
     if (task.session_id && !content.includes(task.session_id)) continue;
     const startTimestamp = parseCodexStartTimestamp(content) || task.last_run_at;
     const parsed = parseCodexLog(content, startTimestamp);
-    if (parsed) {
-      let messages = parsed.messages;
-      const hasUser = messages.some((msg) => msg.role === "user");
-      if (!hasUser) {
-        const fallbackUser: SessionMessage = {
-          role: "user",
+    if (!parsed) continue;
+    matched = true;
+    if (!sessionId && parsed.sessionId) {
+      sessionId = parsed.sessionId;
+    }
+    messages.push(...parsed.messages);
+  }
+  if (!matched) return null;
+
+  const hasUser = messages.some((msg) => msg.role === "user");
+  const mergedMessages = hasUser
+    ? messages
+    : [
+        {
+          role: "user" as const,
           content:
             task.description ||
             "Task description unavailable. See task page for details.",
-          timestamp: startTimestamp || task.created_at,
-        };
-        messages = [fallbackUser, ...messages];
-      }
-      return {
-        session_id: parsed.sessionId || task.session_id,
-        message_count: messages.length,
-        messages,
-        agent_runner: "codex" as const,
-      };
-    }
-  }
-  return null;
+          timestamp: task.created_at,
+        },
+        ...messages,
+      ];
+
+  return {
+    session_id: sessionId || task.session_id,
+    message_count: mergedMessages.length,
+    messages: mergedMessages,
+    agent_runner: "codex" as const,
+  };
 }
 
 function parseCodexStartTimestamp(content: string): string | undefined {
