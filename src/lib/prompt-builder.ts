@@ -45,6 +45,14 @@ export function buildInitialPrompt(task: Task): string {
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 
+export function buildContinuePrompt(): string {
+  return "continue";
+}
+
+export function buildManualInstructionPrompt(task: Task): string {
+  return task.pending_manual_instruction?.trim() || "";
+}
+
 function describeMergeStatus(status?: string): string {
   switch (status) {
     case "conflicts":

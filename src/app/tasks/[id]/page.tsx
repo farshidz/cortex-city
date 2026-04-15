@@ -64,6 +64,9 @@ export default function TaskDetailPage({
   const [notes, setNotes] = useState<string | undefined>(undefined);
   const [savingNotes, setSavingNotes] = useState(false);
   const [notesDirty, setNotesDirty] = useState(false);
+  const [manualInstruction, setManualInstruction] = useState("");
+  const [sendingInstruction, setSendingInstruction] = useState(false);
+  const [instructionError, setInstructionError] = useState<string | null>(null);
 
   function startEdit() {
     setForm({
@@ -99,21 +102,33 @@ export default function TaskDetailPage({
     mutate();
   }
 
-  async function runNow() {
-    await fetch("/api/orchestrator", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "poll_now" }),
-    });
-    mutate();
-  }
-
   async function killSession() {
     await fetch("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ task_id: id }),
     });
+    mutate();
+  }
+
+  async function submitManualInstruction() {
+    const instruction = manualInstruction.trim();
+    if (!instruction) return;
+    setSendingInstruction(true);
+    setInstructionError(null);
+    const response = await fetch(`/api/tasks/${id}/instruction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      setInstructionError(body.error || "Failed to queue manual instruction");
+      setSendingInstruction(false);
+      return;
+    }
+    setManualInstruction("");
+    setSendingInstruction(false);
     mutate();
   }
 
@@ -333,11 +348,6 @@ export default function TaskDetailPage({
                   </Select>
                 </div>
 
-                {task.status === "open" && (
-                  <Button size="sm" onClick={runNow}>
-                    Run Now
-                  </Button>
-                )}
                 {task.current_run_pid && (
                   <Button
                     size="sm"
@@ -472,6 +482,55 @@ export default function TaskDetailPage({
               </CardContent>
             </Card>
           )}
+
+          {/* Notes */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Manual Instruction</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {task.pending_manual_instruction ? (
+                <>
+                  <div className="rounded-md border bg-muted p-3 text-sm whitespace-pre-wrap">
+                    {task.pending_manual_instruction}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    A manual instruction is already pending. It will be sent when the
+                    agent next runs.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <textarea
+                    className="w-full min-h-[96px] rounded-md border bg-transparent px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                    value={manualInstruction}
+                    onChange={(e) => setManualInstruction(e.target.value)}
+                    placeholder={
+                      task.current_run_pid
+                        ? "Queue one instruction for the next run..."
+                        : "Send one instruction and trigger the agent..."
+                    }
+                  />
+                  <div className="flex items-center gap-3">
+                    <Button
+                      onClick={submitManualInstruction}
+                      disabled={sendingInstruction || !manualInstruction.trim()}
+                    >
+                      {sendingInstruction ? "Sending..." : "Send Instruction"}
+                    </Button>
+                    <p className="text-xs text-muted-foreground">
+                      {task.current_run_pid
+                        ? "This will be sent after the current run finishes."
+                        : "This will wake the worker and trigger a run."}
+                    </p>
+                  </div>
+                </>
+              )}
+              {instructionError && (
+                <p className="text-sm text-red-700">{instructionError}</p>
+              )}
+            </CardContent>
+          </Card>
 
           {/* Notes */}
           <Card>

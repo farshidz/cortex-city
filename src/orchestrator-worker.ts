@@ -87,9 +87,48 @@ async function poll() {
   let availableSlots = config.max_parallel_sessions - activePids.size;
   if (availableSlots <= 0) return;
 
+  const resumableTasks = tasks
+    .filter(
+      (t) =>
+        !activePids.has(t.id) &&
+        !t.current_run_pid &&
+        Boolean(t.session_id) &&
+        Boolean(t.resume_requested || t.pending_manual_instruction) &&
+        (t.status === "open" || t.status === "in_progress")
+    )
+    .sort((a, b) =>
+      new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime()
+    );
+
+  for (const task of resumableTasks) {
+    if (availableSlots <= 0) break;
+    console.log(
+      `[worker] Resuming task "${task.title}" (${task.id}) [initial]`
+    );
+    if (task.status === "open") {
+      await updateTask(task.id, { status: "in_progress" });
+    }
+    const { pid } = await spawnAgentSession(task, "initial", (taskId: string) => {
+      activePids.delete(taskId);
+    });
+    await updateTask(task.id, {
+      current_run_pid: pid,
+      resume_requested: undefined,
+      pending_manual_instruction: undefined,
+    });
+    activePids.set(task.id, pid);
+    availableSlots--;
+  }
+
+  if (availableSlots <= 0) return;
+
   // Pick open tasks
   const openTasks = tasks
-    .filter((t) => t.status === "open")
+    .filter(
+      (t) =>
+        t.status === "open" &&
+        (!t.session_id || Boolean(t.pending_manual_instruction))
+    )
     .sort((a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
     );
@@ -101,7 +140,10 @@ async function poll() {
     const { pid } = await spawnAgentSession(task, "initial", (taskId: string) => {
       activePids.delete(taskId);
     });
-    await updateTask(task.id, { current_run_pid: pid });
+    await updateTask(task.id, {
+      current_run_pid: pid,
+      pending_manual_instruction: undefined,
+    });
     activePids.set(task.id, pid);
     availableSlots--;
   }
@@ -116,6 +158,8 @@ async function poll() {
   await Promise.all(
     inReviewTasks.map(async (task) => {
       try {
+        const hasManualInstruction = Boolean(task.pending_manual_instruction);
+
         // Check merged/closed first (1 API call)
         const prState = await isPRMergedOrClosed(task.pr_url);
         if (prState) {
@@ -133,14 +177,16 @@ async function poll() {
         }
 
         // Skip if checks pending, active session, or no PR
-        if (prStatus === "checks_pending") return;
+        if (prStatus === "checks_pending" && !hasManualInstruction) return;
         if (activePids.has(task.id)) return;
 
         const ghState = await getPRStateHash(task.pr_url);
-        if (!ghState) return; // API failed — skip
+        if (!ghState && !hasManualInstruction) return; // API failed — skip
 
         const hasConflicts = prStatus === "conflicts";
-        if (!hasConflicts && ghState === task.last_review_gh_state) return;
+        if (!hasManualInstruction && !hasConflicts && ghState === task.last_review_gh_state) {
+          return;
+        }
 
         tasksToReview.push(task);
       } catch (err) {
@@ -156,7 +202,10 @@ async function poll() {
     const { pid } = await spawnAgentSession(task, "review", (taskId: string) => {
       activePids.delete(taskId);
     });
-    await updateTask(task.id, { current_run_pid: pid });
+    await updateTask(task.id, {
+      current_run_pid: pid,
+      pending_manual_instruction: undefined,
+    });
     activePids.set(task.id, pid);
     availableSlots--;
   }
@@ -165,13 +214,33 @@ async function poll() {
 // Track active sessions
 const activePids = new Map<string, number>();
 const STATE_FILE = path.join(CORTEX_DIR, "orchestrator-state.json");
+let pollInFlight: Promise<void> | null = null;
 
 function writeState(lastPollAt: string | null) {
   writeJSON(STATE_FILE, {
     running: true,
     active_sessions: activePids.size,
     last_poll_at: lastPollAt,
+    pid: process.pid,
   });
+}
+
+async function runPollCycle() {
+  if (pollInFlight) return pollInFlight;
+  pollInFlight = (async () => {
+    const pollTime = new Date().toISOString();
+    try {
+      await poll();
+    } catch (err) {
+      console.error("[worker] Poll error:", err);
+    }
+    writeState(pollTime);
+  })();
+  try {
+    await pollInFlight;
+  } finally {
+    pollInFlight = null;
+  }
 }
 
 // Main loop
@@ -182,16 +251,15 @@ async function main() {
   writeState(null);
 
   while (true) {
-    const pollTime = new Date().toISOString();
-    try {
-      await poll();
-    } catch (err) {
-      console.error("[worker] Poll error:", err);
-    }
-    writeState(pollTime);
+    await runPollCycle();
     await new Promise((r) => setTimeout(r, interval));
   }
 }
+
+process.on("SIGUSR1", () => {
+  console.log("[worker] Immediate poll requested");
+  void runPollCycle();
+});
 
 // Graceful shutdown
 process.on("SIGINT", () => {
@@ -201,7 +269,12 @@ process.on("SIGINT", () => {
       process.kill(pid, "SIGTERM");
     } catch {}
   }
-  writeJSON(STATE_FILE, { running: false, active_sessions: 0, last_poll_at: null });
+  writeJSON(STATE_FILE, {
+    running: false,
+    active_sessions: 0,
+    last_poll_at: null,
+    pid: process.pid,
+  });
   process.exit(0);
 });
 process.on("SIGTERM", () => process.exit(0));

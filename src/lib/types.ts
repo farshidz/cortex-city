@@ -36,6 +36,8 @@ export interface Task {
   branch_name?: string;
   worktree_path?: string;
   current_run_pid?: number;
+  resume_requested?: boolean;
+  pending_manual_instruction?: string;
   last_run_at?: string;
   last_run_result?: "success" | "error" | "timeout" | "budget_exceeded";
   last_run_input_tokens?: number;

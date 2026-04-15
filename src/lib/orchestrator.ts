@@ -12,6 +12,7 @@ interface WorkerState {
   running: boolean;
   active_sessions: number;
   last_poll_at: string | null;
+  pid?: number;
 }
 
 function readWorkerState(): WorkerState {
@@ -61,6 +62,10 @@ export function getOrchestrator() {
       const task = tasks.find((t) => t.id === taskId);
       const pid = task?.current_run_pid;
       if (!pid) return false;
+      const updates: Partial<Task> = {
+        current_run_pid: undefined,
+        resume_requested: true,
+      };
       try {
         process.kill(pid, "SIGTERM");
         setTimeout(() => {
@@ -68,17 +73,22 @@ export function getOrchestrator() {
             process.kill(pid, "SIGKILL");
           } catch {}
         }, 5000);
-        updateTask(taskId, { current_run_pid: undefined });
+        updateTask(taskId, updates);
         return true;
       } catch {
-        updateTask(taskId, { current_run_pid: undefined });
+        updateTask(taskId, updates);
         return false;
       }
     },
-
-    pollNow() {
-      // Worker polls on its own schedule — this is a no-op now
-      console.log("[orchestrator] pollNow called — worker polls independently");
+    requestPoll(): boolean {
+      const state = readWorkerState();
+      if (!state.running || !state.pid) return false;
+      try {
+        process.kill(state.pid, "SIGUSR1");
+        return true;
+      } catch {
+        return false;
+      }
     },
   };
 }
