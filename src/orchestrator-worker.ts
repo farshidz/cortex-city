@@ -87,9 +87,40 @@ async function poll() {
   let availableSlots = config.max_parallel_sessions - activePids.size;
   if (availableSlots <= 0) return;
 
+  const resumableTasks = tasks
+    .filter(
+      (t) =>
+        !activePids.has(t.id) &&
+        !t.current_run_pid &&
+        Boolean(t.session_id) &&
+        (t.status === "open" || t.status === "in_progress" || t.status === "in_review")
+    )
+    .sort((a, b) =>
+      new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime()
+    );
+
+  for (const task of resumableTasks) {
+    if (availableSlots <= 0) break;
+    const mode = task.status === "in_review" ? "review" : "initial";
+    console.log(
+      `[worker] Resuming task "${task.title}" (${task.id}) [${mode}]`
+    );
+    if (task.status === "open") {
+      await updateTask(task.id, { status: "in_progress" });
+    }
+    const { pid } = await spawnAgentSession(task, mode, (taskId: string) => {
+      activePids.delete(taskId);
+    });
+    await updateTask(task.id, { current_run_pid: pid });
+    activePids.set(task.id, pid);
+    availableSlots--;
+  }
+
+  if (availableSlots <= 0) return;
+
   // Pick open tasks
   const openTasks = tasks
-    .filter((t) => t.status === "open")
+    .filter((t) => t.status === "open" && !t.session_id)
     .sort((a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
     );
@@ -165,13 +196,33 @@ async function poll() {
 // Track active sessions
 const activePids = new Map<string, number>();
 const STATE_FILE = path.join(CORTEX_DIR, "orchestrator-state.json");
+let pollInFlight: Promise<void> | null = null;
 
 function writeState(lastPollAt: string | null) {
   writeJSON(STATE_FILE, {
     running: true,
     active_sessions: activePids.size,
     last_poll_at: lastPollAt,
+    pid: process.pid,
   });
+}
+
+async function runPollCycle() {
+  if (pollInFlight) return pollInFlight;
+  pollInFlight = (async () => {
+    const pollTime = new Date().toISOString();
+    try {
+      await poll();
+    } catch (err) {
+      console.error("[worker] Poll error:", err);
+    }
+    writeState(pollTime);
+  })();
+  try {
+    await pollInFlight;
+  } finally {
+    pollInFlight = null;
+  }
 }
 
 // Main loop
@@ -182,16 +233,15 @@ async function main() {
   writeState(null);
 
   while (true) {
-    const pollTime = new Date().toISOString();
-    try {
-      await poll();
-    } catch (err) {
-      console.error("[worker] Poll error:", err);
-    }
-    writeState(pollTime);
+    await runPollCycle();
     await new Promise((r) => setTimeout(r, interval));
   }
 }
+
+process.on("SIGUSR1", () => {
+  console.log("[worker] Immediate poll requested");
+  void runPollCycle();
+});
 
 // Graceful shutdown
 process.on("SIGINT", () => {
@@ -201,7 +251,12 @@ process.on("SIGINT", () => {
       process.kill(pid, "SIGTERM");
     } catch {}
   }
-  writeJSON(STATE_FILE, { running: false, active_sessions: 0, last_poll_at: null });
+  writeJSON(STATE_FILE, {
+    running: false,
+    active_sessions: 0,
+    last_poll_at: null,
+    pid: process.pid,
+  });
   process.exit(0);
 });
 process.on("SIGTERM", () => process.exit(0));

@@ -32,15 +32,6 @@ export default function SessionsPage() {
     return () => clearInterval(interval);
   }, []);
 
-  async function pollNow() {
-    await fetch("/api/orchestrator", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "poll_now" }),
-    });
-    mutateSessions();
-  }
-
   async function killSession(taskId: string) {
     await fetch("/api/sessions", {
       method: "POST",
@@ -61,9 +52,6 @@ export default function SessionsPage() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">Sessions</h1>
-        <Button variant="outline" onClick={pollNow}>
-          Poll Now
-        </Button>
       </div>
 
       {/* Status bar */}

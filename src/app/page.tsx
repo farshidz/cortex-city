@@ -75,13 +75,14 @@ export default function TasksPage() {
     mutate();
   }
 
-  async function triggerAgent(id: string) {
-    // Clear the GH state hash to force the worker to pick it up on next poll
-    await fetch(`/api/tasks/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ last_review_gh_state: null }),
-    });
+  async function triggerAgent(task: Task) {
+    if (!task.session_id) {
+      await fetch(`/api/tasks/${task.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ last_review_gh_state: null }),
+      });
+    }
     mutate();
   }
 
@@ -200,8 +201,8 @@ export default function TasksPage() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => triggerAgent(task.id)}
-                      title="Trigger agent review"
+                      onClick={() => triggerAgent(task)}
+                      title={task.session_id ? "Resume agent session" : "Trigger agent review"}
                     >
                       <Play className="size-3.5" />
                     </Button>

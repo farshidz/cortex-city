@@ -179,6 +179,7 @@ export async function spawnAgentSession(
   const permissionMode: PermissionMode =
     task.permission_mode || config.default_permission_mode || "bypassPermissions";
   const agentConfig = config.agents[task.agent];
+  const shouldResume = mode !== "cleanup" && Boolean(task.session_id);
 
   // Build prompt based on mode
   let prompt: string;
@@ -196,9 +197,13 @@ export async function spawnAgentSession(
   // Build CLI args
   const args: string[] = [];
   if (runtime === "codex") {
-    args.push("exec", "--json");
-    const schemaPath = writeSchemaFile(AGENT_REPORT_SCHEMA);
-    args.push("--output-schema", schemaPath);
+    if (shouldResume) {
+      args.push("exec", "resume", "--json");
+    } else {
+      args.push("exec", "--json");
+      const schemaPath = writeSchemaFile(AGENT_REPORT_SCHEMA);
+      args.push("--output-schema", schemaPath);
+    }
   } else {
     args.push(
       "-p",
@@ -212,15 +217,14 @@ export async function spawnAgentSession(
   args.push(...buildPermissionArgs(runtime, permissionMode));
 
   if (runtime === "codex") {
+    if (shouldResume && task.session_id) {
+      args.push(task.session_id);
+    }
     args.push(prompt);
   }
 
-  // For follow-ups, use --continue to resume the most recent session in this
-  // worktree directory. Each task has its own worktree so there's no ambiguity.
-  // --session-id and --resume both error with "already in use" for completed
-  // sessions, but --continue resolves by directory and works reliably.
-  if (runtime !== "codex" && mode === "review" && task.session_id) {
-    args.push("--continue");
+  if (runtime !== "codex" && shouldResume && task.session_id) {
+    args.push("--resume", task.session_id);
   }
 
   const repoPath = agentConfig?.repo_path || process.cwd();
@@ -262,13 +266,43 @@ export async function spawnAgentSession(
     stdio: ["pipe", "pipe", "pipe"],
   });
 
+  // We pass prompts via args, so leaving stdin open only creates delays or hangs.
+  child.stdin?.end();
+
   let stdout = "";
   let stderr = "";
+  let stdoutLineBuffer = "";
+  let capturedSessionId = false;
 
   child.stdout?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
     stdout += text;
     sessionLog.stdout.write(text);
+
+    // Capture Codex session/thread ID as soon as it appears so the UI can show
+    // live session data while the run is still active.
+    if (runtime === "codex" && !capturedSessionId) {
+      stdoutLineBuffer += text;
+      const lines = stdoutLineBuffer.split(/\r?\n/);
+      stdoutLineBuffer = lines.pop() || "";
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        try {
+          const evt = JSON.parse(line) as {
+            type?: string;
+            thread_id?: string;
+          };
+          if (evt.type === "thread.started" && evt.thread_id) {
+            capturedSessionId = true;
+            void updateTask(task.id, { session_id: evt.thread_id });
+            break;
+          }
+        } catch {
+          // Ignore non-JSON lines
+        }
+      }
+    }
   });
 
   child.stderr?.on("data", (chunk: Buffer) => {
@@ -376,8 +410,9 @@ function ensureWorktree(task: Task, repoPath: string, defaultBranch: string): st
     console.log(`[agent-runner] Created worktree at ${worktreePath} (branch: ${branchName})`);
   } catch (err) {
     console.error(`[agent-runner] Failed to create worktree:`, err);
-    // Fall back to the main repo path
-    return repoPath;
+    throw err instanceof Error
+      ? err
+      : new Error("Failed to create worktree");
   }
 
   // Persist worktree path and branch name to task
@@ -571,6 +606,9 @@ async function handleRunComplete(
     // Accumulate costs and run count
     const { getTask } = await import("./store");
     const currentTask = await getTask(taskId);
+    if (!updates.session_id && currentTask?.session_id) {
+      updates.session_id = currentTask.session_id;
+    }
     if (currentTask) {
       updates.total_input_tokens =
         (currentTask.total_input_tokens || 0) + inputTokens;

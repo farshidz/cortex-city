@@ -31,10 +31,10 @@ export async function GET(
   const task = await getTask(id);
   if (!task)
     return NextResponse.json({ error: "Task not found" }, { status: 404 });
-  if (!task.session_id)
-    return NextResponse.json({ error: "No session data" }, { status: 404 });
 
   const runtime = task.agent_runner || "claude";
+  if (!task.session_id && runtime !== "codex")
+    return NextResponse.json({ error: "No session data" }, { status: 404 });
   if (runtime === "codex") {
     const codexResult = loadCodexSession(task);
     if (codexResult) return NextResponse.json(codexResult);

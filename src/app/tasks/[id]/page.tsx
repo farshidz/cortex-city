@@ -99,15 +99,6 @@ export default function TaskDetailPage({
     mutate();
   }
 
-  async function runNow() {
-    await fetch("/api/orchestrator", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "poll_now" }),
-    });
-    mutate();
-  }
-
   async function killSession() {
     await fetch("/api/sessions", {
       method: "POST",
@@ -333,11 +324,6 @@ export default function TaskDetailPage({
                   </Select>
                 </div>
 
-                {task.status === "open" && (
-                  <Button size="sm" onClick={runNow}>
-                    Run Now
-                  </Button>
-                )}
                 {task.current_run_pid && (
                   <Button
                     size="sm"
