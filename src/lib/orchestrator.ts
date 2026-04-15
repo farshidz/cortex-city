@@ -12,7 +12,22 @@ interface WorkerState {
   running: boolean;
   active_sessions: number;
   last_poll_at: string | null;
+  last_heartbeat_at: string | null;
+  started_at: string | null;
+  poll_started_at: string | null;
+  poll_finished_at: string | null;
+  poll_in_progress: boolean;
   pid?: number;
+}
+
+function isPidAlive(pid?: number): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function readWorkerState(): WorkerState {
@@ -21,11 +36,35 @@ function readWorkerState(): WorkerState {
       return JSON.parse(readFileSync(STATE_FILE, "utf-8"));
     }
   } catch {}
-  return { running: false, active_sessions: 0, last_poll_at: null };
+  return {
+    running: false,
+    active_sessions: 0,
+    last_poll_at: null,
+    last_heartbeat_at: null,
+    started_at: null,
+    poll_started_at: null,
+    poll_finished_at: null,
+    poll_in_progress: false,
+  };
 }
 
 function hasActivePid(task: Task): task is Task & { current_run_pid: number } {
   return typeof task.current_run_pid === "number";
+}
+
+function getLiveActiveSessions(tasks: Task[]): ActiveSession[] {
+  return tasks
+    .filter(hasActivePid)
+    .filter((task) => isPidAlive(task.current_run_pid))
+    .map((t) => ({
+      task_id: t.id,
+      task_title: t.title,
+      agent: t.agent,
+      session_id: t.session_id || "unknown",
+      pid: t.current_run_pid,
+      started_at: t.last_run_at || t.updated_at,
+      status: "running" as const,
+    }));
 }
 
 export function getOrchestrator() {
@@ -33,28 +72,24 @@ export function getOrchestrator() {
     getStatus(): OrchestratorStatus {
       const config = readConfig();
       const state = readWorkerState();
+      const activeSessions = getLiveActiveSessions(readTasks());
+      const healthy = isPidAlive(state.pid);
       return {
-        running: state.running,
-        active_sessions: state.active_sessions,
+        running: state.running && healthy,
+        healthy,
+        active_sessions: activeSessions.length,
         max_sessions: config.max_parallel_sessions,
         last_poll_at: state.last_poll_at,
+        last_heartbeat_at: state.last_heartbeat_at,
+        started_at: state.started_at,
+        poll_started_at: state.poll_started_at,
+        poll_finished_at: state.poll_finished_at,
+        poll_in_progress: healthy ? state.poll_in_progress : false,
       };
     },
 
     getActiveSessions(): ActiveSession[] {
-      // Active sessions are tracked by PIDs in tasks.json
-      const tasks = readTasks();
-      return tasks
-        .filter(hasActivePid)
-        .map((t) => ({
-          task_id: t.id,
-          task_title: t.title,
-          agent: t.agent,
-          session_id: t.session_id || "unknown",
-          pid: t.current_run_pid,
-          started_at: t.last_run_at || t.updated_at,
-          status: "running" as const,
-        }));
+      return getLiveActiveSessions(readTasks());
     },
 
     killSession(taskId: string): boolean {
@@ -82,9 +117,10 @@ export function getOrchestrator() {
     },
     requestPoll(): boolean {
       const state = readWorkerState();
-      if (!state.running || !state.pid) return false;
+      const pid = state.pid;
+      if (!state.running || pid === undefined || !isPidAlive(pid)) return false;
       try {
-        process.kill(state.pid, "SIGUSR1");
+        process.kill(pid, "SIGUSR1");
         return true;
       } catch {
         return false;

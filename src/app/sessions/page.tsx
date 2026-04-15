@@ -60,8 +60,12 @@ export default function SessionsPage() {
           <div className="flex items-center gap-6 text-sm">
             <div className="flex items-center gap-2">
               <span className="text-muted-foreground">Status:</span>
-              <Badge variant={status?.running ? "default" : "secondary"}>
-                {status?.running ? "Running" : "Stopped"}
+              <Badge variant={status?.healthy ? "default" : "destructive"}>
+                {status?.healthy
+                  ? status?.poll_in_progress
+                    ? "Polling"
+                    : "Running"
+                  : "Stopped"}
               </Badge>
             </div>
             <div>
@@ -76,6 +80,26 @@ export default function SessionsPage() {
                 {status?.last_poll_at
                   ? new Date(status.last_poll_at).toLocaleTimeString()
                   : "Never"}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Heartbeat: </span>
+              <span>
+                {status?.last_heartbeat_at
+                  ? new Date(status.last_heartbeat_at).toLocaleTimeString()
+                  : "Never"}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Poll phase: </span>
+              <span>
+                {status?.poll_in_progress
+                  ? `running since ${
+                      status.poll_started_at
+                        ? new Date(status.poll_started_at).toLocaleTimeString()
+                        : "unknown"
+                    }`
+                  : "idle"}
               </span>
             </div>
           </div>

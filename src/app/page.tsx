@@ -52,15 +52,23 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
   closed: "bg-gray-100 text-gray-800",
 };
 
+function getTaskSortGroup(status: TaskStatus): number {
+  return status === "merged" || status === "closed" ? 1 : 0;
+}
+
 export default function TasksPage() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const { data: tasks, mutate } = useSWR<Task[]>("/api/tasks", fetcher, {
     refreshInterval: 5000,
   });
 
-  const sorted = tasks?.sort(
-    (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-  );
+  const sorted = tasks
+    ? [...tasks].sort((a, b) => {
+        const groupDiff = getTaskSortGroup(a.status) - getTaskSortGroup(b.status);
+        if (groupDiff !== 0) return groupDiff;
+        return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+      })
+    : undefined;
   const filtered =
     statusFilter === "all"
       ? sorted

@@ -413,8 +413,8 @@ test("cleanup runs use the cleanup prompt even when a session already exists", (
     `
   );
 
-  assert.deepEqual(result.args.args.slice(0, 2), ["exec", "--json"]);
-  assert.ok(!result.args.args.includes("resume"));
+  assert.deepEqual(result.args.args.slice(0, 3), ["exec", "resume", "--json"]);
+  assert.ok(result.args.args.includes("thread-cleanup"));
   assert.match(result.args.args.at(-1), /^CLEANUP closed \| Cover orchestration edges \|/);
   assert.equal(result.tasks[0].last_run_result, "success");
 });

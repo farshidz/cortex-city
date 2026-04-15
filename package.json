@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "worker": "tsx src/orchestrator-worker.ts",
+    "worker:supervisor": "tsx src/orchestrator-supervisor.ts",
     "lint": "eslint",
     "test": "tsx --test src/**/*.test.ts"
   },

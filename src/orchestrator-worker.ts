@@ -25,6 +25,7 @@ import { installLogger } from "./lib/logger";
 installLogger();
 
 async function poll() {
+  console.log("[worker] Poll phase: load state");
   // Fresh imports every poll to pick up any code changes
   const { readTasks, readConfig, updateTask } = await import("./lib/store");
   const { spawnAgentSession } = await import("./lib/agent-runner");
@@ -35,17 +36,20 @@ async function poll() {
   const config = readConfig();
 
   // Clean up orphaned PIDs
+  console.log("[worker] Poll phase: clear orphaned pids");
   for (const task of tasks) {
     if (!task.current_run_pid) continue;
     try {
       process.kill(task.current_run_pid, 0);
     } catch {
       console.log(`[worker] Clearing orphaned PID ${task.current_run_pid} for task ${task.id}`);
+      activePids.delete(task.id);
       await updateTask(task.id, { current_run_pid: undefined });
     }
   }
 
   // Clean up worktrees for tasks in final states
+  console.log("[worker] Poll phase: cleanup final tasks");
   for (const task of tasks) {
     if (
       (task.status === "merged" || task.status === "closed") &&
@@ -68,6 +72,7 @@ async function poll() {
   }
 
   // Prune old merged/closed tasks (12+ hours old)
+  console.log("[worker] Poll phase: prune old final tasks");
   const PRUNE_AGE_MS = 12 * 60 * 60 * 1000;
   const now = Date.now();
   const toPrune = tasks.filter(
@@ -87,6 +92,7 @@ async function poll() {
   let availableSlots = config.max_parallel_sessions - activePids.size;
   if (availableSlots <= 0) return;
 
+  console.log("[worker] Poll phase: resume interrupted tasks");
   const resumableTasks = tasks
     .filter(
       (t) =>
@@ -123,6 +129,7 @@ async function poll() {
   if (availableSlots <= 0) return;
 
   // Pick open tasks
+  console.log("[worker] Poll phase: pick open tasks");
   const openTasks = tasks
     .filter(
       (t) =>
@@ -149,6 +156,7 @@ async function poll() {
   }
 
   // Single pass over in_review tasks: check merged/closed, update status, trigger reviews
+  console.log("[worker] Poll phase: scan in_review tasks");
   const inReviewTasks = tasks.filter(
     (t): t is Task & { pr_url: string } => t.status === "in_review" && typeof t.pr_url === "string"
   );
@@ -215,12 +223,23 @@ async function poll() {
 const activePids = new Map<string, number>();
 const STATE_FILE = path.join(CORTEX_DIR, "orchestrator-state.json");
 let pollInFlight: Promise<void> | null = null;
+let heartbeatTimer: NodeJS.Timeout | null = null;
+const startedAt = new Date().toISOString();
+let lastPollAt: string | null = null;
+let pollStartedAt: string | null = null;
+let pollFinishedAt: string | null = null;
+let pollInProgress = false;
 
-function writeState(lastPollAt: string | null) {
+function writeState() {
   writeJSON(STATE_FILE, {
     running: true,
     active_sessions: activePids.size,
     last_poll_at: lastPollAt,
+    last_heartbeat_at: new Date().toISOString(),
+    started_at: startedAt,
+    poll_started_at: pollStartedAt,
+    poll_finished_at: pollFinishedAt,
+    poll_in_progress: pollInProgress,
     pid: process.pid,
   });
 }
@@ -229,12 +248,20 @@ async function runPollCycle() {
   if (pollInFlight) return pollInFlight;
   pollInFlight = (async () => {
     const pollTime = new Date().toISOString();
+    pollStartedAt = pollTime;
+    pollInProgress = true;
+    writeState();
+    console.log(`[worker] Poll started at ${pollTime}`);
     try {
       await poll();
     } catch (err) {
       console.error("[worker] Poll error:", err);
     }
-    writeState(pollTime);
+    lastPollAt = pollTime;
+    pollFinishedAt = new Date().toISOString();
+    pollInProgress = false;
+    writeState();
+    console.log(`[worker] Poll finished at ${pollFinishedAt}`);
   })();
   try {
     await pollInFlight;
@@ -248,7 +275,8 @@ async function main() {
   const config = readJSON(CONFIG_FILE) || { poll_interval_seconds: 10 };
   const interval = config.poll_interval_seconds * 1000;
   console.log(`[worker] Orchestrator started. Polling every ${config.poll_interval_seconds}s`);
-  writeState(null);
+  writeState();
+  heartbeatTimer = setInterval(() => writeState(), 5000);
 
   while (true) {
     await runPollCycle();
@@ -264,6 +292,7 @@ process.on("SIGUSR1", () => {
 // Graceful shutdown
 process.on("SIGINT", () => {
   console.log("[worker] Shutting down...");
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
   for (const [, pid] of activePids) {
     try {
       process.kill(pid, "SIGTERM");
@@ -272,11 +301,30 @@ process.on("SIGINT", () => {
   writeJSON(STATE_FILE, {
     running: false,
     active_sessions: 0,
-    last_poll_at: null,
+    last_poll_at: lastPollAt,
+    last_heartbeat_at: new Date().toISOString(),
+    started_at: startedAt,
+    poll_started_at: pollStartedAt,
+    poll_finished_at: pollFinishedAt,
+    poll_in_progress: false,
     pid: process.pid,
   });
   process.exit(0);
 });
-process.on("SIGTERM", () => process.exit(0));
+process.on("SIGTERM", () => {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  writeJSON(STATE_FILE, {
+    running: false,
+    active_sessions: 0,
+    last_poll_at: lastPollAt,
+    last_heartbeat_at: new Date().toISOString(),
+    started_at: startedAt,
+    poll_started_at: pollStartedAt,
+    poll_finished_at: pollFinishedAt,
+    poll_in_progress: false,
+    pid: process.pid,
+  });
+  process.exit(0);
+});
 
 main();

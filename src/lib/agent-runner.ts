@@ -185,9 +185,19 @@ export async function spawnAgentSession(
   const permissionMode: PermissionMode =
     task.permission_mode || config.default_permission_mode || "bypassPermissions";
   const agentConfig = config.agents[task.agent];
-  const shouldResume = mode !== "cleanup" && Boolean(task.session_id);
+  const shouldResume = Boolean(task.session_id);
   const hasManualInstruction = Boolean(task.pending_manual_instruction?.trim());
   const isResumeAfterKill = Boolean(task.resume_requested);
+  const runReason =
+    mode === "cleanup"
+      ? "cleanup"
+      : hasManualInstruction
+        ? "manual_instruction"
+        : isResumeAfterKill
+          ? "resume_after_kill"
+          : mode === "review"
+            ? "review"
+            : "initial";
 
   // Build prompt based on mode
   let prompt: string;
@@ -343,7 +353,8 @@ export async function spawnAgentSession(
       stderr,
       durationMs,
       preRunCommentIds,
-      runtime
+      runtime,
+      runReason
     );
     onComplete(task.id);
   });
@@ -569,7 +580,8 @@ async function handleRunComplete(
   _stderr: string,
   durationMs: number,
   preRunCommentIds: number[],
-  runtime: AgentRuntime
+  runtime: AgentRuntime,
+  runReason: "initial" | "review" | "cleanup" | "manual_instruction" | "resume_after_kill"
 ) {
   try {
     const result: ClaudeRunResult =
@@ -645,7 +657,7 @@ async function handleRunComplete(
     // Capture GH state hash AFTER run so we don't re-trigger on our own changes
     // But if new submitted comments appeared mid-run, skip hash update so next poll picks them up
     const prUrl = updates.pr_url || currentTask?.pr_url;
-    if (prUrl) {
+    if (prUrl && runReason !== "manual_instruction") {
       const postRunCommentIds = await getSubmittedCommentIds(prUrl);
       const newComments = postRunCommentIds.filter((id) => !preRunCommentIds.includes(id));
       if (newComments.length > 0) {
@@ -658,6 +670,10 @@ async function handleRunComplete(
           updates.last_review_gh_state = newHash;
         }
       }
+    } else if (prUrl) {
+      console.log(
+        `[agent-runner] Skipping review hash update for manual-instruction run on task ${taskId}`
+      );
     }
 
     await updateTask(taskId, updates);

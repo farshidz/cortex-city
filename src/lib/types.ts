@@ -106,9 +106,15 @@ export interface ActiveSession {
 
 export interface OrchestratorStatus {
   running: boolean;
+  healthy: boolean;
   active_sessions: number;
   max_sessions: number;
   last_poll_at: string | null;
+  last_heartbeat_at: string | null;
+  started_at: string | null;
+  poll_started_at: string | null;
+  poll_finished_at: string | null;
+  poll_in_progress: boolean;
 }
 
 export interface ClaudeRunResult {
