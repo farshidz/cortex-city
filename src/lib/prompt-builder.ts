@@ -33,7 +33,7 @@ export function buildInitialPrompt(task: Task): string {
   const agentName = agentConfig?.name || task.agent;
   const agentDirectory = buildAgentDirectory(config, task.agent);
 
-  const prompt = template
+  return template
     .replace("{{TASK_TITLE}}", task.title)
     .replace("{{TASK_DESCRIPTION}}", task.description)
     .replace(
@@ -43,24 +43,14 @@ export function buildInitialPrompt(task: Task): string {
     .replace("{{AGENT_NAME}}", agentName)
     .replace("{{REPO_CONTEXT}}", repoContext)
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
-
-  return appendManualInstruction(prompt, task);
 }
 
-export function buildResumePrompt(
-  task: Task,
-  mode: "initial" | "review"
-): string {
-  const manualInstruction = task.pending_manual_instruction?.trim();
-  if (manualInstruction) {
-    return `Continue this existing session and follow the manual instruction below.\n\n## Manual Instruction\n\n${manualInstruction}`;
-  }
+export function buildContinuePrompt(): string {
+  return "continue";
+}
 
-  if (mode === "review") {
-    return "Continue this existing session. Re-check the PR state, review feedback, mergeability, and CI, then continue from where you left off.";
-  }
-
-  return "Continue this existing session from where you left off and keep working on the task.";
+export function buildManualInstructionPrompt(task: Task): string {
+  return task.pending_manual_instruction?.trim() || "";
 }
 
 function describeMergeStatus(status?: string): string {
@@ -89,14 +79,12 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
   const baseBranch = options?.baseBranch || agentConfig?.default_branch || "main";
   const agentDirectory = buildAgentDirectory(config, task.agent);
 
-  const prompt = template
+  return template
     .replace("{{PR_URL}}", task.pr_url || "Unknown")
     .replace("{{AGENT_NAME}}", agentName)
     .replace("{{MERGE_STATUS}}", mergeStatus)
     .replace(/\{\{BASE_BRANCH\}\}/g, baseBranch)
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
-
-  return appendManualInstruction(prompt, task);
 }
 
 export function buildCleanupPrompt(task: Task): string {
@@ -142,11 +130,4 @@ function formatAgentDescription(
   const currentTag = isCurrent ? " (current)" : "";
   const detail = [description, repo].filter(Boolean).join(" — ");
   return `- **${name}** (\`${id}\`)${currentTag}: ${detail}`;
-}
-
-function appendManualInstruction(prompt: string, task: Task): string {
-  if (!task.pending_manual_instruction?.trim()) {
-    return prompt;
-  }
-  return `${prompt}\n\n## Manual Instruction\n\n${task.pending_manual_instruction.trim()}`;
 }

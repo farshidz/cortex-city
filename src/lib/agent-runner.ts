@@ -8,7 +8,8 @@ import {
   buildInitialPrompt,
   buildReviewPrompt,
   buildCleanupPrompt,
-  buildResumePrompt,
+  buildContinuePrompt,
+  buildManualInstructionPrompt,
 } from "./prompt-builder";
 import { getPRStateHash, getSubmittedCommentIds } from "./github";
 import { createSessionLog } from "./logger";
@@ -185,20 +186,30 @@ export async function spawnAgentSession(
     task.permission_mode || config.default_permission_mode || "bypassPermissions";
   const agentConfig = config.agents[task.agent];
   const shouldResume = mode !== "cleanup" && Boolean(task.session_id);
+  const hasManualInstruction = Boolean(task.pending_manual_instruction?.trim());
+  const isResumeAfterKill = Boolean(task.resume_requested);
 
   // Build prompt based on mode
   let prompt: string;
-  if (shouldResume) {
-    prompt = buildResumePrompt(task, mode);
+  let promptMode: "initial" | "review" | "cleanup" | "manual" | "resume";
+  if (hasManualInstruction) {
+    prompt = buildManualInstructionPrompt(task);
+    promptMode = "manual";
+  } else if (isResumeAfterKill) {
+    prompt = buildContinuePrompt();
+    promptMode = "resume";
   } else if (mode === "initial") {
     prompt = buildInitialPrompt(task);
+    promptMode = "initial";
   } else if (mode === "review") {
     prompt = buildReviewPrompt(task, {
       prStatus: task.pr_status,
       baseBranch: agentConfig?.default_branch || "main",
     });
+    promptMode = "review";
   } else {
     prompt = buildCleanupPrompt(task);
+    promptMode = "cleanup";
   }
 
   // Build CLI args
@@ -257,7 +268,7 @@ export async function spawnAgentSession(
     sessionLog.stdout.write(
       `${JSON.stringify({
         type: "prompt",
-        mode: shouldResume ? "resume" : mode,
+        mode: promptMode,
         timestamp: new Date().toISOString(),
         content: prompt,
       })}\n`
