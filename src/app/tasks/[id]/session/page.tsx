@@ -40,10 +40,15 @@ export default function SessionViewPage({
 }) {
   const { id } = use(params);
   const router = useRouter();
-  const { data: task } = useSWR<Task>(`/api/tasks/${id}`, fetcher);
+  const { data: task } = useSWR<Task>(`/api/tasks/${id}`, fetcher, {
+    refreshInterval: 3000,
+  });
   const { data: session } = useSWR<SessionData>(
     `/api/tasks/${id}/session`,
-    fetcher
+    fetcher,
+    {
+      refreshInterval: task?.current_run_pid ? 3000 : 0,
+    }
   );
   const agentLabel = session?.agent_runner === "codex" ? "Codex" : "Claude";
 
