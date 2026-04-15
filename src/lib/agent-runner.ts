@@ -686,3 +686,8 @@ async function handleRunComplete(
     });
   }
 }
+
+export const __testUtils = {
+  createFollowupTasks,
+  parseCodexResult,
+};

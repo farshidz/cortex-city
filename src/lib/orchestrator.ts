@@ -52,16 +52,32 @@ function hasActivePid(task: Task): task is Task & { current_run_pid: number } {
   return typeof task.current_run_pid === "number";
 }
 
+function getLiveActiveSessions(tasks: Task[]): ActiveSession[] {
+  return tasks
+    .filter(hasActivePid)
+    .filter((task) => isPidAlive(task.current_run_pid))
+    .map((t) => ({
+      task_id: t.id,
+      task_title: t.title,
+      agent: t.agent,
+      session_id: t.session_id || "unknown",
+      pid: t.current_run_pid,
+      started_at: t.last_run_at || t.updated_at,
+      status: "running" as const,
+    }));
+}
+
 export function getOrchestrator() {
   return {
     getStatus(): OrchestratorStatus {
       const config = readConfig();
       const state = readWorkerState();
+      const activeSessions = getLiveActiveSessions(readTasks());
       const healthy = isPidAlive(state.pid);
       return {
         running: state.running && healthy,
         healthy,
-        active_sessions: state.active_sessions,
+        active_sessions: activeSessions.length,
         max_sessions: config.max_parallel_sessions,
         last_poll_at: state.last_poll_at,
         last_heartbeat_at: state.last_heartbeat_at,
@@ -73,19 +89,7 @@ export function getOrchestrator() {
     },
 
     getActiveSessions(): ActiveSession[] {
-      // Active sessions are tracked by PIDs in tasks.json
-      const tasks = readTasks();
-      return tasks
-        .filter(hasActivePid)
-        .map((t) => ({
-          task_id: t.id,
-          task_title: t.title,
-          agent: t.agent,
-          session_id: t.session_id || "unknown",
-          pid: t.current_run_pid,
-          started_at: t.last_run_at || t.updated_at,
-          status: "running" as const,
-        }));
+      return getLiveActiveSessions(readTasks());
     },
 
     killSession(taskId: string): boolean {

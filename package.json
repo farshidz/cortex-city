@@ -8,7 +8,8 @@
     "start": "next start",
     "worker": "tsx src/orchestrator-worker.ts",
     "worker:supervisor": "tsx src/orchestrator-supervisor.ts",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

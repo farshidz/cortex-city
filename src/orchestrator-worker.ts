@@ -43,6 +43,7 @@ async function poll() {
       process.kill(task.current_run_pid, 0);
     } catch {
       console.log(`[worker] Clearing orphaned PID ${task.current_run_pid} for task ${task.id}`);
+      activePids.delete(task.id);
       await updateTask(task.id, { current_run_pid: undefined });
     }
   }
