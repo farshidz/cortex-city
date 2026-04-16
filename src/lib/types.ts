@@ -123,6 +123,8 @@ export interface ActiveSession {
 export interface OrchestratorStatus {
   running: boolean;
   healthy: boolean;
+  worker_healthy: boolean;
+  supervisor_healthy: boolean;
   active_sessions: number;
   max_sessions: number;
   last_poll_at: string | null;

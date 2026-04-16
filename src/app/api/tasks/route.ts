@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 import { readTasks, createTask, readConfig } from "@/lib/store";
 import type { AgentRuntime, Task } from "@/lib/types";
+import { getOrchestrator } from "@/lib/orchestrator";
 import {
   getDefaultModelForRuntime,
   normalizeEffort,
@@ -46,5 +47,8 @@ export async function POST(request: NextRequest) {
     total_output_tokens: 0,
   };
   await createTask(task);
+  const orchestrator = getOrchestrator();
+  orchestrator.ensureRunning();
+  orchestrator.requestPoll();
   return NextResponse.json(task, { status: 201 });
 }

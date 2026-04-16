@@ -41,7 +41,9 @@ export async function POST(
   });
 
   if (!task.current_run_pid) {
-    getOrchestrator().requestPoll();
+    const orchestrator = getOrchestrator();
+    orchestrator.ensureRunning();
+    orchestrator.requestPoll();
   }
 
   return NextResponse.json(updated);
