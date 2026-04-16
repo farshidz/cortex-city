@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/logo.png" alt="Cortex City logo" width="180" />
+  <img src="public/logo-20260416-190413.png" alt="Cortex City logo" width="180" />
 </p>
 
 # Cortex City
