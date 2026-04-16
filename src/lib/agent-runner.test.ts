@@ -224,12 +224,20 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
       });
 
       const logs = require("node:fs").readdirSync(${JSON.stringify(logDir)});
-      const logPath = require("node:path").join(${JSON.stringify(logDir)}, logs[0]);
+      const transcriptFile = logs.find((name) => name.endsWith(".log"));
+      const machineFile = logs.find((name) => name.endsWith(".jsonl"));
       console.log(
         JSON.stringify({
           tasks: readTasks(),
           args: JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8")),
-          log: require("node:fs").readFileSync(logPath, "utf-8"),
+          transcript: require("node:fs").readFileSync(
+            require("node:path").join(${JSON.stringify(logDir)}, transcriptFile),
+            "utf-8"
+          ),
+          machine: require("node:fs").readFileSync(
+            require("node:path").join(${JSON.stringify(logDir)}, machineFile),
+            "utf-8"
+          ),
         })
       );
     `
@@ -246,8 +254,12 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
     AGENT_ONLY: "agent",
     SHARED: "agent",
   });
-  assert.match(result.log, /"mode":"manual"/);
-  assert.match(result.log, /"content":"Apply the reviewer feedback"/);
+  assert.match(result.machine, /"mode":"manual"/);
+  assert.match(result.machine, /"content":"Apply the reviewer feedback"/);
+  assert.match(result.transcript, /USER \(Manual prompt\)/);
+  assert.match(result.transcript, /Apply the reviewer feedback/);
+  assert.match(result.transcript, /Status: completed/);
+  assert.match(result.transcript, /Summary: Manual instruction applied/);
 
   const [updatedTask] = result.tasks;
   assert.equal(updatedTask.session_id, "thread-123");

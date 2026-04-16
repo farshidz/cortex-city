@@ -158,7 +158,7 @@ function loadClaudeSession(task: Task) {
 function loadCodexSession(task: Task) {
   if (!existsSync(LOGS_DIR)) return null;
   const logFiles = readdirSync(LOGS_DIR)
-    .filter((file) => file.startsWith(`task-${task.id}-`) && file.endsWith(".log"))
+    .filter((file) => file.startsWith(`task-${task.id}-`) && file.endsWith(".jsonl"))
     .sort();
   const messages: CodexSessionMessage[] = [];
   let sessionId: string | undefined;

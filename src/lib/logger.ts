@@ -106,18 +106,22 @@ export function installLogger() {
 // --- Session log (real-time streaming) ---
 
 export function createSessionLog(taskId: string): {
-  stdout: WriteStream;
-  stderr: WriteStream;
-  path: string;
+  machine: WriteStream;
+  transcript: WriteStream;
+  machinePath: string;
+  transcriptPath: string;
 } {
   ensureLogsDir();
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const logPath = path.join(LOGS_DIR, `task-${taskId}-${ts}.log`);
+  const machinePath = path.join(LOGS_DIR, `task-${taskId}-${ts}.jsonl`);
+  const transcriptPath = path.join(LOGS_DIR, `task-${taskId}-${ts}.log`);
 
-  const stdout = createWriteStream(logPath, { flags: "a" });
-  const stderr = createWriteStream(logPath, { flags: "a" });
+  const machine = createWriteStream(machinePath, { flags: "a" });
+  const transcript = createWriteStream(transcriptPath, { flags: "a" });
+  const header = `--- Session started at ${timestamp()} ---\n\n`;
 
-  stdout.write(`--- Session started at ${timestamp()} ---\n\n`);
+  machine.write(header);
+  transcript.write(header);
 
-  return { stdout, stderr, path: logPath };
+  return { machine, transcript, machinePath, transcriptPath };
 }
