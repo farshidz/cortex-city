@@ -52,9 +52,6 @@ export default function RootLayout({
               />
               <div className="min-w-0">
                 <div className="font-semibold leading-tight">Cortex City</div>
-                <div className="text-xs text-muted-foreground leading-tight">
-                  Agent orchestrator
-                </div>
               </div>
             </Link>
             <div className="flex flex-col gap-1 flex-1">
