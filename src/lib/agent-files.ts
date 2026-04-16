@@ -1,8 +1,33 @@
 import path from "path";
-import type { AgentConfig } from "./types";
+import type { AgentConfig, PromptMode } from "./types";
 
-export function resolvePromptPath(agent: AgentConfig | undefined, agentId: string): string {
-  const promptFile = agent?.prompt_file || `.cortex/prompts/agents/${agentId}.md`;
+function defaultPromptFile(agentId: string, mode: PromptMode): string {
+  if (mode === "initial") {
+    return `.cortex/prompts/agents/${agentId}.md`;
+  }
+  return `.cortex/prompts/agents/${agentId}.${mode}.md`;
+}
+
+function getPromptFile(
+  agent: AgentConfig | undefined,
+  agentId: string,
+  mode: PromptMode
+): string {
+  if (mode === "review") {
+    return agent?.review_prompt_file || defaultPromptFile(agentId, mode);
+  }
+  if (mode === "cleanup") {
+    return agent?.cleanup_prompt_file || defaultPromptFile(agentId, mode);
+  }
+  return agent?.prompt_file || defaultPromptFile(agentId, mode);
+}
+
+export function resolvePromptPath(
+  agent: AgentConfig | undefined,
+  agentId: string,
+  mode: PromptMode = "initial"
+): string {
+  const promptFile = getPromptFile(agent, agentId, mode);
   return path.isAbsolute(promptFile)
     ? promptFile
     : path.join(process.cwd(), promptFile);

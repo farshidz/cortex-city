@@ -28,6 +28,17 @@ test("resolvePromptPath falls back to the default agent prompt location", () => 
   );
 });
 
+test("resolvePromptPath uses mode-specific defaults for review and cleanup prompts", () => {
+  assert.equal(
+    resolvePromptPath(undefined, "docs-agent", "review"),
+    path.join(process.cwd(), ".cortex/prompts/agents/docs-agent.review.md")
+  );
+  assert.equal(
+    resolvePromptPath(undefined, "docs-agent", "cleanup"),
+    path.join(process.cwd(), ".cortex/prompts/agents/docs-agent.cleanup.md")
+  );
+});
+
 test("resolvePromptPath preserves absolute prompt paths", () => {
   const absolutePrompt = path.join(os.tmpdir(), "absolute-agent-prompt.md");
   const agent: AgentConfig = {
@@ -53,6 +64,27 @@ test("resolveEnvPath places the env file next to the resolved prompt", () => {
   assert.equal(
     resolveEnvPath(agent, "cortex-city-swe"),
     path.join(process.cwd(), "prompts/agents/.env.cortex-city-swe")
+  );
+});
+
+test("resolvePromptPath honors configured review and cleanup prompt files", () => {
+  const agent: AgentConfig = {
+    name: "Cortex City SWE",
+    repo_slug: "farshidz/marqo-cortex-city",
+    repo_path: process.cwd(),
+    prompt_file: "prompts/agents/cortex-city-swe.md",
+    review_prompt_file: "prompts/agents/cortex-city-swe.review.md",
+    cleanup_prompt_file: "prompts/agents/cortex-city-swe.cleanup.md",
+    default_branch: "main",
+  };
+
+  assert.equal(
+    resolvePromptPath(agent, "cortex-city-swe", "review"),
+    path.join(process.cwd(), "prompts/agents/cortex-city-swe.review.md")
+  );
+  assert.equal(
+    resolvePromptPath(agent, "cortex-city-swe", "cleanup"),
+    path.join(process.cwd(), "prompts/agents/cortex-city-swe.cleanup.md")
   );
 });
 

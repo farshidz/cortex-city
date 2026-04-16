@@ -16,5 +16,6 @@ export async function GET() {
   return NextResponse.json({
     initial: loadTemplate("initial.md"),
     review: loadTemplate("review.md"),
+    cleanup: loadTemplate("cleanup.md"),
   });
 }

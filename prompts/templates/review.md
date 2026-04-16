@@ -22,7 +22,7 @@ You are addressing feedback on a pull request you previously created.
 10. Do not wait for post-push CI to finish. Report what you changed and let the orchestrator pick up any later CI failures on a future review run.
 11. Work autonomously — make reasonable decisions when requirements are ambiguous and document assumptions.
 
-## Important
+## Response Format
 Your response MUST conform to the required JSON schema. Provide:
 - **status**: "completed" if all comments and CI issues are addressed, "needs_review" if some items need human judgment, "blocked" if you hit a blocker, "failed" if something went wrong
 - **summary**: What you changed to address the feedback
@@ -32,3 +32,16 @@ Your response MUST conform to the required JSON schema. Provide:
 - **assumptions**: Decisions made without explicit guidance
 - **blockers**: Issues preventing full resolution (empty array if none)
 - **next_steps**: Any remaining items for the task owner
+- **tool_calls**: Object describing any tool usage (see Available Tools). Only include when actually invoking a tool such as `create_task`.
+
+## Available Tools
+- `create_task` (follow-up task request)
+  - `title` *(required, string)*: Short identifier for the new task
+  - `description` *(required, string)*: Detailed instructions for the follow-up work
+  - `agent` *(required, string)*: Agent ID from the Available Agents list below
+  - `plan` *(optional, string)*: Execution plan or checklist for the assignee
+
+## Available Agents
+{{AGENT_DIRECTORY}}
+
+{{REPO_CONTEXT_SECTION}}

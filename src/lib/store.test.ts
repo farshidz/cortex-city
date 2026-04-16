@@ -147,16 +147,18 @@ test("writeConfig persists the supplied configuration", () => {
     poll_interval_seconds: 10,
     default_permission_mode: "yolo",
     default_agent_runner: "codex",
-    agents: {
-      "cortex-city-swe": {
-        name: "Cortex City SWE",
-        repo_slug: "farshidz/marqo-cortex-city",
-        repo_path: "/tmp/repo",
-        prompt_file: "prompts/agents/cortex-city-swe.md",
-        default_branch: "main",
-        description: "Owns the control panel and orchestrator worker.",
+      agents: {
+        "cortex-city-swe": {
+          name: "Cortex City SWE",
+          repo_slug: "farshidz/marqo-cortex-city",
+          repo_path: "/tmp/repo",
+          prompt_file: "prompts/agents/cortex-city-swe.md",
+          review_prompt_file: "prompts/agents/cortex-city-swe.review.md",
+          cleanup_prompt_file: "prompts/agents/cortex-city-swe.cleanup.md",
+          default_branch: "main",
+          description: "Owns the control panel and orchestrator worker.",
+        },
       },
-    },
   };
 
   const persisted = runStoreScript(

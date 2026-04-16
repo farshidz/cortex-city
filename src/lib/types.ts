@@ -61,10 +61,14 @@ export interface AgentConfig {
   repo_slug: string; // e.g. "owner/repo" (for GitHub API / display)
   repo_path: string; // absolute path to local repo clone
   prompt_file: string; // relative path to agent's prompt file
+  review_prompt_file?: string; // optional relative path to review-specific prompt file
+  cleanup_prompt_file?: string; // optional relative path to cleanup-specific prompt file
   default_branch: string;
   env_file?: string; // optional path to .env file with agent-specific secrets
   description?: string;
 }
+
+export type PromptMode = "initial" | "review" | "cleanup";
 
 export type AgentRuntime = "claude" | "codex";
 

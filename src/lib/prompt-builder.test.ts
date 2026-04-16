@@ -51,7 +51,7 @@ function writeTestTemplates(workspace: string) {
       "Description={{TASK_DESCRIPTION}}",
       "Plan={{TASK_PLAN}}",
       "Agent={{AGENT_NAME}}",
-      "Context={{REPO_CONTEXT}}",
+      "{{REPO_CONTEXT_SECTION}}",
       "Directory={{AGENT_DIRECTORY}}",
     ].join("\n")
   );
@@ -63,6 +63,7 @@ function writeTestTemplates(workspace: string) {
       "Status={{MERGE_STATUS}}",
       "Base={{BASE_BRANCH}}",
       "Again={{BASE_BRANCH}}",
+      "{{REPO_CONTEXT_SECTION}}",
       "Directory={{AGENT_DIRECTORY}}",
     ].join("\n")
   );
@@ -74,7 +75,7 @@ function writeTestTemplates(workspace: string) {
       "Description={{TASK_DESCRIPTION}}",
       "PR={{PR_URL}}",
       "Branch={{BRANCH_NAME}}",
-      "Context={{REPO_CONTEXT}}",
+      "{{REPO_CONTEXT_SECTION}}",
       "Directory={{AGENT_DIRECTORY}}",
     ].join("\n")
   );
@@ -97,6 +98,8 @@ function writeConfig(workspace: string) {
             repo_slug: "farshidz/marqo-cortex-city",
             repo_path: workspace,
             prompt_file: "prompts/agents/cortex-city-swe.md",
+            review_prompt_file: "prompts/agents/cortex-city-swe.review.md",
+            cleanup_prompt_file: "prompts/agents/cortex-city-swe.cleanup.md",
             default_branch: "main",
             description: "Owns the Cortex City control panel.",
           },
@@ -116,6 +119,14 @@ function writeConfig(workspace: string) {
   writeFileSync(
     path.join(workspace, "prompts", "agents", "cortex-city-swe.md"),
     "Repository Context"
+  );
+  writeFileSync(
+    path.join(workspace, "prompts", "agents", "cortex-city-swe.review.md"),
+    "Review Context"
+  );
+  writeFileSync(
+    path.join(workspace, "prompts", "agents", "cortex-city-swe.cleanup.md"),
+    "Cleanup Context"
   );
 }
 
@@ -150,7 +161,7 @@ test("buildInitialPrompt fills the template with task, agent, and directory deta
   assert.match(result, /Description=Add comprehensive coverage/);
   assert.match(result, /Plan=Cover the lib modules/);
   assert.match(result, /Agent=Cortex City SWE/);
-  assert.match(result, /Context=Repository Context/);
+  assert.match(result, /## Repository Context\nRepository Context/);
   assert.match(
     result,
     /\*\*Cortex City SWE\*\* \(`cortex-city-swe`\) \(current\): Owns the Cortex City control panel\. — Repo: farshidz\/marqo-cortex-city/
@@ -180,7 +191,7 @@ test("buildInitialPrompt falls back when the task plan or agent prompt file is m
   );
 
   assert.match(result, /Plan=No detailed plan provided\. Determine the best approach\./);
-  assert.match(result, /Context=No agent-specific context available\./);
+  assert.match(result, /## Repository Context\nNo agent-specific context configured\./);
 });
 
 test("buildReviewPrompt maps PR states and replaces every base-branch placeholder", () => {
@@ -212,6 +223,7 @@ test("buildReviewPrompt maps PR states and replaces every base-branch placeholde
   assert.match(result, /Status=Checks are failing — fix CI during this run\./);
   assert.match(result, /Base=develop/);
   assert.match(result, /Again=develop/);
+  assert.match(result, /## Agent Review Context\nReview Context/);
 });
 
 test("buildReviewPrompt uses sensible defaults for unknown mergeability", () => {
@@ -239,6 +251,7 @@ test("buildReviewPrompt uses sensible defaults for unknown mergeability", () => 
     /Status=Mergeability unknown\. Fetch latest main and assume conflicts until proven otherwise\./
   );
   assert.match(result, /Base=trunk/);
+  assert.doesNotMatch(result, /Agent Review Context/);
 });
 
 test("buildCleanupPrompt and manual helpers provide the expected fallbacks", () => {
@@ -274,6 +287,7 @@ test("buildCleanupPrompt and manual helpers provide the expected fallbacks", () 
   assert.match(result.cleanup, /Final=closed/);
   assert.match(result.cleanup, /PR=None/);
   assert.match(result.cleanup, /Branch=Unknown/);
+  assert.match(result.cleanup, /## Agent Cleanup Context\nCleanup Context/);
   assert.equal(result.manual, "investigate flaky CI");
   assert.equal(result.resume, "continue");
   assert.equal(result.emptyManual, "");

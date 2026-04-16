@@ -15,19 +15,26 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import type { OrchestratorConfig } from "@/lib/types";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import type { OrchestratorConfig, PromptMode } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
+
+function buildPromptSection(title: string, content?: string): string {
+  if (!content?.trim()) return "";
+  return `## ${title}\n${content.trim()}\n`;
+}
 
 export default function AgentsPage() {
   const { data: config, mutate } = useSWR<OrchestratorConfig>(
     "/api/config",
     fetcher
   );
-  const { data: templates } = useSWR<{ initial: string; review: string }>(
-    "/api/prompts",
-    fetcher
-  );
+  const { data: templates } = useSWR<{
+    initial: string;
+    review: string;
+    cleanup: string;
+  }>("/api/prompts", fetcher);
   const [showAdd, setShowAdd] = useState(false);
   const [newAgent, setNewAgent] = useState({
     key: "",
@@ -36,18 +43,26 @@ export default function AgentsPage() {
     repo_path: "",
     prompt_file: "",
     default_branch: "main",
-    prompt: "",
     description: "",
   });
-  const [newEnvVars, setNewEnvVars] = useState<{ key: string; value: string }[]>([]);
+  const [promptContent, setPromptContent] = useState<Record<PromptMode, string>>({
+    initial: "",
+    review: "",
+    cleanup: "",
+  });
+  const [promptTab, setPromptTab] = useState<PromptMode>("initial");
+  const [newEnvVars, setNewEnvVars] = useState<{ key: string; value: string }[]>(
+    []
+  );
   const [showPreview, setShowPreview] = useState(false);
 
   async function addAgent() {
-    if (!config || !newAgent.key || !newAgent.name || !newAgent.repo_path)
-      return;
-    const { key, prompt, ...agentConfig } = newAgent;
-    const prompt_file =
-      agentConfig.prompt_file || `.cortex/prompts/agents/${key}.md`;
+    if (!config || !newAgent.key || !newAgent.name || !newAgent.repo_path) return;
+
+    const { key, ...agentConfig } = newAgent;
+    const promptFile = agentConfig.prompt_file || `.cortex/prompts/agents/${key}.md`;
+    const reviewPromptFile = `.cortex/prompts/agents/${key}.review.md`;
+    const cleanupPromptFile = `.cortex/prompts/agents/${key}.cleanup.md`;
     const hasEnvVars = newEnvVars.some((v) => v.key.trim());
     const updated = {
       ...config,
@@ -55,32 +70,49 @@ export default function AgentsPage() {
         ...config.agents,
         [key]: {
           ...agentConfig,
-          prompt_file,
+          prompt_file: promptFile,
+          ...(promptContent.review.trim()
+            ? { review_prompt_file: reviewPromptFile }
+            : {}),
+          ...(promptContent.cleanup.trim()
+            ? { cleanup_prompt_file: cleanupPromptFile }
+            : {}),
         },
       },
     };
 
-    // Save config (creates the agent)
     await fetch("/api/config", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updated),
     });
 
-    // Save the prompt file
-    if (prompt) {
-      await fetch(`/api/agents/${key}/prompt`, {
+    if (promptContent.initial) {
+      await fetch(`/api/agents/${key}/prompt?mode=initial`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: prompt }),
+        body: JSON.stringify({ content: promptContent.initial }),
+      });
+    }
+    if (promptContent.review) {
+      await fetch(`/api/agents/${key}/prompt?mode=review`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: promptContent.review }),
+      });
+    }
+    if (promptContent.cleanup) {
+      await fetch(`/api/agents/${key}/prompt?mode=cleanup`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: promptContent.cleanup }),
       });
     }
 
-    // Save env vars
     if (hasEnvVars) {
       const vars: Record<string, string> = {};
-      for (const { key: k, value } of newEnvVars) {
-        if (k.trim()) vars[k.trim()] = value;
+      for (const { key: envKey, value } of newEnvVars) {
+        if (envKey.trim()) vars[envKey.trim()] = value;
       }
       await fetch(`/api/agents/${key}/env`, {
         method: "PUT",
@@ -97,9 +129,14 @@ export default function AgentsPage() {
       repo_path: "",
       prompt_file: "",
       default_branch: "main",
-      prompt: "",
       description: "",
     });
+    setPromptContent({
+      initial: "",
+      review: "",
+      cleanup: "",
+    });
+    setPromptTab("initial");
     setNewEnvVars([]);
     setShowAdd(false);
   }
@@ -116,19 +153,62 @@ export default function AgentsPage() {
     mutate();
   }
 
-  // Build preview of the full prompt Claude will receive
-  const fullPreview = templates?.initial
-    .replace("{{TASK_TITLE}}", "(task title)")
-    .replace("{{TASK_DESCRIPTION}}", "(task description)")
-    .replace("{{TASK_PLAN}}", "(task plan or 'No detailed plan provided')")
-    .replace("{{AGENT_NAME}}", newAgent.name || "(agent name)")
-    .replace(
-      "{{REPO_CONTEXT}}",
-      newAgent.prompt || "(your agent prompt will appear here)"
-    )
-    .replace("{{AGENT_DIRECTORY}}", "(agents list will appear here)");
+  function buildPreview(mode: PromptMode): string {
+    if (!templates) return "Loading...";
+    const template = templates[mode];
+    if (mode === "initial") {
+      return template
+        .replace("{{TASK_TITLE}}", "(task title)")
+        .replace("{{TASK_DESCRIPTION}}", "(task description)")
+        .replace("{{TASK_PLAN}}", "(task plan or 'No detailed plan provided')")
+        .replace("{{AGENT_NAME}}", newAgent.name || "(agent name)")
+        .replace(
+          "{{REPO_CONTEXT_SECTION}}",
+          buildPromptSection(
+            "Repository Context",
+            promptContent.initial || "(your initial prompt will appear here)"
+          )
+        )
+        .replace("{{AGENT_DIRECTORY}}", "(agents list will appear here)");
+    }
+    if (mode === "review") {
+      return template
+        .replace("{{PR_URL}}", "(pr url)")
+        .replace("{{AGENT_NAME}}", newAgent.name || "(agent name)")
+        .replace("{{MERGE_STATUS}}", "(merge status)")
+        .replace(/\{\{BASE_BRANCH\}\}/g, newAgent.default_branch || "main")
+        .replace(
+          "{{REPO_CONTEXT_SECTION}}",
+          buildPromptSection(
+            "Agent Review Context",
+            promptContent.review || "(optional review prompt will appear here)"
+          )
+        )
+        .replace("{{AGENT_DIRECTORY}}", "(agents list will appear here)");
+    }
+    return template
+      .replace(/\{\{FINAL_STATUS\}\}/g, "(final status)")
+      .replace("{{TASK_TITLE}}", "(task title)")
+      .replace("{{TASK_DESCRIPTION}}", "(task description)")
+      .replace("{{PR_URL}}", "(pr url)")
+      .replace("{{BRANCH_NAME}}", "(branch name)")
+      .replace(
+        "{{REPO_CONTEXT_SECTION}}",
+        buildPromptSection(
+          "Agent Cleanup Context",
+          promptContent.cleanup || "(optional cleanup prompt will appear here)"
+        )
+      )
+      .replace("{{AGENT_DIRECTORY}}", "(agents list will appear here)");
+  }
 
   const agents = config ? Object.entries(config.agents) : [];
+  const promptPath =
+    promptTab === "initial"
+      ? newAgent.prompt_file || `.cortex/prompts/agents/${newAgent.key || "<agent-id>"}.md`
+      : promptTab === "review"
+        ? `.cortex/prompts/agents/${newAgent.key || "<agent-id>"}.review.md`
+        : `.cortex/prompts/agents/${newAgent.key || "<agent-id>"}.cleanup.md`;
 
   return (
     <div className="max-w-4xl">
@@ -212,7 +292,6 @@ export default function AgentsPage() {
               </div>
             </div>
 
-            {/* Env Vars */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label className="text-xs">
@@ -271,10 +350,9 @@ export default function AgentsPage() {
 
             <Separator />
 
-            {/* Agent Prompt */}
-            <div className="space-y-2">
+            <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <Label>Agent Prompt</Label>
+                <Label>Agent Prompts</Label>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -283,56 +361,59 @@ export default function AgentsPage() {
                   {showPreview ? "Hide full prompt" : "Show full prompt"}
                 </Button>
               </div>
+              <Tabs
+                value={promptTab}
+                onValueChange={(value) => setPromptTab(value as PromptMode)}
+              >
+                <TabsList>
+                  <TabsTrigger value="initial">Initial</TabsTrigger>
+                  <TabsTrigger value="review">Review</TabsTrigger>
+                  <TabsTrigger value="cleanup">Cleanup</TabsTrigger>
+                </TabsList>
+              </Tabs>
               <p className="text-xs text-muted-foreground">
-                This is your agent-specific instructions. It gets appended as
-                &quot;Repository Context&quot; at the end of a fixed template
-                that includes the task details and general instructions.
+                {promptTab === "initial"
+                  ? "Initial prompts are appended to new-task runs as repository context."
+                  : promptTab === "review"
+                    ? "Review prompts are optional and are appended only when the task is revisited for PR feedback."
+                    : "Cleanup prompts are optional and are appended only when the task is cleaning up after merge or close."}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Will be stored at{" "}
+                <code className="bg-muted px-1 rounded">{promptPath}</code>.
               </p>
 
               {showPreview ? (
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-muted-foreground">
-                    Full prompt preview (your prompt is highlighted):
+                    Full prompt preview
                   </p>
                   <pre className="whitespace-pre-wrap text-xs bg-muted p-4 rounded-md overflow-auto max-h-[500px] leading-relaxed">
-                    {fullPreview
-                      ?.split(
-                        newAgent.prompt || "(your agent prompt will appear here)"
-                      )
-                      .map((part, i, arr) => (
-                        <span key={i}>
-                          {part}
-                          {i < arr.length - 1 && (
-                            <span className="bg-blue-100 text-blue-900 px-0.5 rounded">
-                              {newAgent.prompt ||
-                                "(your agent prompt will appear here)"}
-                            </span>
-                          )}
-                        </span>
-                      ))}
+                    {buildPreview(promptTab)}
                   </pre>
                   <p className="text-xs text-muted-foreground">
-                    A JSON schema is also enforced requiring the agent to return:
-                    status, summary, pr_url, branch_name, files_changed,
-                    assumptions, blockers, next_steps.
+                    A JSON schema is also enforced requiring: status, summary,
+                    pr_url, branch_name, files_changed, assumptions, blockers,
+                    next_steps, and optional tool_calls.
                   </p>
-                  <Separator />
-                  <p className="text-xs font-medium text-muted-foreground">
-                    Review prompt (used for all agents when addressing PR
-                    feedback):
-                  </p>
-                  <pre className="whitespace-pre-wrap text-xs bg-muted p-4 rounded-md overflow-auto max-h-[300px] leading-relaxed">
-                    {templates?.review || "Loading..."}
-                  </pre>
                 </div>
               ) : (
                 <MdEditor
-                  value={newAgent.prompt}
-                  onChange={(v) =>
-                    setNewAgent({ ...newAgent, prompt: v })
+                  value={promptContent[promptTab]}
+                  onChange={(value) =>
+                    setPromptContent((current) => ({
+                      ...current,
+                      [promptTab]: value,
+                    }))
                   }
                   rows={12}
-                  placeholder={`# ${newAgent.name || "Agent Name"}\n\n## Architecture\nDescribe the codebase structure...\n\n## Coding Conventions\nList style rules, patterns...\n\n## Test Commands\nnpm test, pytest, etc.\n\n## Important Notes\nAnything the agent should know...`}
+                  placeholder={
+                    promptTab === "initial"
+                      ? `# ${newAgent.name || "Agent Name"}\n\n## Architecture\nDescribe the codebase structure...\n\n## Coding Conventions\nList style rules, patterns...\n\n## Test Commands\nnpm test, pytest, etc.\n\n## Important Notes\nAnything the agent should know...`
+                      : promptTab === "review"
+                        ? `# ${newAgent.name || "Agent Name"} Review Notes\n\n## Review Priorities\nHow this agent should process feedback...\n\n## Common Failure Modes\nWhat to look for on review runs...\n\n## Verification Commands\nCommands to rerun before replying...`
+                        : `# ${newAgent.name || "Agent Name"} Cleanup Notes\n\n## Cleanup Checklist\nBranch, environments, temporary resources...\n\n## Follow-up Work\nWhen to create extra tasks...\n\n## Safety Notes\nAnything cleanup should avoid...`
+                  }
                 />
               )}
             </div>
