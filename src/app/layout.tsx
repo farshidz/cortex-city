@@ -47,7 +47,7 @@ export default function RootLayout({
                 alt="Cortex City logo"
                 width={40}
                 height={40}
-                className="rounded-xl border border-border/60 shadow-sm"
+                className="rounded-xl"
                 priority
               />
               <div className="min-w-0">
