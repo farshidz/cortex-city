@@ -75,6 +75,14 @@ function writeWorkerState(workspace: string, state: Record<string, unknown>) {
   );
 }
 
+function writeSupervisorPid(workspace: string, pid: number) {
+  mkdirSync(path.join(workspace, ".cortex"), { recursive: true });
+  writeFileSync(
+    path.join(workspace, ".cortex", "orchestrator-supervisor.pid"),
+    `${pid}\n`
+  );
+}
+
 function sampleTask(overrides: Partial<Task> = {}): Task {
   return {
     id: "task-1",
@@ -121,6 +129,8 @@ test("getStatus derives active session count from live task pids instead of stal
 
   assert.equal(result.running, true);
   assert.equal(result.healthy, true);
+  assert.equal(result.worker_healthy, true);
+  assert.equal(result.supervisor_healthy, false);
   assert.equal(result.active_sessions, 1);
   assert.equal(result.max_sessions, 10);
 });
@@ -166,4 +176,35 @@ test("getActiveSessions filters out dead task pids", () => {
   assert.equal(result[0].task_id, "live-task");
   assert.equal(result[0].pid, process.pid);
   assert.equal(result[0].session_id, "live-session");
+});
+
+test("getStatus reports recovering when the supervisor is alive but the worker pid is stale", () => {
+  const workspace = createTempWorkspace();
+  writeConfig(workspace);
+  writeTasks(workspace, []);
+  writeWorkerState(workspace, {
+    running: true,
+    active_sessions: 0,
+    last_poll_at: "2026-04-15T00:10:00.000Z",
+    last_heartbeat_at: "2026-04-15T00:10:05.000Z",
+    started_at: "2026-04-15T00:00:00.000Z",
+    poll_started_at: null,
+    poll_finished_at: "2026-04-15T00:10:00.000Z",
+    poll_in_progress: false,
+    pid: 999999,
+  });
+  writeSupervisorPid(workspace, process.pid);
+
+  const result = runOrchestratorScript(
+    workspace,
+    `
+      const orchestrator = getOrchestrator();
+      console.log(JSON.stringify(orchestrator.getStatus()));
+    `
+  );
+
+  assert.equal(result.running, false);
+  assert.equal(result.healthy, true);
+  assert.equal(result.worker_healthy, false);
+  assert.equal(result.supervisor_healthy, true);
 });

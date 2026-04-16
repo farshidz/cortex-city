@@ -5,3 +5,12 @@ export async function GET() {
   const orch = getOrchestrator();
   return NextResponse.json(orch.getStatus());
 }
+
+export async function POST() {
+  const orch = getOrchestrator();
+  const started = orch.ensureRunning();
+  return NextResponse.json({
+    ok: started,
+    status: orch.getStatus(),
+  });
+}

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="public/logo-20260416-190413.png" alt="Cortex City logo" width="180" />
+</p>
+
 # Cortex City
 
 Cortex City is a local control panel for managing software work through reusable agents.

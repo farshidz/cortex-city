@@ -30,7 +30,18 @@ import type {
   OrchestratorConfig,
   AgentRuntime,
   PermissionMode,
+  TaskEffort,
 } from "@/lib/types";
+import {
+  formatEffortLabel,
+  getDefaultEffortForRuntime,
+  getDefaultModelForRuntime,
+  getEffortOptions,
+  getPermissionOptions,
+  normalizePermissionMode,
+  resolveTaskEffort,
+  resolveTaskModel,
+} from "@/lib/runtime-config";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const PERMISSION_LABELS: Record<PermissionMode, string> = {
@@ -69,16 +80,21 @@ export default function TaskDetailPage({
   const [instructionError, setInstructionError] = useState<string | null>(null);
 
   function startEdit() {
+    if (!config) return;
+    const runtime = task!.agent_runner || config.default_agent_runner || "claude";
     setForm({
       title: task!.title,
       description: task!.description,
       plan: task!.plan || "",
       agent: task!.agent,
-      agent_runner: task!.agent_runner || config?.default_agent_runner || "claude",
-      permission_mode:
-        task!.permission_mode ||
-        config?.default_permission_mode ||
-        "bypassPermissions",
+      agent_runner: runtime,
+      permission_mode: normalizePermissionMode(
+        runtime,
+        task!.permission_mode,
+        config.default_permission_mode
+      ),
+      model: resolveTaskModel(task!, config) || "",
+      effort: resolveTaskEffort(task!, config),
     });
     setEditing(true);
   }
@@ -170,8 +186,12 @@ export default function TaskDetailPage({
   }
 
   if (!task) return <div className="text-muted-foreground">Loading...</div>;
+  if (!config) return <div className="text-muted-foreground">Loading...</div>;
 
-  const agents = config ? Object.entries(config.agents) : [];
+  const agents = Object.entries(config.agents);
+  const resolvedRuntime = task.agent_runner || config.default_agent_runner || "claude";
+  const resolvedModel = resolveTaskModel(task, config);
+  const resolvedEffort = resolveTaskEffort(task, config);
 
   return (
     <div className="max-w-3xl space-y-4">
@@ -229,23 +249,20 @@ export default function TaskDetailPage({
             <div className="space-y-2">
               <Label>Agent Runtime</Label>
               <Select
-                value={form.agent_runner || config?.default_agent_runner || "claude"}
+                value={form.agent_runner || config.default_agent_runner || "claude"}
                 onValueChange={(v) => {
                   if (!v) return;
                   const newRunner = v as AgentRuntime;
-                  const allowed =
-                    newRunner === "codex"
-                      ? ["default", "yolo"]
-                      : ["bypassPermissions", "acceptEdits", "default"];
-                  const nextPermission = allowed.includes(
-                    (form.permission_mode as PermissionMode) || ""
-                  )
-                    ? form.permission_mode
-                    : (allowed[0] as PermissionMode);
                   setForm({
                     ...form,
                     agent_runner: newRunner,
-                    permission_mode: nextPermission,
+                    permission_mode: normalizePermissionMode(
+                      newRunner,
+                      undefined,
+                      config.default_permission_mode
+                    ),
+                    model: getDefaultModelForRuntime(config, newRunner),
+                    effort: getDefaultEffortForRuntime(config, newRunner),
                   });
                 }}
               >
@@ -263,7 +280,7 @@ export default function TaskDetailPage({
               <Select
                 value={
                   form.permission_mode ||
-                  config?.default_permission_mode ||
+                  config.default_permission_mode ||
                   "bypassPermissions"
                 }
                 onValueChange={(v) =>
@@ -278,19 +295,47 @@ export default function TaskDetailPage({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {(form.agent_runner || config?.default_agent_runner || "claude") ===
-                  "codex" ? (
-                    <>
-                      <SelectItem value="default">Prompt for every action</SelectItem>
-                      <SelectItem value="yolo">YOLO (no prompts)</SelectItem>
-                    </>
-                  ) : (
-                    <>
-                      <SelectItem value="bypassPermissions">Bypass Permissions</SelectItem>
-                      <SelectItem value="acceptEdits">Accept Edits</SelectItem>
-                      <SelectItem value="default">Default</SelectItem>
-                    </>
-                  )}
+                  {getPermissionOptions(
+                    (form.agent_runner || config.default_agent_runner || "claude") as AgentRuntime
+                  ).map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Model</Label>
+              <Input
+                value={(form.model as string) || ""}
+                onChange={(e) => setForm({ ...form, model: e.target.value })}
+                placeholder="Use the runtime default model"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Effort</Label>
+              <Select
+                value={(form.effort as string) || "__default__"}
+                onValueChange={(v) =>
+                  setForm({
+                    ...form,
+                    effort: v === "__default__" ? undefined : (v as TaskEffort),
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">Use configured default</SelectItem>
+                  {getEffortOptions(
+                    (form.agent_runner || config.default_agent_runner || "claude") as AgentRuntime
+                  ).map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -397,10 +442,7 @@ export default function TaskDetailPage({
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Runtime:
                   <Badge variant="outline">
-                    {(task.agent_runner || config?.default_agent_runner || "claude") ===
-                    "codex"
-                      ? "Codex"
-                      : "Claude Code"}
+                    {resolvedRuntime === "codex" ? "Codex" : "Claude Code"}
                   </Badge>
                 </span>
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
@@ -409,11 +451,19 @@ export default function TaskDetailPage({
                     {
                       PERMISSION_LABELS[
                         (task.permission_mode ||
-                          config?.default_permission_mode ||
+                          config.default_permission_mode ||
                           "bypassPermissions") as PermissionMode
                       ]
                     }
                   </Badge>
+                </span>
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Model:
+                  <Badge variant="outline">{resolvedModel || "CLI default"}</Badge>
+                </span>
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Effort:
+                  <Badge variant="outline">{formatEffortLabel(resolvedEffort)}</Badge>
                 </span>
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Session ID:

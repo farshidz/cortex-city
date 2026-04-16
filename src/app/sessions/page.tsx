@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -26,11 +26,24 @@ export default function SessionsPage() {
     { refreshInterval: 3000 }
   );
   const [now, setNow] = useState(() => Date.now());
+  const [recovering, setRecovering] = useState(false);
+  const autoRecoveryAttemptedRef = useRef(false);
 
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!status) return;
+    if (status.healthy) {
+      autoRecoveryAttemptedRef.current = false;
+      return;
+    }
+    if (autoRecoveryAttemptedRef.current) return;
+    autoRecoveryAttemptedRef.current = true;
+    void fetch("/api/orchestrator", { method: "POST" });
+  }, [status]);
 
   async function killSession(taskId: string) {
     await fetch("/api/sessions", {
@@ -41,6 +54,12 @@ export default function SessionsPage() {
     mutateSessions();
   }
 
+  async function restartWorker() {
+    setRecovering(true);
+    await fetch("/api/orchestrator", { method: "POST" });
+    setRecovering(false);
+  }
+
   function formatDuration(startedAt: string): string {
     const seconds = Math.floor((now - new Date(startedAt).getTime()) / 1000);
     const m = Math.floor(seconds / 60);
@@ -48,10 +67,30 @@ export default function SessionsPage() {
     return m > 0 ? `${m}m ${s}s` : `${s}s`;
   }
 
+  const statusLabel = !status
+    ? "Loading"
+    : status.worker_healthy
+      ? status.poll_in_progress
+        ? "Polling"
+        : "Running"
+      : status.supervisor_healthy || recovering
+        ? "Recovering"
+        : "Stopped";
+
+  const statusVariant =
+    statusLabel === "Stopped"
+      ? "destructive"
+      : statusLabel === "Recovering"
+        ? "secondary"
+        : "default";
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">Sessions</h1>
+        <Button variant="outline" onClick={restartWorker} disabled={recovering}>
+          {recovering ? "Starting..." : "Restart Worker"}
+        </Button>
       </div>
 
       {/* Status bar */}
@@ -60,13 +99,7 @@ export default function SessionsPage() {
           <div className="flex items-center gap-6 text-sm">
             <div className="flex items-center gap-2">
               <span className="text-muted-foreground">Status:</span>
-              <Badge variant={status?.healthy ? "default" : "destructive"}>
-                {status?.healthy
-                  ? status?.poll_in_progress
-                    ? "Polling"
-                    : "Running"
-                  : "Stopped"}
-              </Badge>
+              <Badge variant={statusVariant}>{statusLabel}</Badge>
             </div>
             <div>
               <span className="text-muted-foreground">Active: </span>
@@ -101,6 +134,10 @@ export default function SessionsPage() {
                     }`
                   : "idle"}
               </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Supervisor: </span>
+              <span>{status?.supervisor_healthy ? "alive" : "down"}</span>
             </div>
           </div>
         </CardContent>

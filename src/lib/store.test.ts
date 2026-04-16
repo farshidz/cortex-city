@@ -147,16 +147,44 @@ test("writeConfig persists the supplied configuration", () => {
     poll_interval_seconds: 10,
     default_permission_mode: "yolo",
     default_agent_runner: "codex",
-    agents: {
-      "cortex-city-swe": {
-        name: "Cortex City SWE",
-        repo_slug: "farshidz/marqo-cortex-city",
-        repo_path: "/tmp/repo",
-        prompt_file: "prompts/agents/cortex-city-swe.md",
-        default_branch: "main",
-        description: "Owns the control panel and orchestrator worker.",
+      agents: {
+        "cortex-city-swe": {
+          name: "Cortex City SWE",
+          repo_slug: "farshidz/marqo-cortex-city",
+          repo_path: "/tmp/repo",
+          prompt_file: "prompts/agents/cortex-city-swe.md",
+          review_prompt_file: "prompts/agents/cortex-city-swe.review.md",
+          cleanup_prompt_file: "prompts/agents/cortex-city-swe.cleanup.md",
+          default_branch: "main",
+          description: "Owns the control panel and orchestrator worker.",
+        },
       },
-    },
+  };
+
+  const persisted = runStoreScript(
+    workspace,
+    `
+      const config = ${JSON.stringify(config)};
+      await store.writeConfig(config);
+      console.log(JSON.stringify(store.readConfig()));
+    `
+  );
+
+  assert.deepEqual(persisted, config);
+});
+
+test("writeConfig persists runtime-specific model and effort defaults", () => {
+  const workspace = createTempWorkspace();
+  const config: OrchestratorConfig = {
+    max_parallel_sessions: 3,
+    poll_interval_seconds: 20,
+    default_permission_mode: "default",
+    default_agent_runner: "claude",
+    default_claude_model: "claude-sonnet-4-6",
+    default_claude_effort: "high",
+    default_codex_model: "gpt-5.4",
+    default_codex_effort: "medium",
+    agents: {},
   };
 
   const persisted = runStoreScript(

@@ -1,4 +1,5 @@
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
+import { spawn } from "child_process";
 import path from "path";
 import type { ActiveSession, OrchestratorStatus, Task } from "./types";
 import { readConfig, readTasks, updateTask } from "./store";
@@ -7,6 +8,10 @@ import { readConfig, readTasks, updateTask } from "./store";
 // This module just reads status for the API.
 
 const STATE_FILE = path.join(process.cwd(), ".cortex", "orchestrator-state.json");
+const SUPERVISOR_PID_FILE = path.join(process.cwd(), ".cortex", "orchestrator-supervisor.pid");
+const LOGS_DIR = path.join(process.cwd(), "logs");
+const tsxBin = path.join(process.cwd(), "node_modules", ".bin", "tsx");
+const supervisorEntry = path.join(process.cwd(), "src", "orchestrator-supervisor.ts");
 
 interface WorkerState {
   running: boolean;
@@ -48,6 +53,42 @@ function readWorkerState(): WorkerState {
   };
 }
 
+function ensureRuntimeDirs() {
+  mkdirSync(path.join(process.cwd(), ".cortex"), { recursive: true });
+  mkdirSync(LOGS_DIR, { recursive: true });
+}
+
+function readSupervisorPid(): number | undefined {
+  try {
+    if (!existsSync(SUPERVISOR_PID_FILE)) return undefined;
+    const raw = readFileSync(SUPERVISOR_PID_FILE, "utf-8").trim();
+    const pid = Number.parseInt(raw, 10);
+    return Number.isFinite(pid) ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function startSupervisorDetached(): number | undefined {
+  ensureRuntimeDirs();
+  try {
+    const child = spawn(tsxBin, [supervisorEntry], {
+      cwd: process.cwd(),
+      env: process.env,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    if (child.pid) {
+      writeFileSync(SUPERVISOR_PID_FILE, `${child.pid}\n`, "utf-8");
+    }
+    return child.pid;
+  } catch (error) {
+    console.error("[orchestrator] Failed to start supervisor:", error);
+    return undefined;
+  }
+}
+
 function hasActivePid(task: Task): task is Task & { current_run_pid: number } {
   return typeof task.current_run_pid === "number";
 }
@@ -73,10 +114,13 @@ export function getOrchestrator() {
       const config = readConfig();
       const state = readWorkerState();
       const activeSessions = getLiveActiveSessions(readTasks());
-      const healthy = isPidAlive(state.pid);
+      const workerHealthy = isPidAlive(state.pid);
+      const supervisorHealthy = isPidAlive(readSupervisorPid());
       return {
-        running: state.running && healthy,
-        healthy,
+        running: state.running && workerHealthy,
+        healthy: workerHealthy || supervisorHealthy,
+        worker_healthy: workerHealthy,
+        supervisor_healthy: supervisorHealthy,
         active_sessions: activeSessions.length,
         max_sessions: config.max_parallel_sessions,
         last_poll_at: state.last_poll_at,
@@ -84,7 +128,7 @@ export function getOrchestrator() {
         started_at: state.started_at,
         poll_started_at: state.poll_started_at,
         poll_finished_at: state.poll_finished_at,
-        poll_in_progress: healthy ? state.poll_in_progress : false,
+        poll_in_progress: workerHealthy ? state.poll_in_progress : false,
       };
     },
 
@@ -118,13 +162,26 @@ export function getOrchestrator() {
     requestPoll(): boolean {
       const state = readWorkerState();
       const pid = state.pid;
-      if (!state.running || pid === undefined || !isPidAlive(pid)) return false;
+      if (!state.running || pid === undefined || !isPidAlive(pid)) {
+        return Boolean(this.ensureRunning());
+      }
       try {
         process.kill(pid, "SIGUSR1");
         return true;
       } catch {
         return false;
       }
+    },
+    ensureRunning(): boolean {
+      const state = readWorkerState();
+      const workerHealthy = isPidAlive(state.pid);
+      const supervisorHealthy = isPidAlive(readSupervisorPid());
+      if (workerHealthy && supervisorHealthy) return true;
+      if (supervisorHealthy) return true;
+      if (!workerHealthy && !supervisorHealthy) {
+        return Boolean(startSupervisorDetached());
+      }
+      return Boolean(startSupervisorDetached());
     },
   };
 }

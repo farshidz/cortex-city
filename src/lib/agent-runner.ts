@@ -13,6 +13,12 @@ import {
 } from "./prompt-builder";
 import { getPRStateHash, getSubmittedCommentIds } from "./github";
 import { createSessionLog } from "./logger";
+import {
+  getDefaultEffortForRuntime,
+  getDefaultModelForRuntime,
+  normalizeEffort,
+  normalizeModel,
+} from "./runtime-config";
 import type {
   Task,
   AgentReport,
@@ -167,6 +173,28 @@ function buildPermissionArgs(runtime: AgentRuntime, mode: PermissionMode): strin
   return ["--permission-mode", mode];
 }
 
+function buildModelArgs(
+  runtime: AgentRuntime,
+  task: Pick<Task, "model" | "effort">,
+  config: ReturnType<typeof readConfig>
+): string[] {
+  const args: string[] = [];
+  const model = normalizeModel(task.model, getDefaultModelForRuntime(config, runtime));
+  if (model) {
+    args.push("--model", model);
+  }
+
+  const effort = normalizeEffort(runtime, task.effort, config);
+  if (runtime === "codex" && effort) {
+    args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
+  }
+  if (runtime === "claude" && effort) {
+    args.push("--effort", effort);
+  }
+
+  return args;
+}
+
 function writeSchemaFile(schema: string): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "codex-schema-"));
   const schemaPath = path.join(dir, "schema.json");
@@ -243,6 +271,7 @@ export async function spawnAgentSession(
     );
   }
   args.push(...buildPermissionArgs(runtime, permissionMode));
+  args.push(...buildModelArgs(runtime, task, config));
 
   if (runtime === "codex") {
     if (shouldResume && task.session_id) {
@@ -272,17 +301,20 @@ export async function spawnAgentSession(
 
   // Stream session output to disk in real-time
   const sessionLog = createSessionLog(task.id);
-  console.log(`[agent-runner] Session log: ${sessionLog.path}`);
+  console.log(
+    `[agent-runner] Session logs: ${sessionLog.transcriptPath} (human), ${sessionLog.machinePath} (machine)`
+  );
 
   if (runtime === "codex") {
-    sessionLog.stdout.write(
-      `${JSON.stringify({
-        type: "prompt",
-        mode: promptMode,
-        timestamp: new Date().toISOString(),
-        content: prompt,
-      })}\n`
-    );
+    const promptEvent = {
+      type: "prompt",
+      mode: promptMode,
+      timestamp: new Date().toISOString(),
+      content: prompt,
+    };
+    sessionLog.machine.write(`${JSON.stringify(promptEvent)}\n`);
+    const transcriptEntry = formatCodexEventForTranscript(promptEvent);
+    if (transcriptEntry) sessionLog.transcript.write(transcriptEntry);
   }
 
   const spawnedAt = Date.now();
@@ -300,12 +332,22 @@ export async function spawnAgentSession(
   let stdout = "";
   let stderr = "";
   let stdoutLineBuffer = "";
+  let transcriptLineBuffer = "";
   let capturedSessionId = false;
 
   child.stdout?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
     stdout += text;
-    sessionLog.stdout.write(text);
+    sessionLog.machine.write(text);
+    if (runtime === "codex") {
+      transcriptLineBuffer = flushCodexTranscriptBuffer(
+        text,
+        transcriptLineBuffer,
+        sessionLog.transcript
+      );
+    } else {
+      sessionLog.transcript.write(text);
+    }
 
     // Capture Codex session/thread ID as soon as it appears so the UI can show
     // live session data while the run is still active.
@@ -336,12 +378,21 @@ export async function spawnAgentSession(
   child.stderr?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
     stderr += text;
-    sessionLog.stderr.write(text);
+    if (runtime === "codex") {
+      sessionLog.transcript.write(
+        `${formatTranscriptHeading("STDERR", new Date().toISOString())}\n${text}\n`
+      );
+    } else {
+      sessionLog.transcript.write(text);
+    }
   });
 
   child.on("close", async (code) => {
-    sessionLog.stdout.end();
-    sessionLog.stderr.end();
+    if (runtime === "codex") {
+      flushCodexTranscriptBuffer("", transcriptLineBuffer, sessionLog.transcript);
+    }
+    sessionLog.machine.end();
+    sessionLog.transcript.end();
     const durationMs = Date.now() - spawnedAt;
     console.log(
       `[agent-runner] Session for task "${task.title}" exited with code ${code} (${Math.round(durationMs / 1000)}s)`
@@ -360,8 +411,8 @@ export async function spawnAgentSession(
   });
 
   child.on("error", async (err) => {
-    sessionLog.stdout.end();
-    sessionLog.stderr.end();
+    sessionLog.machine.end();
+    sessionLog.transcript.end();
     console.error(
       `[agent-runner] Failed to spawn for task "${task.title}":`,
       err
@@ -471,15 +522,111 @@ export function removeWorktree(task: Task): void {
 interface CodexEvent {
   type: string;
   thread_id?: string;
+  timestamp?: string;
+  mode?: string;
+  message?: string;
+  content?: string;
   item?: {
     type?: string;
     text?: string;
+    command?: string;
+    aggregated_output?: string;
   };
   usage?: {
     input_tokens?: number;
     cached_input_tokens?: number;
     output_tokens?: number;
   };
+}
+
+function formatTranscriptHeading(
+  label: string,
+  timestamp?: string,
+  extra?: string
+): string {
+  const parts = [label];
+  if (extra) parts.push(extra);
+  return `${parts.join(" ")}${timestamp ? ` [${timestamp}]` : ""}`;
+}
+
+function formatStructuredAgentMessage(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as AgentReport;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.summary !== "string") {
+      return text;
+    }
+
+    const lines = [`Status: ${parsed.status || "unknown"}`, `Summary: ${parsed.summary || ""}`];
+    if (parsed.pr_url) lines.push(`PR: ${parsed.pr_url}`);
+    if (parsed.branch_name) lines.push(`Branch: ${parsed.branch_name}`);
+    if (parsed.files_changed?.length) {
+      lines.push(`Files changed: ${parsed.files_changed.join(", ")}`);
+    }
+    if (parsed.assumptions?.length) {
+      lines.push(`Assumptions: ${parsed.assumptions.join(" | ")}`);
+    }
+    if (parsed.blockers?.length) {
+      lines.push(`Blockers: ${parsed.blockers.join(" | ")}`);
+    }
+    if (parsed.next_steps?.length) {
+      lines.push(`Next steps: ${parsed.next_steps.join(" | ")}`);
+    }
+    return lines.join("\n");
+  } catch {
+    return text;
+  }
+}
+
+function formatCodexEventForTranscript(event: CodexEvent): string | null {
+  if (event.type === "prompt") {
+    const modeLabel = event.mode
+      ? `${event.mode.charAt(0).toUpperCase()}${event.mode.slice(1)} prompt`
+      : "Prompt";
+    return `${formatTranscriptHeading("USER", event.timestamp, `(${modeLabel})`)}\n${event.content || ""}\n\n`;
+  }
+
+  if (event.type === "thread.started" && event.thread_id) {
+    return `${formatTranscriptHeading("SYSTEM", event.timestamp)}\nSession started: ${event.thread_id}\n\n`;
+  }
+
+  if (event.type === "item.completed" && event.item?.type === "agent_message") {
+    return `${formatTranscriptHeading("CODEX", event.timestamp)}\n${formatStructuredAgentMessage(event.item.text || "")}\n\n`;
+  }
+
+  if (event.type === "item.completed" && event.item?.type === "command_execution") {
+    const body = [`$ ${event.item.command || ""}`];
+    const output = event.item.aggregated_output?.trim();
+    if (output) body.push(output);
+    return `${formatTranscriptHeading("CODEX", event.timestamp, "(command)")}\n${body.join("\n")}\n\n`;
+  }
+
+  if (event.type === "error" && event.message) {
+    return `${formatTranscriptHeading("ERROR", event.timestamp)}\n${event.message}\n\n`;
+  }
+
+  return null;
+}
+
+function flushCodexTranscriptBuffer(
+  text: string,
+  carry: string,
+  transcript: NodeJS.WritableStream
+): string {
+  const lines = (carry + text).split(/\r?\n/);
+  const remainder = lines.pop() || "";
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line.startsWith("{")) continue;
+    try {
+      const rendered = formatCodexEventForTranscript(JSON.parse(line) as CodexEvent);
+      if (rendered) transcript.write(rendered);
+    } catch {
+      // Ignore malformed JSON lines in the transcript stream.
+    }
+  }
+
+  return remainder;
 }
 
 function parseCodexResult(stdout: string): ClaudeRunResult {
@@ -540,6 +687,13 @@ async function createFollowupTasks(
   const inheritedRunner = parentTask.agent_runner || config.default_agent_runner;
   const inheritedPermission =
     parentTask.permission_mode || config.default_permission_mode;
+  const inheritedModel = normalizeModel(
+    parentTask.model,
+    getDefaultModelForRuntime(config, inheritedRunner)
+  );
+  const inheritedEffort =
+    normalizeEffort(inheritedRunner, parentTask.effort, config) ||
+    getDefaultEffortForRuntime(config, inheritedRunner);
   for (const req of requests) {
     const title = (req.title || "").trim();
     const description = (req.description || "").trim();
@@ -561,6 +715,8 @@ async function createFollowupTasks(
       agent: agentId,
       agent_runner: inheritedRunner,
       permission_mode: inheritedPermission,
+      model: inheritedModel,
+      effort: inheritedEffort,
       parent_task_id: parentTask.id,
       created_at: now,
       updated_at: now,

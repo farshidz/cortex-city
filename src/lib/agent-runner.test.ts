@@ -62,6 +62,10 @@ function writeConfig(workspace: string) {
         poll_interval_seconds: 30,
         default_permission_mode: "bypassPermissions",
         default_agent_runner: "codex",
+        default_codex_model: "gpt-5.4",
+        default_codex_effort: "xhigh",
+        default_claude_model: "claude-sonnet-4-6",
+        default_claude_effort: "max",
         agents: {
           "cortex-city-swe": {
             name: "Cortex City SWE",
@@ -79,12 +83,12 @@ function writeConfig(workspace: string) {
   );
 }
 
-function writeFakeCodex(workspace: string) {
+function writeFakeAgent(workspace: string, binaryName: "codex" | "claude") {
   const binDir = path.join(workspace, "bin");
   mkdirSync(binDir, { recursive: true });
-  const codexPath = path.join(binDir, "codex");
+  const binaryPath = path.join(binDir, binaryName);
   writeFileSync(
-    codexPath,
+    binaryPath,
     `#!/usr/bin/env node
 const { writeFileSync } = require("fs");
 
@@ -111,7 +115,7 @@ if (process.env.FAKE_AGENT_STDOUT) {
 }
 `
   );
-  chmodSync(codexPath, 0o755);
+  chmodSync(binaryPath, 0o755);
 }
 
 function sampleTask(overrides: Partial<Task> = {}): Task {
@@ -167,7 +171,8 @@ function setupWorkspace(): string {
   const workspace = createTempWorkspace();
   writeTemplates(workspace);
   writeConfig(workspace);
-  writeFakeCodex(workspace);
+  writeFakeAgent(workspace, "codex");
+  writeFakeAgent(workspace, "claude");
   mkdirSync(path.join(workspace, "worktree"), { recursive: true });
   return workspace;
 }
@@ -224,12 +229,20 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
       });
 
       const logs = require("node:fs").readdirSync(${JSON.stringify(logDir)});
-      const logPath = require("node:path").join(${JSON.stringify(logDir)}, logs[0]);
+      const transcriptFile = logs.find((name) => name.endsWith(".log"));
+      const machineFile = logs.find((name) => name.endsWith(".jsonl"));
       console.log(
         JSON.stringify({
           tasks: readTasks(),
           args: JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8")),
-          log: require("node:fs").readFileSync(logPath, "utf-8"),
+          transcript: require("node:fs").readFileSync(
+            require("node:path").join(${JSON.stringify(logDir)}, transcriptFile),
+            "utf-8"
+          ),
+          machine: require("node:fs").readFileSync(
+            require("node:path").join(${JSON.stringify(logDir)}, machineFile),
+            "utf-8"
+          ),
         })
       );
     `
@@ -241,13 +254,21 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
   assert.ok(
     result.args.args.includes("--dangerously-bypass-approvals-and-sandbox")
   );
+  assert.ok(result.args.args.includes("--model"));
+  assert.ok(result.args.args.includes("gpt-5.4"));
+  assert.ok(result.args.args.includes("-c"));
+  assert.ok(result.args.args.includes('model_reasoning_effort="xhigh"'));
   assert.deepEqual(result.args.env, {
     GLOBAL_ONLY: "global",
     AGENT_ONLY: "agent",
     SHARED: "agent",
   });
-  assert.match(result.log, /"mode":"manual"/);
-  assert.match(result.log, /"content":"Apply the reviewer feedback"/);
+  assert.match(result.machine, /"mode":"manual"/);
+  assert.match(result.machine, /"content":"Apply the reviewer feedback"/);
+  assert.match(result.transcript, /USER \(Manual prompt\)/);
+  assert.match(result.transcript, /Apply the reviewer feedback/);
+  assert.match(result.transcript, /Status: completed/);
+  assert.match(result.transcript, /Summary: Manual instruction applied/);
 
   const [updatedTask] = result.tasks;
   assert.equal(updatedTask.session_id, "thread-123");
@@ -295,6 +316,8 @@ test("spawnAgentSession uses the review prompt and creates follow-up tasks from 
           status: "in_review",
           pr_url: "https://github.com/farshidz/cortex-city/pull/9",
           pr_status: "needs_approval",
+          model: "gpt-5.5-codex",
+          effort: "medium",
           worktree_path: worktreePath,
         })
       )};
@@ -333,6 +356,9 @@ test("spawnAgentSession uses the review prompt and creates follow-up tasks from 
 
   assert.equal(result.args.args[0], "exec");
   assert.equal(result.args.args[1], "--json");
+  assert.ok(result.args.args.includes("--model"));
+  assert.ok(result.args.args.includes("gpt-5.5-codex"));
+  assert.ok(result.args.args.includes('model_reasoning_effort="medium"'));
   assert.match(
     result.args.args.at(-1),
     /^REVIEW https:\/\/github.com\/farshidz\/cortex-city\/pull\/9 \| main \| Waiting on approvals, but code can merge cleanly\. \| Cortex City SWE$/
@@ -356,6 +382,8 @@ test("spawnAgentSession uses the review prompt and creates follow-up tasks from 
   assert.equal(followupTask.parent_task_id, "task-1");
   assert.equal(followupTask.agent_runner, "codex");
   assert.equal(followupTask.permission_mode, "bypassPermissions");
+  assert.equal(followupTask.model, "gpt-5.5-codex");
+  assert.equal(followupTask.effort, "medium");
 });
 
 test("cleanup runs use the cleanup prompt even when a session already exists", () => {
@@ -481,6 +509,8 @@ test("createFollowupTasks trims task data, inherits runtime settings, and skips 
       const task = ${JSON.stringify(
         sampleTask({
           permission_mode: "acceptEdits",
+          model: "gpt-5.4-mini",
+          effort: "low",
           worktree_path: path.join(workspace, "worktree"),
         })
       )};
@@ -510,4 +540,86 @@ test("createFollowupTasks trims task data, inherits runtime settings, and skips 
   assert.equal(followupTask.parent_task_id, "task-1");
   assert.equal(followupTask.agent_runner, "codex");
   assert.equal(followupTask.permission_mode, "acceptEdits");
+  assert.equal(followupTask.model, "gpt-5.4-mini");
+  assert.equal(followupTask.effort, "low");
+});
+
+test("spawnAgentSession passes Claude model and effort flags", () => {
+  const workspace = setupWorkspace();
+  const argsFile = path.join(workspace, "claude-args.json");
+  const worktreePath = path.join(workspace, "worktree");
+  const report = {
+    type: "result",
+    subtype: "print",
+    is_error: false,
+    duration_ms: 123,
+    result: JSON.stringify({
+      status: "completed",
+      summary: "Claude model config applied",
+      pr_url: "",
+      branch_name: "agent/claude-model",
+      files_changed: [],
+      assumptions: [],
+      blockers: [],
+      next_steps: [],
+    }),
+    session_id: "claude-session",
+    terminal_reason: "completed",
+    total_cost_usd: 0,
+    num_turns: 1,
+    structured_output: {
+      status: "completed",
+      summary: "Claude model config applied",
+      pr_url: "",
+      branch_name: "agent/claude-model",
+      files_changed: [],
+      assumptions: [],
+      blockers: [],
+      next_steps: [],
+    },
+    usage: {
+      input_tokens: 5,
+      output_tokens: 2,
+      cache_read_input_tokens: 1,
+    },
+  };
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          agent_runner: "claude",
+          permission_mode: "acceptEdits",
+          model: "claude-opus-4-1",
+          effort: "high",
+          worktree_path: worktreePath,
+        })
+      )};
+      await createTask(task);
+      process.env.FAKE_AGENT_ARGS_FILE = ${JSON.stringify(argsFile)};
+      process.env.FAKE_AGENT_STDOUT = ${JSON.stringify(JSON.stringify(report))};
+
+      await new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined))
+          .catch(reject);
+      });
+
+      console.log(
+        JSON.stringify({
+          tasks: readTasks(),
+          args: JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8")),
+        })
+      );
+    `
+  );
+
+  assert.equal(result.args.args[0], "-p");
+  assert.ok(result.args.args.includes("--model"));
+  assert.ok(result.args.args.includes("claude-opus-4-1"));
+  assert.ok(result.args.args.includes("--effort"));
+  assert.ok(result.args.args.includes("high"));
+  assert.ok(result.args.args.includes("--permission-mode"));
+  assert.ok(result.args.args.includes("acceptEdits"));
+  assert.equal(result.tasks[0].session_id, "claude-session");
 });

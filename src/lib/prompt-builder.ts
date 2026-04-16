@@ -2,6 +2,7 @@ import { readFileSync } from "fs";
 import path from "path";
 import type { Task, AgentConfig, OrchestratorConfig } from "./types";
 import { readConfig } from "./store";
+import { resolvePromptPath } from "./agent-files";
 
 const PROMPTS_DIR = path.join(process.cwd(), "prompts");
 
@@ -14,12 +15,18 @@ function loadTemplate(name: string): string {
   return readFileSync(path.join(PROMPTS_DIR, "templates", name), "utf-8");
 }
 
-function loadAgentPrompt(promptFile: string): string {
+function loadPromptFile(absolutePath: string): string | undefined {
   try {
-    return readFileSync(path.join(process.cwd(), promptFile), "utf-8");
+    const content = readFileSync(absolutePath, "utf-8").trim();
+    return content || undefined;
   } catch {
-    return "No agent-specific context available.";
+    return undefined;
   }
+}
+
+function buildPromptContextSection(title: string, content?: string): string {
+  if (!content) return "";
+  return `## ${title}\n${content}\n`;
 }
 
 export function buildInitialPrompt(task: Task): string {
@@ -27,8 +34,8 @@ export function buildInitialPrompt(task: Task): string {
   const agentConfig = config.agents[task.agent];
   const template = loadTemplate("initial.md");
   const repoContext = agentConfig
-    ? loadAgentPrompt(agentConfig.prompt_file)
-    : "No agent-specific context configured.";
+    ? loadPromptFile(resolvePromptPath(agentConfig, task.agent, "initial"))
+    : undefined;
 
   const agentName = agentConfig?.name || task.agent;
   const agentDirectory = buildAgentDirectory(config, task.agent);
@@ -41,7 +48,13 @@ export function buildInitialPrompt(task: Task): string {
       task.plan || "No detailed plan provided. Determine the best approach."
     )
     .replace("{{AGENT_NAME}}", agentName)
-    .replace("{{REPO_CONTEXT}}", repoContext)
+    .replace(
+      "{{REPO_CONTEXT_SECTION}}",
+      buildPromptContextSection(
+        "Repository Context",
+        repoContext || "No agent-specific context configured."
+      )
+    )
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 
@@ -78,12 +91,19 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
   const mergeStatus = describeMergeStatus(options?.prStatus || task.pr_status);
   const baseBranch = options?.baseBranch || agentConfig?.default_branch || "main";
   const agentDirectory = buildAgentDirectory(config, task.agent);
+  const reviewContext = agentConfig
+    ? loadPromptFile(resolvePromptPath(agentConfig, task.agent, "review"))
+    : undefined;
 
   return template
     .replace("{{PR_URL}}", task.pr_url || "Unknown")
     .replace("{{AGENT_NAME}}", agentName)
     .replace("{{MERGE_STATUS}}", mergeStatus)
     .replace(/\{\{BASE_BRANCH\}\}/g, baseBranch)
+    .replace(
+      "{{REPO_CONTEXT_SECTION}}",
+      buildPromptContextSection("Agent Review Context", reviewContext)
+    )
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 
@@ -91,9 +111,9 @@ export function buildCleanupPrompt(task: Task): string {
   const config = readConfig();
   const agentConfig = config.agents[task.agent];
   const template = loadTemplate("cleanup.md");
-  const repoContext = agentConfig
-    ? loadAgentPrompt(agentConfig.prompt_file)
-    : "No agent-specific cleanup instructions.";
+  const cleanupContext = agentConfig
+    ? loadPromptFile(resolvePromptPath(agentConfig, task.agent, "cleanup"))
+    : undefined;
   const agentDirectory = buildAgentDirectory(config, task.agent);
 
   return template
@@ -102,7 +122,10 @@ export function buildCleanupPrompt(task: Task): string {
     .replace("{{TASK_DESCRIPTION}}", task.description)
     .replace("{{PR_URL}}", task.pr_url || "None")
     .replace("{{BRANCH_NAME}}", task.branch_name || "Unknown")
-    .replace("{{REPO_CONTEXT}}", repoContext)
+    .replace(
+      "{{REPO_CONTEXT_SECTION}}",
+      buildPromptContextSection("Agent Cleanup Context", cleanupContext)
+    )
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 

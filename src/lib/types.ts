@@ -25,6 +25,8 @@ export interface Task {
   agent: string; // key from config.agents
   agent_runner?: AgentRuntime;
   permission_mode?: PermissionMode;
+  model?: string;
+  effort?: TaskEffort;
   parent_task_id?: string;
   child_tasks?: ChildTaskSummary[];
   created_at: string; // ISO 8601
@@ -59,12 +61,22 @@ export interface AgentConfig {
   repo_slug: string; // e.g. "owner/repo" (for GitHub API / display)
   repo_path: string; // absolute path to local repo clone
   prompt_file: string; // relative path to agent's prompt file
+  review_prompt_file?: string; // optional relative path to review-specific prompt file
+  cleanup_prompt_file?: string; // optional relative path to cleanup-specific prompt file
   default_branch: string;
   env_file?: string; // optional path to .env file with agent-specific secrets
   description?: string;
 }
 
+export type PromptMode = "initial" | "review" | "cleanup";
+
 export type AgentRuntime = "claude" | "codex";
+
+export type ClaudeEffort = "low" | "medium" | "high" | "max";
+
+export type CodexEffort = "none" | "low" | "medium" | "high" | "xhigh";
+
+export type TaskEffort = ClaudeEffort | CodexEffort;
 
 export type PermissionMode =
   | "bypassPermissions"
@@ -77,6 +89,10 @@ export interface OrchestratorConfig {
   poll_interval_seconds: number;
   default_permission_mode: PermissionMode;
   default_agent_runner: AgentRuntime;
+  default_claude_model?: string;
+  default_claude_effort?: ClaudeEffort;
+  default_codex_model?: string;
+  default_codex_effort?: CodexEffort;
   agents: Record<string, AgentConfig>;
 }
 
@@ -107,6 +123,8 @@ export interface ActiveSession {
 export interface OrchestratorStatus {
   running: boolean;
   healthy: boolean;
+  worker_healthy: boolean;
+  supervisor_healthy: boolean;
   active_sessions: number;
   max_sessions: number;
   last_poll_at: string | null;
