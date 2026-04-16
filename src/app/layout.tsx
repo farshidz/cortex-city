@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
+import Image from "next/image";
 import Link from "next/link";
 import { ThemeProvider } from "next-themes";
 import { ThemeSwitcher } from "@/components/theme-switcher";
@@ -18,6 +19,9 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Cortex City",
   description: "Cortex City — agent orchestrator",
+  icons: {
+    icon: "/logo.png",
+  },
 };
 
 export default function RootLayout({
@@ -34,9 +38,25 @@ export default function RootLayout({
       <body className="min-h-full flex">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           <nav className="w-56 border-r bg-muted/40 p-4 flex flex-col shrink-0">
-            <div className="font-semibold text-lg mb-4 px-2">
-              🧠 Cortex City
-            </div>
+            <Link
+              href="/"
+              className="mb-4 flex items-center gap-3 rounded-xl px-2 py-1.5 transition-colors hover:bg-accent"
+            >
+              <Image
+                src="/logo.png"
+                alt="Cortex City logo"
+                width={40}
+                height={40}
+                className="rounded-xl border border-border/60 shadow-sm"
+                priority
+              />
+              <div className="min-w-0">
+                <div className="font-semibold leading-tight">Cortex City</div>
+                <div className="text-xs text-muted-foreground leading-tight">
+                  Agent orchestrator
+                </div>
+              </div>
+            </Link>
             <div className="flex flex-col gap-1 flex-1">
               <NavLink href="/">Tasks</NavLink>
               <NavLink href="/tasks/new">New Task</NavLink>
