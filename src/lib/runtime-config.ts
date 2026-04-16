@@ -51,6 +51,7 @@ const CODEX_EFFORT_OPTIONS: SelectOption<CodexEffort>[] = [
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra High" },
 ];
 
 export function getPermissionOptions(runtime: AgentRuntime): SelectOption<PermissionMode>[] {
@@ -142,5 +143,6 @@ export function resolveTaskEffort(
 
 export function formatEffortLabel(effort?: string): string {
   if (!effort) return "CLI default";
+  if (effort === "xhigh") return "Extra High";
   return effort.charAt(0).toUpperCase() + effort.slice(1);
 }

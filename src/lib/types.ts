@@ -70,7 +70,7 @@ export type AgentRuntime = "claude" | "codex";
 
 export type ClaudeEffort = "low" | "medium" | "high" | "max";
 
-export type CodexEffort = "none" | "low" | "medium" | "high";
+export type CodexEffort = "none" | "low" | "medium" | "high" | "xhigh";
 
 export type TaskEffort = ClaudeEffort | CodexEffort;
 

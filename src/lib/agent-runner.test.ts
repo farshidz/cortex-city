@@ -63,7 +63,7 @@ function writeConfig(workspace: string) {
         default_permission_mode: "bypassPermissions",
         default_agent_runner: "codex",
         default_codex_model: "gpt-5.4",
-        default_codex_effort: "high",
+        default_codex_effort: "xhigh",
         default_claude_model: "claude-sonnet-4-6",
         default_claude_effort: "max",
         agents: {
@@ -257,7 +257,7 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
   assert.ok(result.args.args.includes("--model"));
   assert.ok(result.args.args.includes("gpt-5.4"));
   assert.ok(result.args.args.includes("-c"));
-  assert.ok(result.args.args.includes('model_reasoning_effort="high"'));
+  assert.ok(result.args.args.includes('model_reasoning_effort="xhigh"'));
   assert.deepEqual(result.args.env, {
     GLOBAL_ONLY: "global",
     AGENT_ONLY: "agent",
