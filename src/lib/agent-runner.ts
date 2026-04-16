@@ -13,6 +13,12 @@ import {
 } from "./prompt-builder";
 import { getPRStateHash, getSubmittedCommentIds } from "./github";
 import { createSessionLog } from "./logger";
+import {
+  getDefaultEffortForRuntime,
+  getDefaultModelForRuntime,
+  normalizeEffort,
+  normalizeModel,
+} from "./runtime-config";
 import type {
   Task,
   AgentReport,
@@ -167,6 +173,28 @@ function buildPermissionArgs(runtime: AgentRuntime, mode: PermissionMode): strin
   return ["--permission-mode", mode];
 }
 
+function buildModelArgs(
+  runtime: AgentRuntime,
+  task: Pick<Task, "model" | "effort">,
+  config: ReturnType<typeof readConfig>
+): string[] {
+  const args: string[] = [];
+  const model = normalizeModel(task.model, getDefaultModelForRuntime(config, runtime));
+  if (model) {
+    args.push("--model", model);
+  }
+
+  const effort = normalizeEffort(runtime, task.effort, config);
+  if (runtime === "codex" && effort) {
+    args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
+  }
+  if (runtime === "claude" && effort) {
+    args.push("--effort", effort);
+  }
+
+  return args;
+}
+
 function writeSchemaFile(schema: string): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "codex-schema-"));
   const schemaPath = path.join(dir, "schema.json");
@@ -243,6 +271,7 @@ export async function spawnAgentSession(
     );
   }
   args.push(...buildPermissionArgs(runtime, permissionMode));
+  args.push(...buildModelArgs(runtime, task, config));
 
   if (runtime === "codex") {
     if (shouldResume && task.session_id) {
@@ -658,6 +687,13 @@ async function createFollowupTasks(
   const inheritedRunner = parentTask.agent_runner || config.default_agent_runner;
   const inheritedPermission =
     parentTask.permission_mode || config.default_permission_mode;
+  const inheritedModel = normalizeModel(
+    parentTask.model,
+    getDefaultModelForRuntime(config, inheritedRunner)
+  );
+  const inheritedEffort =
+    normalizeEffort(inheritedRunner, parentTask.effort, config) ||
+    getDefaultEffortForRuntime(config, inheritedRunner);
   for (const req of requests) {
     const title = (req.title || "").trim();
     const description = (req.description || "").trim();
@@ -679,6 +715,8 @@ async function createFollowupTasks(
       agent: agentId,
       agent_runner: inheritedRunner,
       permission_mode: inheritedPermission,
+      model: inheritedModel,
+      effort: inheritedEffort,
       parent_task_id: parentTask.id,
       created_at: now,
       updated_at: now,

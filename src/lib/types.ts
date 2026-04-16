@@ -25,6 +25,8 @@ export interface Task {
   agent: string; // key from config.agents
   agent_runner?: AgentRuntime;
   permission_mode?: PermissionMode;
+  model?: string;
+  effort?: TaskEffort;
   parent_task_id?: string;
   child_tasks?: ChildTaskSummary[];
   created_at: string; // ISO 8601
@@ -66,6 +68,12 @@ export interface AgentConfig {
 
 export type AgentRuntime = "claude" | "codex";
 
+export type ClaudeEffort = "low" | "medium" | "high" | "max";
+
+export type CodexEffort = "none" | "low" | "medium" | "high";
+
+export type TaskEffort = ClaudeEffort | CodexEffort;
+
 export type PermissionMode =
   | "bypassPermissions"
   | "acceptEdits"
@@ -77,6 +85,10 @@ export interface OrchestratorConfig {
   poll_interval_seconds: number;
   default_permission_mode: PermissionMode;
   default_agent_runner: AgentRuntime;
+  default_claude_model?: string;
+  default_claude_effort?: ClaudeEffort;
+  default_codex_model?: string;
+  default_codex_effort?: CodexEffort;
   agents: Record<string, AgentConfig>;
 }
 

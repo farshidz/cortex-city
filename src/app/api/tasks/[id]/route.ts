@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTask, updateTask, deleteTask, readTasks } from "@/lib/store";
+import { getTask, updateTask, deleteTask, readTasks, readConfig } from "@/lib/store";
 import { removeWorktree } from "@/lib/agent-runner";
+import type { AgentRuntime } from "@/lib/types";
+import {
+  getDefaultModelForRuntime,
+  normalizeEffort,
+  normalizeModel,
+  normalizePermissionMode,
+} from "@/lib/runtime-config";
 
 export async function GET(
   _request: NextRequest,
@@ -30,9 +37,37 @@ export async function PUT(
   const { id } = await params;
   const body = await request.json();
   try {
+    const task = await getTask(id);
+    if (!task) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    const config = readConfig();
+    const runtime: AgentRuntime =
+      body.agent_runner || task.agent_runner || config.default_agent_runner;
+
+    if ("agent_runner" in body || "permission_mode" in body) {
+      body.permission_mode = normalizePermissionMode(
+        runtime,
+        body.permission_mode ?? task.permission_mode,
+        config.default_permission_mode
+      );
+    }
+    if ("agent_runner" in body || "model" in body) {
+      body.model = normalizeModel(
+        body.model ?? ("agent_runner" in body ? undefined : task.model),
+        getDefaultModelForRuntime(config, runtime)
+      );
+    }
+    if ("agent_runner" in body || "effort" in body) {
+      body.effort = normalizeEffort(
+        runtime,
+        body.effort ?? ("agent_runner" in body ? undefined : task.effort),
+        config
+      );
+    }
+
     // If transitioning to a final status, clean up the worktree
     if (body.status === "merged" || body.status === "closed") {
-      const task = await getTask(id);
       if (task?.worktree_path) {
         removeWorktree(task);
         body.worktree_path = undefined;

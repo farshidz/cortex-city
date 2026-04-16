@@ -19,7 +19,19 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import type { AgentRuntime, OrchestratorConfig, PermissionMode } from "@/lib/types";
+import type {
+  AgentRuntime,
+  OrchestratorConfig,
+  PermissionMode,
+  TaskEffort,
+} from "@/lib/types";
+import {
+  getDefaultEffortForRuntime,
+  getDefaultModelForRuntime,
+  getEffortOptions,
+  getPermissionOptions,
+  normalizePermissionMode,
+} from "@/lib/runtime-config";
 
 export default function NewTaskPage() {
   const router = useRouter();
@@ -31,6 +43,8 @@ export default function NewTaskPage() {
   const [branchName, setBranchName] = useState("");
   const [agentRunner, setAgentRunner] = useState<AgentRuntime | "">("");
   const [permissionMode, setPermissionMode] = useState<PermissionMode | "">("");
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState<TaskEffort | "">("");
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -38,27 +52,28 @@ export default function NewTaskPage() {
       .then((r) => r.json())
       .then((cfg) => {
         setConfig(cfg);
-        setAgentRunner((prev) => prev || cfg.default_agent_runner);
-        setPermissionMode((prev) => prev || cfg.default_permission_mode);
+        const runtime = cfg.default_agent_runner;
+        setAgentRunner((prev) => prev || runtime);
+        setPermissionMode(
+          (prev) =>
+            prev ||
+            normalizePermissionMode(runtime, cfg.default_permission_mode, cfg.default_permission_mode)
+        );
+        setModel((prev) => prev || getDefaultModelForRuntime(cfg, runtime));
+        setEffort((prev) => prev || getDefaultEffortForRuntime(cfg, runtime) || "");
       });
   }, []);
 
-  useEffect(() => {
+  function handleRunnerChange(value: string) {
     if (!config) return;
-    const runner = agentRunner || config.default_agent_runner;
-    const allowed =
-      runner === "codex"
-        ? (["default", "yolo"] as PermissionMode[])
-        : (["bypassPermissions", "acceptEdits", "default"] as PermissionMode[]);
-    const handle = requestAnimationFrame(() => {
-      setPermissionMode((prev) =>
-        prev && allowed.includes(prev)
-          ? prev
-          : (allowed[0] as PermissionMode)
-      );
-    });
-    return () => cancelAnimationFrame(handle);
-  }, [agentRunner, config]);
+    if (value !== "claude" && value !== "codex") return;
+    setAgentRunner(value);
+    setPermissionMode(
+      normalizePermissionMode(value, undefined, config.default_permission_mode)
+    );
+    setModel(getDefaultModelForRuntime(config, value));
+    setEffort(getDefaultEffortForRuntime(config, value) || "");
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -75,12 +90,16 @@ export default function NewTaskPage() {
         branch_name: branchName || undefined,
         agent_runner: agentRunner || config?.default_agent_runner,
         permission_mode: permissionMode || config?.default_permission_mode,
+        model: model || undefined,
+        effort: effort || undefined,
       }),
     });
     router.push("/");
   }
 
-  const agents = config ? Object.entries(config.agents) : [];
+  if (!config) return <div className="text-muted-foreground">Loading...</div>;
+
+  const agents = Object.entries(config.agents);
 
   return (
     <div className="max-w-2xl">
@@ -130,7 +149,7 @@ export default function NewTaskPage() {
               <Label htmlFor="runtime">Agent Runtime</Label>
               <Select
                 value={agentRunner || ""}
-                onValueChange={(v) => v && setAgentRunner(v as AgentRuntime)}
+                onValueChange={(v) => v && handleRunnerChange(v)}
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Use default" />
@@ -157,22 +176,64 @@ export default function NewTaskPage() {
                   <SelectValue placeholder="Use default" />
                 </SelectTrigger>
                 <SelectContent>
-                  {(agentRunner || config?.default_agent_runner || "claude") === "codex" ? (
-                    <>
-                      <SelectItem value="default">Prompt for every action</SelectItem>
-                      <SelectItem value="yolo">YOLO (no prompts)</SelectItem>
-                    </>
-                  ) : (
-                    <>
-                      <SelectItem value="bypassPermissions">Bypass Permissions</SelectItem>
-                      <SelectItem value="acceptEdits">Accept Edits</SelectItem>
-                      <SelectItem value="default">Default</SelectItem>
-                    </>
-                  )}
+                  {getPermissionOptions(
+                    agentRunner || config?.default_agent_runner || "claude"
+                  ).map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
                 Defaults to {config?.default_permission_mode || "bypassPermissions"} if not set.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="model">Model</Label>
+              <Input
+                id="model"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={
+                  getDefaultModelForRuntime(
+                    config,
+                    agentRunner || config.default_agent_runner || "claude"
+                  ) || "Use the runtime default model"
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="effort">Effort</Label>
+              <Select
+                value={effort || "__default__"}
+                onValueChange={(v) =>
+                  setEffort(v === "__default__" ? "" : (v as TaskEffort))
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Use default" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">Use configured default</SelectItem>
+                  {getEffortOptions(
+                    agentRunner || config?.default_agent_runner || "claude"
+                  ).map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Defaults to{" "}
+                {getDefaultEffortForRuntime(
+                  config,
+                  agentRunner || config.default_agent_runner || "claude"
+                ) || "the runtime CLI default"}{" "}
+                if not set.
               </p>
             </div>
 

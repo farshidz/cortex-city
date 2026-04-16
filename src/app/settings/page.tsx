@@ -19,9 +19,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import type { OrchestratorConfig, PermissionMode } from "@/lib/types";
+import type {
+  ClaudeEffort,
+  CodexEffort,
+  OrchestratorConfig,
+  PermissionMode,
+} from "@/lib/types";
+import { getEffortOptions, getPermissionOptions } from "@/lib/runtime-config";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
+const UNSET_VALUE = "__unset__";
 
 export default function SettingsPage() {
   const { data: config, mutate } = useSWR<OrchestratorConfig>(
@@ -30,31 +37,9 @@ export default function SettingsPage() {
   );
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<OrchestratorConfig | null>(null);
-  const permissionOptions = form?.default_agent_runner === "codex"
-    ? [
-        {
-          value: "default",
-          label: "Prompt for every action",
-        },
-        {
-          value: "yolo",
-          label: "YOLO (no prompts, full autonomy)",
-        },
-      ]
-    : [
-        {
-          value: "bypassPermissions",
-          label: "Bypass Permissions (fully autonomous)",
-        },
-        {
-          value: "acceptEdits",
-          label: "Accept Edits (auto-approve edits, prompt for bash)",
-        },
-        {
-          value: "default",
-          label: "Default (prompt for everything)",
-        },
-      ];
+  const permissionOptions = form
+    ? getPermissionOptions(form.default_agent_runner)
+    : [];
 
   useEffect(() => {
     if (!config || form) return;
@@ -65,14 +50,11 @@ export default function SettingsPage() {
   function handleRunnerChange(value: string) {
     if (!form) return;
     if (value !== "claude" && value !== "codex") return;
-    const allowed: PermissionMode[] =
-      value === "codex"
-        ? (["default", "yolo"] as PermissionMode[])
-        : (["bypassPermissions", "acceptEdits", "default"] as PermissionMode[]);
-    const currentMode = form.default_permission_mode || allowed[0];
-    const nextPermission: PermissionMode = allowed.includes(currentMode)
-      ? currentMode
-      : allowed[0];
+    const nextPermission = getPermissionOptions(value).some(
+      (option) => option.value === form.default_permission_mode
+    )
+      ? form.default_permission_mode
+      : (getPermissionOptions(value)[0].value as PermissionMode);
     setForm({
       ...form,
       default_agent_runner: value,
@@ -137,11 +119,11 @@ export default function SettingsPage() {
           </div>
 
           <div className="space-y-2">
-              <Label>Default Agent Runtime</Label>
-              <Select
-                value={form.default_agent_runner}
-                onValueChange={(v) => v && handleRunnerChange(v)}
-              >
+            <Label>Default Agent Runtime</Label>
+            <Select
+              value={form.default_agent_runner}
+              onValueChange={(v) => v && handleRunnerChange(v)}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -169,6 +151,98 @@ export default function SettingsPage() {
               </SelectTrigger>
               <SelectContent>
                 {permissionOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Claude Defaults</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Default Claude Model</Label>
+            <Input
+              value={form.default_claude_model || ""}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  default_claude_model: e.target.value || undefined,
+                })
+              }
+              placeholder="claude-sonnet-4-6"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Default Claude Effort</Label>
+            <Select
+              value={form.default_claude_effort || UNSET_VALUE}
+              onValueChange={(v) =>
+                setForm({
+                  ...form,
+                  default_claude_effort:
+                    v === UNSET_VALUE ? undefined : (v as ClaudeEffort),
+                })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={UNSET_VALUE}>CLI default</SelectItem>
+                {getEffortOptions("claude").map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Codex Defaults</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Default Codex Model</Label>
+            <Input
+              value={form.default_codex_model || ""}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  default_codex_model: e.target.value || undefined,
+                })
+              }
+              placeholder="gpt-5.4"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Default Codex Effort</Label>
+            <Select
+              value={form.default_codex_effort || UNSET_VALUE}
+              onValueChange={(v) =>
+                setForm({
+                  ...form,
+                  default_codex_effort:
+                    v === UNSET_VALUE ? undefined : (v as CodexEffort),
+                })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={UNSET_VALUE}>CLI default</SelectItem>
+                {getEffortOptions("codex").map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>
