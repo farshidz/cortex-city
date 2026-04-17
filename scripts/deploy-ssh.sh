@@ -14,10 +14,10 @@ Environment overrides:
   CONFIG_DIR=/etc/cortex-city
   WEB_ENV_FILE=/etc/cortex-city/web.env
   WORKER_ENV_FILE=/etc/cortex-city/worker.env
-  SYSTEMD_USER=ubuntu
-  SYSTEMD_GROUP=ubuntu
-  REMOTE_OWNER=ubuntu
-  REMOTE_GROUP=ubuntu
+  SYSTEMD_USER=cortex
+  SYSTEMD_GROUP=cortex
+  REMOTE_OWNER=cortex
+  REMOTE_GROUP=cortex
   WEB_SERVICE_NAME=cortex-city-web.service
   WORKER_SERVICE_NAME=cortex-city-worker.service
   REMOTE_SYSTEMD_DIR=/etc/systemd/system
@@ -94,18 +94,18 @@ if [[ "$REMOTE" == *"@"* ]]; then
   REMOTE_LOGIN_USER="${REMOTE%@*}"
 fi
 
-SYSTEMD_USER="${SYSTEMD_USER:-$REMOTE_LOGIN_USER}"
+SYSTEMD_USER="${SYSTEMD_USER:-cortex}"
 SYSTEMD_GROUP="${SYSTEMD_GROUP:-$SYSTEMD_USER}"
-REMOTE_OWNER="${REMOTE_OWNER:-${REMOTE_LOGIN_USER:-$SYSTEMD_USER}}"
+REMOTE_OWNER="${REMOTE_OWNER:-$SYSTEMD_USER}"
 REMOTE_GROUP="${REMOTE_GROUP:-$REMOTE_OWNER}"
 
 if [[ -z "$SYSTEMD_USER" || -z "$SYSTEMD_GROUP" ]]; then
-  printf 'Set SYSTEMD_USER/SYSTEMD_GROUP, or deploy to user@host so they can be derived.\n' >&2
+  printf 'Set SYSTEMD_USER and SYSTEMD_GROUP.\n' >&2
   exit 1
 fi
 
 if [[ -z "$REMOTE_OWNER" || -z "$REMOTE_GROUP" ]]; then
-  printf 'Set REMOTE_OWNER/REMOTE_GROUP, or deploy to user@host so they can be derived.\n' >&2
+  printf 'Set REMOTE_OWNER and REMOTE_GROUP.\n' >&2
   exit 1
 fi
 
