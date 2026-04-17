@@ -179,10 +179,8 @@ rsync -az --delete \
 log "Installing dependencies and rebuilding on remote host"
 run_remote "
 set -euo pipefail
-cd $(quote "$APP_DIR")
-npm ci
-npm run build
 $SUDO chown -R $(quote "$SYSTEMD_USER:$SYSTEMD_GROUP") $(quote "$APP_DIR")
+$SUDO -u $(quote "$SYSTEMD_USER") -H sh -lc 'cd $(printf '%q' "$APP_DIR") && npm ci && npm run build'
 "
 
 log "Installing systemd units and restarting services"
