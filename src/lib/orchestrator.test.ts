@@ -18,7 +18,11 @@ function createTempWorkspace(): string {
   return mkdtempSync(path.join(os.tmpdir(), "orchestrator-test-"));
 }
 
-function runOrchestratorScript(workspace: string, body: string) {
+function runOrchestratorScript(
+  workspace: string,
+  body: string,
+  env: NodeJS.ProcessEnv = process.env
+) {
   const output = execFileSync(
     TSX_BIN,
     [
@@ -36,6 +40,7 @@ function runOrchestratorScript(workspace: string, body: string) {
     {
       cwd: workspace,
       encoding: "utf-8",
+      env,
     }
   );
 
@@ -72,14 +77,6 @@ function writeWorkerState(workspace: string, state: Record<string, unknown>) {
   writeFileSync(
     path.join(workspace, ".cortex", "orchestrator-state.json"),
     JSON.stringify(state, null, 2)
-  );
-}
-
-function writeSupervisorPid(workspace: string, pid: number) {
-  mkdirSync(path.join(workspace, ".cortex"), { recursive: true });
-  writeFileSync(
-    path.join(workspace, ".cortex", "orchestrator-supervisor.pid"),
-    `${pid}\n`
   );
 }
 
@@ -130,7 +127,7 @@ test("getStatus derives active session count from live task pids instead of stal
   assert.equal(result.running, true);
   assert.equal(result.healthy, true);
   assert.equal(result.worker_healthy, true);
-  assert.equal(result.supervisor_healthy, false);
+  assert.equal(result.autostart_enabled, false);
   assert.equal(result.active_sessions, 1);
   assert.equal(result.max_sessions, 10);
 });
@@ -178,7 +175,7 @@ test("getActiveSessions filters out dead task pids", () => {
   assert.equal(result[0].session_id, "live-session");
 });
 
-test("getStatus reports recovering when the supervisor is alive but the worker pid is stale", () => {
+test("getStatus reports stopped when the worker pid is stale", () => {
   const workspace = createTempWorkspace();
   writeConfig(workspace);
   writeTasks(workspace, []);
@@ -193,7 +190,6 @@ test("getStatus reports recovering when the supervisor is alive but the worker p
     poll_in_progress: false,
     pid: 999999,
   });
-  writeSupervisorPid(workspace, process.pid);
 
   const result = runOrchestratorScript(
     workspace,
@@ -204,7 +200,39 @@ test("getStatus reports recovering when the supervisor is alive but the worker p
   );
 
   assert.equal(result.running, false);
-  assert.equal(result.healthy, true);
+  assert.equal(result.healthy, false);
   assert.equal(result.worker_healthy, false);
-  assert.equal(result.supervisor_healthy, true);
+  assert.equal(result.autostart_enabled, false);
+});
+
+test("getStatus reports autostart when explicitly enabled", () => {
+  const workspace = createTempWorkspace();
+  writeConfig(workspace);
+  writeTasks(workspace, []);
+  writeWorkerState(workspace, {
+    running: false,
+    active_sessions: 0,
+    last_poll_at: null,
+    last_heartbeat_at: null,
+    started_at: null,
+    poll_started_at: null,
+    poll_finished_at: null,
+    poll_in_progress: false,
+    pid: 999999,
+  });
+
+  const result = runOrchestratorScript(
+    workspace,
+    `
+      const orchestrator = getOrchestrator();
+      console.log(JSON.stringify(orchestrator.getStatus()));
+    `,
+    {
+      ...process.env,
+      CORTEX_ENABLE_WORKER_AUTOSTART: "true",
+    }
+  );
+
+  assert.equal(result.autostart_enabled, true);
+  assert.equal(result.healthy, false);
 });

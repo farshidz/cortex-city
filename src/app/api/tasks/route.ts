@@ -48,7 +48,6 @@ export async function POST(request: NextRequest) {
   };
   await createTask(task);
   const orchestrator = getOrchestrator();
-  orchestrator.ensureRunning();
   orchestrator.requestPoll();
   return NextResponse.json(task, { status: 201 });
 }

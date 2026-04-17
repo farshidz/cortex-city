@@ -40,6 +40,7 @@ export default function SessionsPage() {
       autoRecoveryAttemptedRef.current = false;
       return;
     }
+    if (!status.autostart_enabled) return;
     if (autoRecoveryAttemptedRef.current) return;
     autoRecoveryAttemptedRef.current = true;
     void fetch("/api/orchestrator", { method: "POST" });
@@ -54,7 +55,7 @@ export default function SessionsPage() {
     mutateSessions();
   }
 
-  async function restartWorker() {
+  async function triggerWorker() {
     setRecovering(true);
     await fetch("/api/orchestrator", { method: "POST" });
     setRecovering(false);
@@ -73,23 +74,36 @@ export default function SessionsPage() {
       ? status.poll_in_progress
         ? "Polling"
         : "Running"
-      : status.supervisor_healthy || recovering
-        ? "Recovering"
+      : status.autostart_enabled && recovering
+        ? "Starting"
         : "Stopped";
 
   const statusVariant =
     statusLabel === "Stopped"
       ? "destructive"
-      : statusLabel === "Recovering"
+      : statusLabel === "Starting"
         ? "secondary"
         : "default";
+
+  const controlLabel = !status
+    ? "Loading..."
+    : status.worker_healthy
+      ? "Request Poll"
+      : status.autostart_enabled
+        ? recovering
+          ? "Starting..."
+          : "Start Worker"
+        : "Managed Externally";
+
+  const controlDisabled =
+    !status || recovering || (!status.worker_healthy && !status.autostart_enabled);
 
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">Sessions</h1>
-        <Button variant="outline" onClick={restartWorker} disabled={recovering}>
-          {recovering ? "Starting..." : "Restart Worker"}
+        <Button variant="outline" onClick={triggerWorker} disabled={controlDisabled}>
+          {controlLabel}
         </Button>
       </div>
 
@@ -136,8 +150,8 @@ export default function SessionsPage() {
               </span>
             </div>
             <div>
-              <span className="text-muted-foreground">Supervisor: </span>
-              <span>{status?.supervisor_healthy ? "alive" : "down"}</span>
+              <span className="text-muted-foreground">Worker start: </span>
+              <span>{status?.autostart_enabled ? "ui autostart" : "external"}</span>
             </div>
           </div>
         </CardContent>

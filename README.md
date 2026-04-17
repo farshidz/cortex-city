@@ -224,6 +224,33 @@ npm run worker
 
 Then open `http://localhost:3000`.
 
+If you want the web app to auto-start the worker during local development, set `CORTEX_ENABLE_WORKER_AUTOSTART=1` before starting `npm run dev`. Leave that disabled in production.
+
+## Production Deployment
+
+In production, run the web app and worker as separate `systemd` services. Do not rely on the web app to spawn the worker.
+
+Typical deploy flow:
+
+```bash
+npm ci
+npm run build
+```
+
+Service templates are included under `deploy/systemd/`:
+
+- `deploy/systemd/cortex-city-web.service`
+- `deploy/systemd/cortex-city-worker.service`
+
+Recommended production model:
+
+- `cortex-city-web.service` runs `npm run start`
+- `cortex-city-worker.service` runs `npm run worker`
+- both services use `Restart=always`
+- `CORTEX_ENABLE_WORKER_AUTOSTART=0`
+
+The worker reconciles live task PIDs on every poll, so `systemd` restarts do not lose track of interrupted work or overcount parallel session slots.
+
 ## Local State
 
 Cortex City keeps its local runtime state under `.cortex/`.

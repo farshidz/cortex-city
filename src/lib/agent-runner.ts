@@ -28,8 +28,9 @@ import type {
   FollowupTaskRequest,
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
+import { shouldUseContinuePrompt } from "./orchestrator-runtime";
 
-const GLOBAL_ENV_FILE = path.join(process.cwd(), ".env");
+const GLOBAL_ENV_FILE = path.join(/* turbopackIgnore: true */ process.cwd(), ".env");
 
 function loadEnvFile(filePath: string): Record<string, string> {
   const vars: Record<string, string> = {};
@@ -65,7 +66,7 @@ function buildEnv(agentEnvFile?: string): NodeJS.ProcessEnv {
   if (agentEnvFile) {
     const envPath = path.isAbsolute(agentEnvFile)
       ? agentEnvFile
-      : path.join(process.cwd(), agentEnvFile);
+      : path.join(/* turbopackIgnore: true */ process.cwd(), agentEnvFile);
     Object.assign(env, loadEnvFile(envPath));
   }
   return env;
@@ -215,7 +216,7 @@ export async function spawnAgentSession(
   const agentConfig = config.agents[task.agent];
   const shouldResume = Boolean(task.session_id);
   const hasManualInstruction = Boolean(task.pending_manual_instruction?.trim());
-  const isResumeAfterKill = Boolean(task.resume_requested);
+  const isResumeAfterKill = shouldUseContinuePrompt(task);
   const runReason =
     mode === "cleanup"
       ? "cleanup"
