@@ -160,6 +160,8 @@ rsync -az --delete \
   --exclude='.git/' \
   --exclude='.next/' \
   --exclude='node_modules/' \
+  --exclude='.env' \
+  --exclude='.env.*' \
   --exclude='.cortex/' \
   --exclude='logs/' \
   --exclude='.DS_Store' \
