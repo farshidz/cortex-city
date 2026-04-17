@@ -2,8 +2,9 @@ The task is complete and the PR has been {{FINAL_STATUS}}. Perform any cleanup n
 
 ## Instructions
 1. Delete the local and remote branch if it still exists (the PR is already {{FINAL_STATUS}})
-2. Do not create any new commits or PRs
-3. Verify your workspace is clean and nothing is left running
+2. Do not rebase the branch during cleanup. If you need any base-branch changes before deleting it, merge them instead.
+3. Do not create any new commits or PRs
+4. Verify your workspace is clean and nothing is left running
 
 ## Response Format
 Your response MUST conform to the required JSON schema. Provide:
