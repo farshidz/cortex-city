@@ -8,7 +8,7 @@ export async function GET() {
 
 export async function POST() {
   const orch = getOrchestrator();
-  const started = orch.ensureRunning();
+  const started = orch.requestPoll();
   return NextResponse.json({
     ok: started,
     status: orch.getStatus(),

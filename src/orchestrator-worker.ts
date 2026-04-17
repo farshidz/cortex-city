@@ -4,9 +4,14 @@
  * Reads/writes the same JSON files. No HMR, no bundling, no timer issues.
  */
 
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import path from "path";
 import type { Task } from "./lib/types";
+import {
+  buildInterruptedTaskUpdates,
+  getTaskRunMode,
+  shouldResumeTask,
+} from "./lib/orchestrator-runtime";
 import { shouldStartFinalCleanup } from "./lib/final-task-cleanup";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
@@ -18,6 +23,7 @@ function readJSON(file: string) {
 }
 
 function writeJSON(file: string, data: unknown) {
+  mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
@@ -33,21 +39,36 @@ async function poll() {
   const { getPRStateHash, getPRStatus, isPRMergedOrClosed } =
     await import("./lib/github");
 
-  const tasks = readTasks();
+  let tasks = readTasks();
   const config = readConfig();
 
-  // Clean up orphaned PIDs
-  console.log("[worker] Poll phase: clear orphaned pids");
+  // Rebuild the in-memory PID map on every poll so worker restarts keep slot
+  // accounting and interrupted-task recovery aligned with task state on disk.
+  console.log("[worker] Poll phase: reconcile task pids");
+  const liveTaskIds = new Set<string>();
   for (const task of tasks) {
-    if (!task.current_run_pid) continue;
+    if (!task.current_run_pid) {
+      activePids.delete(task.id);
+      continue;
+    }
     try {
       process.kill(task.current_run_pid, 0);
+      activePids.set(task.id, task.current_run_pid);
+      liveTaskIds.add(task.id);
     } catch {
       console.log(`[worker] Clearing orphaned PID ${task.current_run_pid} for task ${task.id}`);
       activePids.delete(task.id);
-      await updateTask(task.id, { current_run_pid: undefined });
+      await updateTask(task.id, buildInterruptedTaskUpdates(task));
     }
   }
+
+  for (const taskId of [...activePids.keys()]) {
+    if (!liveTaskIds.has(taskId)) {
+      activePids.delete(taskId);
+    }
+  }
+
+  tasks = readTasks();
 
   // Clean up worktrees for tasks in final states
   console.log("[worker] Poll phase: cleanup final tasks");
@@ -100,27 +121,21 @@ async function poll() {
 
   console.log("[worker] Poll phase: resume interrupted tasks");
   const resumableTasks = tasks
-    .filter(
-      (t) =>
-        !activePids.has(t.id) &&
-        !t.current_run_pid &&
-        Boolean(t.session_id) &&
-        Boolean(t.resume_requested || t.pending_manual_instruction) &&
-        (t.status === "open" || t.status === "in_progress")
-    )
+    .filter((t) => !activePids.has(t.id) && shouldResumeTask(t))
     .sort((a, b) =>
       new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime()
     );
 
   for (const task of resumableTasks) {
     if (availableSlots <= 0) break;
+    const runMode = getTaskRunMode(task);
     console.log(
-      `[worker] Resuming task "${task.title}" (${task.id}) [initial]`
+      `[worker] Resuming task "${task.title}" (${task.id}) [${runMode}]`
     );
     if (task.status === "open") {
       await updateTask(task.id, { status: "in_progress" });
     }
-    const { pid } = await spawnAgentSession(task, "initial", (taskId: string) => {
+    const { pid } = await spawnAgentSession(task, runMode, (taskId: string) => {
       activePids.delete(taskId);
     });
     await updateTask(task.id, {
@@ -139,6 +154,7 @@ async function poll() {
   const openTasks = tasks
     .filter(
       (t) =>
+        !activePids.has(t.id) &&
         t.status === "open" &&
         (!t.session_id || Boolean(t.pending_manual_instruction))
     )
@@ -235,6 +251,7 @@ let lastPollAt: string | null = null;
 let pollStartedAt: string | null = null;
 let pollFinishedAt: string | null = null;
 let pollInProgress = false;
+let shuttingDown = false;
 
 function writeState() {
   writeJSON(STATE_FILE, {
@@ -295,9 +312,10 @@ process.on("SIGUSR1", () => {
   void runPollCycle();
 });
 
-// Graceful shutdown
-process.on("SIGINT", () => {
-  console.log("[worker] Shutting down...");
+function shutdown(signal: NodeJS.Signals, exitCode = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[worker] Shutting down on ${signal}...`);
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   for (const [, pid] of activePids) {
     try {
@@ -315,22 +333,13 @@ process.on("SIGINT", () => {
     poll_in_progress: false,
     pid: process.pid,
   });
-  process.exit(0);
-});
-process.on("SIGTERM", () => {
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
-  writeJSON(STATE_FILE, {
-    running: false,
-    active_sessions: 0,
-    last_poll_at: lastPollAt,
-    last_heartbeat_at: new Date().toISOString(),
-    started_at: startedAt,
-    poll_started_at: pollStartedAt,
-    poll_finished_at: pollFinishedAt,
-    poll_in_progress: false,
-    pid: process.pid,
-  });
-  process.exit(0);
-});
+  process.exit(exitCode);
+}
 
-main();
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+main().catch((error) => {
+  console.error("[worker] Fatal error:", error);
+  shutdown("SIGTERM", 1);
+});

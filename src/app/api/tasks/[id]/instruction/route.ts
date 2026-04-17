@@ -42,7 +42,6 @@ export async function POST(
 
   if (!task.current_run_pid) {
     const orchestrator = getOrchestrator();
-    orchestrator.ensureRunning();
     orchestrator.requestPoll();
   }
 

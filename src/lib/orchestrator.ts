@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
+import { readFileSync, existsSync, mkdirSync } from "fs";
 import { spawn } from "child_process";
 import path from "path";
 import type { ActiveSession, OrchestratorStatus, Task } from "./types";
@@ -8,10 +8,10 @@ import { readConfig, readTasks, updateTask } from "./store";
 // This module just reads status for the API.
 
 const STATE_FILE = path.join(process.cwd(), ".cortex", "orchestrator-state.json");
-const SUPERVISOR_PID_FILE = path.join(process.cwd(), ".cortex", "orchestrator-supervisor.pid");
 const LOGS_DIR = path.join(process.cwd(), "logs");
 const tsxBin = path.join(process.cwd(), "node_modules", ".bin", "tsx");
-const supervisorEntry = path.join(process.cwd(), "src", "orchestrator-supervisor.ts");
+const workerEntry = path.join(process.cwd(), "src", "orchestrator-worker.ts");
+const AUTOSTART_ENV = "CORTEX_ENABLE_WORKER_AUTOSTART";
 
 interface WorkerState {
   running: boolean;
@@ -58,33 +58,24 @@ function ensureRuntimeDirs() {
   mkdirSync(LOGS_DIR, { recursive: true });
 }
 
-function readSupervisorPid(): number | undefined {
-  try {
-    if (!existsSync(SUPERVISOR_PID_FILE)) return undefined;
-    const raw = readFileSync(SUPERVISOR_PID_FILE, "utf-8").trim();
-    const pid = Number.parseInt(raw, 10);
-    return Number.isFinite(pid) ? pid : undefined;
-  } catch {
-    return undefined;
-  }
+function isWorkerAutostartEnabled(): boolean {
+  const raw = process.env[AUTOSTART_ENV]?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
 }
 
-function startSupervisorDetached(): number | undefined {
+function startWorkerDetached(): number | undefined {
   ensureRuntimeDirs();
   try {
-    const child = spawn(tsxBin, [supervisorEntry], {
+    const child = spawn(tsxBin, [workerEntry], {
       cwd: process.cwd(),
       env: process.env,
       detached: true,
       stdio: "ignore",
     });
     child.unref();
-    if (child.pid) {
-      writeFileSync(SUPERVISOR_PID_FILE, `${child.pid}\n`, "utf-8");
-    }
     return child.pid;
   } catch (error) {
-    console.error("[orchestrator] Failed to start supervisor:", error);
+    console.error("[orchestrator] Failed to start worker:", error);
     return undefined;
   }
 }
@@ -115,12 +106,11 @@ export function getOrchestrator() {
       const state = readWorkerState();
       const activeSessions = getLiveActiveSessions(readTasks());
       const workerHealthy = isPidAlive(state.pid);
-      const supervisorHealthy = isPidAlive(readSupervisorPid());
       return {
         running: state.running && workerHealthy,
-        healthy: workerHealthy || supervisorHealthy,
+        healthy: workerHealthy,
         worker_healthy: workerHealthy,
-        supervisor_healthy: supervisorHealthy,
+        autostart_enabled: isWorkerAutostartEnabled(),
         active_sessions: activeSessions.length,
         max_sessions: config.max_parallel_sessions,
         last_poll_at: state.last_poll_at,
@@ -175,13 +165,9 @@ export function getOrchestrator() {
     ensureRunning(): boolean {
       const state = readWorkerState();
       const workerHealthy = isPidAlive(state.pid);
-      const supervisorHealthy = isPidAlive(readSupervisorPid());
-      if (workerHealthy && supervisorHealthy) return true;
-      if (supervisorHealthy) return true;
-      if (!workerHealthy && !supervisorHealthy) {
-        return Boolean(startSupervisorDetached());
-      }
-      return Boolean(startSupervisorDetached());
+      if (workerHealthy) return true;
+      if (!isWorkerAutostartEnabled()) return false;
+      return Boolean(startWorkerDetached());
     },
   };
 }

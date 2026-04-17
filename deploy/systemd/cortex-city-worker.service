@@ -1,0 +1,21 @@
+[Unit]
+Description=Cortex City worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cortex
+Group=cortex
+WorkingDirectory=/opt/cortex-city/app
+Environment=NODE_ENV=production
+Environment=CORTEX_ENABLE_WORKER_AUTOSTART=0
+EnvironmentFile=-/etc/cortex-city/worker.env
+ExecStart=/usr/bin/env npm run worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

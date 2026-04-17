@@ -30,7 +30,7 @@ export function resolvePromptPath(
   const promptFile = getPromptFile(agent, agentId, mode);
   return path.isAbsolute(promptFile)
     ? promptFile
-    : path.join(process.cwd(), promptFile);
+    : path.join(/* turbopackIgnore: true */ process.cwd(), promptFile);
 }
 
 export function resolveEnvPath(agent: AgentConfig | undefined, agentId: string): string {
@@ -40,6 +40,6 @@ export function resolveEnvPath(agent: AgentConfig | undefined, agentId: string):
 }
 
 export function relativeFromCwd(absolutePath: string): string {
-  const relative = path.relative(process.cwd(), absolutePath);
+  const relative = path.relative(/* turbopackIgnore: true */ process.cwd(), absolutePath);
   return relative || absolutePath;
 }

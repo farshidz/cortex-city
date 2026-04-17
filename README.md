@@ -224,6 +224,67 @@ npm run worker
 
 Then open `http://localhost:3000`.
 
+If you want the web app to auto-start the worker during local development, set `CORTEX_ENABLE_WORKER_AUTOSTART=1` before starting `npm run dev`. Leave that disabled in production.
+
+## Production Deployment
+
+In production, run the web app and worker as separate `systemd` services. Do not rely on the web app to spawn the worker.
+
+Typical deploy flow:
+
+```bash
+npm ci
+npm run build
+```
+
+Service templates are included under `deploy/systemd/`:
+
+- `deploy/systemd/cortex-city-web.service`
+- `deploy/systemd/cortex-city-worker.service`
+
+Recommended production model:
+
+- `cortex-city-web.service` runs `npm run start`
+- `cortex-city-worker.service` runs `npm run worker`
+- both services use `Restart=always`
+- `CORTEX_ENABLE_WORKER_AUTOSTART=0`
+
+The worker reconciles live task PIDs on every poll, so `systemd` restarts do not lose track of interrupted work or overcount parallel session slots.
+
+The intended production user is `cortex`. Bootstrap creates that account, and deploy now defaults to installing and running the services as `cortex`.
+
+To deploy the current checkout to a remote Linux host over SSH, use:
+
+```bash
+scripts/deploy-ssh.sh ubuntu@your-server /opt/cortex-city/app
+```
+
+The script syncs the repo with `rsync`, runs `npm ci` and `npm run build` on the remote host, installs rendered `systemd` units, and restarts the web and worker services. By default it deploys as the `cortex` service user created by bootstrap; override `SYSTEMD_USER`, `SYSTEMD_GROUP`, `REMOTE_OWNER`, and `REMOTE_GROUP` if you want a different account.
+
+For first-time host setup, run:
+
+```bash
+scripts/bootstrap-ssh.sh ubuntu@your-server
+```
+
+The bootstrap script installs base packages, installs Node.js plus `gh`, `codex`, `claude`, and `wrangler`, creates the app user, prepares `/opt/cortex-city/app` and `/etc/cortex-city`, and writes starter `web.env` and `worker.env` files. It does not install nginx or any reverse proxy.
+
+By default bootstrap also reads deploy credentials from a gitignored repo-local `.env.prod`, writes the GitHub and Cloudflare values into the remote `worker.env`, and pre-authenticates `gh` for the `cortex` service user:
+
+```bash
+cat > .env.prod <<'EOF'
+GH_TOKEN=github_pat_...
+CLOUDFLARE_API_TOKEN=...
+CLOUDFLARE_ACCOUNT_ID=...
+EOF
+
+scripts/bootstrap-ssh.sh ubuntu@your-server
+```
+
+Set `BOOTSTRAP_ENV_FILE=/path/to/file` if you want a different local credentials file, or override individual values from your shell for a single run.
+
+`codex` and `claude` still require a one-time interactive login as `cortex` when you want to use subscription-based access instead of API keys.
+
 ## Local State
 
 Cortex City keeps its local runtime state under `.cortex/`.

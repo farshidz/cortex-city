@@ -1,0 +1,21 @@
+[Unit]
+Description=Cortex City web app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cortex
+Group=cortex
+WorkingDirectory=/opt/cortex-city/app
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=CORTEX_ENABLE_WORKER_AUTOSTART=0
+EnvironmentFile=-/etc/cortex-city/web.env
+ExecStart=/usr/bin/env npm run start -- --hostname 0.0.0.0
+Restart=always
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
