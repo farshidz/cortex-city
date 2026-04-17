@@ -1,9 +1,69 @@
 import { existsSync } from "fs";
-import { spawn } from "child_process";
+import { spawn, execFileSync } from "child_process";
 import path from "path";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const GIT_DIR = path.join(CORTEX_DIR, ".git");
+
+export interface CortexGitStatus {
+  enabled: boolean;
+  pushing: boolean;
+  remoteName?: string;
+  remoteUrl?: string;
+  remoteSlug?: string;
+}
+
+function extractRepoSlug(remoteUrl?: string): string | undefined {
+  if (!remoteUrl) return undefined;
+  const sshMatch = remoteUrl.match(/^[^@]+@[^:]+:(.+?)(?:\.git)?$/);
+  if (sshMatch) return sshMatch[1];
+  const httpsMatch = remoteUrl.match(/^[a-z]+:\/\/[^/]+\/(.+?)(?:\.git)?$/i);
+  if (httpsMatch) return httpsMatch[1];
+  return undefined;
+}
+
+export function getCortexGitStatus(): CortexGitStatus {
+  if (!existsSync(GIT_DIR)) {
+    return { enabled: false, pushing: false };
+  }
+
+  try {
+    const remotes = execFileSync("git", ["-C", CORTEX_DIR, "remote"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const remoteName = remotes[0];
+    let remoteUrl: string | undefined;
+    if (remoteName) {
+      try {
+        remoteUrl = execFileSync(
+          "git",
+          ["-C", CORTEX_DIR, "remote", "get-url", remoteName],
+          {
+            encoding: "utf-8",
+            stdio: ["ignore", "pipe", "ignore"],
+          }
+        ).trim();
+      } catch {
+        remoteUrl = undefined;
+      }
+    }
+
+    return {
+      enabled: true,
+      pushing: remotes.length > 0,
+      remoteName,
+      remoteUrl,
+      remoteSlug: extractRepoSlug(remoteUrl),
+    };
+  } catch {
+    return { enabled: true, pushing: false };
+  }
+}
 
 export function snapshotCortex(reason: string): void {
   if (!existsSync(GIT_DIR)) return;

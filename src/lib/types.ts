@@ -37,6 +37,7 @@ export interface Task {
   pr_url?: string;
   branch_name?: string;
   worktree_path?: string;
+  final_cleanup_state?: "running" | "finished";
   current_run_pid?: number;
   resume_requested?: boolean;
   pending_manual_instruction?: string;

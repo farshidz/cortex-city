@@ -7,7 +7,7 @@ You are addressing feedback on a pull request you previously created.
 {{MERGE_STATUS}}
 
 ## Instructions
-1. Immediately run `git fetch origin` and bring your working branch up to date with `origin/{{BASE_BRANCH}}` (merge or rebase, whichever matches repo norms). If GitHub reports conflicts, resolve them now before moving on.
+1. Immediately run `git fetch origin` and merge `origin/{{BASE_BRANCH}}` into your working branch. Do not rebase. If GitHub reports conflicts, resolve them now before moving on.
 2. Follow this GitHub review protocol exactly. You must inspect all three feedback surfaces separately before deciding there is nothing to do:
    - submitted review bodies
    - PR conversation comments
