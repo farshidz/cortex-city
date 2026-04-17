@@ -259,6 +259,14 @@ scripts/deploy-ssh.sh ubuntu@your-server /opt/cortex-city/app
 
 The script syncs the repo with `rsync`, runs `npm ci` and `npm run build` on the remote host, installs rendered `systemd` units, and restarts the web and worker services. By default the service user/group are derived from the SSH login user; override `SYSTEMD_USER` and `SYSTEMD_GROUP` if you want the services to run as a different account.
 
+For first-time host setup, run:
+
+```bash
+scripts/bootstrap-ssh.sh ubuntu@your-server
+```
+
+The bootstrap script installs base packages, installs Node.js, creates the app user, prepares `/opt/cortex-city/app` and `/etc/cortex-city`, and writes starter `web.env` and `worker.env` files. It does not install nginx or any reverse proxy.
+
 ## Local State
 
 Cortex City keeps its local runtime state under `.cortex/`.
