@@ -163,6 +163,7 @@ rsync -az --delete \
   --exclude='.env' \
   --exclude='.env.*' \
   --exclude='.cortex/' \
+  --exclude='.deploy/' \
   --exclude='logs/' \
   --exclude='.DS_Store' \
   --rsync-path="$SUDO rsync" \
