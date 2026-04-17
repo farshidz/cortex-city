@@ -13,8 +13,10 @@ Bootstrap a fresh Linux host for Cortex City. The script connects over SSH and:
   - creates /opt/cortex-city/app and /etc/cortex-city
   - creates starter web.env and worker.env files
   - verifies systemd is available
+  - reads deploy credentials from .env.prod-deploy by default
 
 Environment overrides:
+  BOOTSTRAP_ENV_FILE=/path/to/.env.prod-deploy
   APP_USER=cortex
   APP_GROUP=cortex
   APP_DIR=/opt/cortex-city/app
@@ -62,10 +64,43 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
 REMOTE="${1:-}"
 if [[ -z "$REMOTE" ]]; then
   usage >&2
   exit 1
+fi
+
+BOOTSTRAP_ENV_FILE="${BOOTSTRAP_ENV_FILE:-$REPO_ROOT/.env.prod-deploy}"
+
+original_gh_token="${GH_TOKEN+x}:${GH_TOKEN-}"
+original_github_token="${GITHUB_TOKEN+x}:${GITHUB_TOKEN-}"
+original_cloudflare_api_token="${CLOUDFLARE_API_TOKEN+x}:${CLOUDFLARE_API_TOKEN-}"
+original_cloudflare_account_id="${CLOUDFLARE_ACCOUNT_ID+x}:${CLOUDFLARE_ACCOUNT_ID-}"
+
+if [[ -f "$BOOTSTRAP_ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$BOOTSTRAP_ENV_FILE"
+  set +a
+fi
+
+if [[ "${original_gh_token%%:*}" == "x" ]]; then
+  GH_TOKEN="${original_gh_token#*:}"
+fi
+
+if [[ "${original_github_token%%:*}" == "x" ]]; then
+  GITHUB_TOKEN="${original_github_token#*:}"
+fi
+
+if [[ "${original_cloudflare_api_token%%:*}" == "x" ]]; then
+  CLOUDFLARE_API_TOKEN="${original_cloudflare_api_token#*:}"
+fi
+
+if [[ "${original_cloudflare_account_id%%:*}" == "x" ]]; then
+  CLOUDFLARE_ACCOUNT_ID="${original_cloudflare_account_id#*:}"
 fi
 
 APP_USER="${APP_USER:-cortex}"
