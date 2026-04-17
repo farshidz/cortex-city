@@ -7,6 +7,7 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import path from "path";
 import type { Task } from "./lib/types";
+import { shouldStartFinalCleanup } from "./lib/final-task-cleanup";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
@@ -51,24 +52,29 @@ async function poll() {
   // Clean up worktrees for tasks in final states
   console.log("[worker] Poll phase: cleanup final tasks");
   for (const task of tasks) {
-    if (
-      (task.status === "merged" || task.status === "closed") &&
-      task.worktree_path &&
-      !activePids.has(task.id)
-    ) {
-      console.log(`[worker] Running cleanup for task "${task.title}" (${task.id})`);
-      const { pid } = await spawnAgentSession(task, "cleanup", async (taskId: string) => {
-        activePids.delete(taskId);
-        const { getTask, updateTask: ut } = await import("./lib/store");
-        const { removeWorktree: rw } = await import("./lib/agent-runner");
-        const t = await getTask(taskId);
-        if (t?.worktree_path) {
-          rw(t);
-          await ut(taskId, { worktree_path: undefined });
-        }
+    if (!shouldStartFinalCleanup(task, activePids.has(task.id))) continue;
+
+    console.log(`[worker] Running cleanup for task "${task.title}" (${task.id})`);
+    const { pid } = await spawnAgentSession(task, "cleanup", async (taskId: string) => {
+      activePids.delete(taskId);
+      const { getTask, updateTask: ut } = await import("./lib/store");
+      const { removeWorktree: rw } = await import("./lib/agent-runner");
+      const t = await getTask(taskId);
+      if (!t) return;
+      if (t.worktree_path) {
+        rw(t);
+      }
+      await ut(taskId, {
+        worktree_path: undefined,
+        final_cleanup_state: "finished",
+        current_run_pid: undefined,
       });
-      activePids.set(task.id, pid);
-    }
+    });
+    await updateTask(task.id, {
+      final_cleanup_state: "running",
+      current_run_pid: pid,
+    });
+    activePids.set(task.id, pid);
   }
 
   // Prune old merged/closed tasks (12+ hours old)
