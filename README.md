@@ -269,10 +269,10 @@ scripts/bootstrap-ssh.sh ubuntu@your-server
 
 The bootstrap script installs base packages, installs Node.js plus `gh`, `codex`, `claude`, and `wrangler`, creates the app user, prepares `/opt/cortex-city/app` and `/etc/cortex-city`, and writes starter `web.env` and `worker.env` files. It does not install nginx or any reverse proxy.
 
-By default bootstrap also reads deploy credentials from a gitignored repo-local `.env.prod-deploy`, writes the GitHub and Cloudflare values into the remote `worker.env`, and pre-authenticates `gh` for the `cortex` service user:
+By default bootstrap also reads deploy credentials from a gitignored repo-local `.env.prod`, writes the GitHub and Cloudflare values into the remote `worker.env`, and pre-authenticates `gh` for the `cortex` service user:
 
 ```bash
-cat > .env.prod-deploy <<'EOF'
+cat > .env.prod <<'EOF'
 GH_TOKEN=github_pat_...
 CLOUDFLARE_API_TOKEN=...
 CLOUDFLARE_ACCOUNT_ID=...

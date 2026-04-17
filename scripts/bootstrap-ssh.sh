@@ -13,10 +13,10 @@ Bootstrap a fresh Linux host for Cortex City. The script connects over SSH and:
   - creates /opt/cortex-city/app and /etc/cortex-city
   - creates starter web.env and worker.env files
   - verifies systemd is available
-  - reads deploy credentials from .env.prod-deploy by default
+  - reads deploy credentials from .env.prod by default
 
 Environment overrides:
-  BOOTSTRAP_ENV_FILE=/path/to/.env.prod-deploy
+  BOOTSTRAP_ENV_FILE=/path/to/.env.prod
   APP_USER=cortex
   APP_GROUP=cortex
   APP_DIR=/opt/cortex-city/app
@@ -73,7 +73,7 @@ if [[ -z "$REMOTE" ]]; then
   exit 1
 fi
 
-BOOTSTRAP_ENV_FILE="${BOOTSTRAP_ENV_FILE:-$REPO_ROOT/.env.prod-deploy}"
+BOOTSTRAP_ENV_FILE="${BOOTSTRAP_ENV_FILE:-$REPO_ROOT/.env.prod}"
 
 original_gh_token="${GH_TOKEN+x}:${GH_TOKEN-}"
 original_github_token="${GITHUB_TOKEN+x}:${GITHUB_TOKEN-}"
@@ -168,8 +168,8 @@ upsert_env_file_var() {
   local tmp
 
   tmp=\$(mktemp)
-  if [[ -f "\$file" ]]; then
-    grep -vE \"^\${key}=\" \"\$file\" >\"\$tmp\" || true
+  if \$SUDO test -f "\$file"; then
+    \$SUDO cat "\$file" | grep -vE \"^\${key}=\" >\"\$tmp\" || true
   fi
   printf '%s=%s\n' \"\$key\" \"\$value\" >>\"\$tmp\"
   \$SUDO install -m 640 -o root -g \"\$APP_GROUP\" \"\$tmp\" \"\$file\"
@@ -279,7 +279,9 @@ fi
 \$SUDO chown root:\"\$APP_GROUP\" \"\$WEB_ENV_FILE\" \"\$WORKER_ENV_FILE\"
 
 if [[ -n \"\$GH_TOKEN\" ]] && command -v gh >/dev/null 2>&1; then
-  \$SUDO -u \"\$APP_USER\" -H env GH_TOKEN=\"\$GH_TOKEN\" sh -lc 'printf "%s" "$GH_TOKEN" | gh auth login --with-token'
+  if ! printf '%s' \"\$GH_TOKEN\" | \$SUDO -u \"\$APP_USER\" -H env -u GH_TOKEN -u GITHUB_TOKEN gh auth login --with-token; then
+    echo 'Warning: gh auth login failed. GH_TOKEN is still present in worker.env for headless use.' >&2
+  fi
 fi
 
 echo
