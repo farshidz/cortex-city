@@ -445,6 +445,7 @@ test("cleanup runs use the cleanup prompt even when a session already exists", (
   assert.ok(result.args.args.includes("thread-cleanup"));
   assert.match(result.args.args.at(-1), /^CLEANUP closed \| Cover orchestration edges \|/);
   assert.equal(result.tasks[0].last_run_result, "success");
+  assert.equal(result.tasks[0].status, "closed");
 });
 
 test("plain-text PR output still moves the task into review and keeps the existing session id", () => {

@@ -773,7 +773,10 @@ async function handleRunComplete(
       }
 
       // Auto-transition status based on agent report
-      if (report.status === "completed" || report.status === "needs_review") {
+      if (
+        runReason !== "cleanup" &&
+        (report.status === "completed" || report.status === "needs_review")
+      ) {
         if (report.pr_url) {
           updates.status = "in_review";
         }
@@ -783,7 +786,7 @@ async function handleRunComplete(
       const prMatch = result.result?.match(
         /https:\/\/github\.com\/[^\s)]+\/pull\/\d+/
       );
-      if (prMatch) {
+      if (prMatch && runReason !== "cleanup") {
         updates.pr_url = prMatch[0];
         updates.status = "in_review";
       }

@@ -7,6 +7,17 @@ interface PRInfo {
   number: string;
 }
 
+interface ExecResult {
+  ok: boolean;
+  output: string;
+  error: string;
+}
+
+interface StatusCheckRollupItem {
+  name?: string;
+  state?: string;
+}
+
 function parsePRUrl(url: string): PRInfo | null {
   const match = url.match(
     /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/
@@ -15,7 +26,7 @@ function parsePRUrl(url: string): PRInfo | null {
   return { owner: match[1], repo: match[2], number: match[3] };
 }
 
-function exec(cmd: string): Promise<string> {
+function execResult(cmd: string): Promise<ExecResult> {
   return new Promise((resolve) => {
     execCb(cmd, { encoding: "utf-8", timeout: 30000 }, (err, stdout, stderr) => {
       if (err) {
@@ -25,12 +36,75 @@ function exec(cmd: string): Promise<string> {
         } else if (msg) {
           console.error(`[github] Command failed: ${cmd.slice(0, 80)} — ${msg.slice(0, 200)}`);
         }
-        resolve("");
+        resolve({ ok: false, output: "", error: msg });
         return;
       }
-      resolve((stdout || "").trim());
+      resolve({
+        ok: true,
+        output: (stdout || "").trim(),
+        error: (stderr || "").trim(),
+      });
     });
   });
+}
+
+async function exec(cmd: string): Promise<string> {
+  const result = await execResult(cmd);
+  return result.output;
+}
+
+async function execJson<T>(cmd: string): Promise<T | null> {
+  const raw = await exec(cmd);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function execPaginatedArray<T>(endpoint: string): Promise<T[]> {
+  const parsed = await execJson<unknown>(`gh api --paginate --slurp ${endpoint}`);
+  if (!Array.isArray(parsed)) return [];
+  const items: T[] = [];
+  for (const page of parsed) {
+    if (!Array.isArray(page)) continue;
+    items.push(...(page as T[]));
+  }
+  return items;
+}
+
+async function execJsonStrict<T>(cmd: string): Promise<T | null> {
+  const result = await execResult(cmd);
+  if (!result.ok || !result.output) return null;
+  try {
+    return JSON.parse(result.output) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function execPaginatedArrayStrict<T>(endpoint: string): Promise<T[] | null> {
+  const parsed = await execJsonStrict<unknown>(`gh api --paginate --slurp ${endpoint}`);
+  if (!Array.isArray(parsed)) return null;
+  const items: T[] = [];
+  for (const page of parsed) {
+    if (!Array.isArray(page)) return null;
+    items.push(...(page as T[]));
+  }
+  return items;
+}
+
+function serializeCheckStates(checks: StatusCheckRollupItem[]): string {
+  return checks
+    .filter((check) => typeof check.name === "string" && typeof check.state === "string")
+    .map((check) => `${check.name}=${check.state}`)
+    .sort()
+    .join(",");
+}
+
+function isNoChecksError(message: string): boolean {
+  return /no checks reported/i.test(message);
 }
 
 export async function getCIStatus(prUrl: string): Promise<string> {
@@ -45,18 +119,18 @@ export async function prNeedsAttention(prUrl: string): Promise<boolean> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return false;
 
-  const [pendingReviews, commentCount, checks] = await Promise.all([
-    exec(
-      `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews --jq '[.[] | select(.state == "CHANGES_REQUESTED")] | length'`
+  const [reviews, comments, checks] = await Promise.all([
+    execPaginatedArray<{ state?: string }>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
     ),
-    exec(
-      `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments --jq 'length'`
+    execPaginatedArray<unknown>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
     ),
     exec(`gh pr checks ${prUrl} 2>&1`),
   ]);
 
-  if (pendingReviews && parseInt(pendingReviews) > 0) return true;
-  if (commentCount && parseInt(commentCount) > 0) return true;
+  if (reviews.some((review) => review.state === "CHANGES_REQUESTED")) return true;
+  if (comments.length > 0) return true;
   if (checks.includes("fail") || checks.includes("X ")) return true;
 
   return false;
@@ -150,67 +224,103 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return [];
 
-  const [submittedReviewsRaw, commentsRaw, issueCommentsRaw] = await Promise.all([
-    exec(`gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews --jq '[.[] | select(.state != "PENDING") | .id]'`),
-    exec(`gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments --jq '[.[] | {id, review_id: .pull_request_review_id}]'`),
-    exec(`gh api repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments --jq '[.[].id]'`),
+  const [reviews, comments, issueComments] = await Promise.all([
+    execPaginatedArray<{ id: number; state?: string }>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
+    ),
+    execPaginatedArray<{ id: number; pull_request_review_id: number | null }>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
+    ),
+    execPaginatedArray<{ id: number }>(
+      `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
+    ),
   ]);
 
-  const submittedIds: number[] = (() => { try { return JSON.parse(submittedReviewsRaw || "[]"); } catch { return []; } })();
-  const comments: { id: number; review_id: number | null }[] = (() => { try { return JSON.parse(commentsRaw || "[]"); } catch { return []; } })();
-  const issueCommentIds: number[] = (() => { try { return JSON.parse(issueCommentsRaw || "[]"); } catch { return []; } })();
+  const submittedIds = reviews
+    .filter((review) => review.state !== "PENDING")
+    .map((review) => review.id);
 
   // Inline review comments from submitted reviews + PR-level conversation comments
   const reviewCommentIds = comments
-    .filter((c) => c.review_id === null || submittedIds.includes(c.review_id))
-    .map((c) => c.id);
+    .filter((comment) =>
+      comment.pull_request_review_id === null ||
+      submittedIds.includes(comment.pull_request_review_id)
+    )
+    .map((comment) => comment.id);
 
-  return [...reviewCommentIds, ...issueCommentIds].sort();
+  return [...reviewCommentIds, ...issueComments.map((comment) => comment.id)].sort();
 }
 
 export async function getPRStateHash(prUrl: string): Promise<string> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return "";
 
-  // Get submitted review IDs to whitelist their comments in the hash
-  const submittedReviewIdsRaw = await exec(
-    `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews --jq '[.[] | select(.state != "PENDING") | .id]'`
-  );
-  const submittedIds: number[] = (() => {
-    try { return JSON.parse(submittedReviewIdsRaw || "[]"); } catch { return []; }
-  })();
-
-  const [headSha, allComments, issueCommentIds, reviewIds, ciStatus] = await Promise.all([
-    exec(
-      `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number} --jq '.head.sha'`
+  const [prData, reviews, comments, issueComments, checksResult] = await Promise.all([
+    execJsonStrict<{
+      headRefOid?: string;
+      statusCheckRollup?: StatusCheckRollupItem[];
+    }>(
+      `gh pr view ${prUrl} --json headRefOid,statusCheckRollup`
     ),
-    // Inline review comments
-    exec(
-      `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments --jq '[.[] | {id, review_id: .pull_request_review_id}]'`
+    execPaginatedArrayStrict<{ id: number; state?: string }>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
     ),
-    // PR-level conversation comments
-    exec(
-      `gh api repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments --jq '[.[].id] | sort'`
+    execPaginatedArrayStrict<{ id: number; pull_request_review_id: number | null }>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
     ),
-    // Only submitted reviews
-    exec(
-      `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews --jq '[.[] | select(.state != "PENDING") | {id, state}] | sort_by(.id)'`
+    execPaginatedArrayStrict<{ id: number }>(
+      `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
     ),
-    exec(
+    execResult(
       `gh pr checks ${prUrl} --json name,state --jq '[.[] | .name + "=" + .state] | sort | join(",")'`
     ),
   ]);
+  if (
+    !prData ||
+    typeof prData.headRefOid !== "string" ||
+    !reviews ||
+    !comments ||
+    !issueComments
+  ) {
+    return "";
+  }
 
-  // Only include comments from submitted reviews (whitelist approach)
-  let filteredCommentIds = "[]";
-  try {
-    const comments: { id: number; review_id: number | null }[] = JSON.parse(allComments || "[]");
-    const submitted = comments.filter(
-      (c) => c.review_id === null || submittedIds.includes(c.review_id)
-    );
-    filteredCommentIds = JSON.stringify(submitted.map((c) => c.id).sort());
-  } catch {}
+  const headSha = prData.headRefOid.trim();
+  if (!headSha) return "";
 
+  let ciStatus = checksResult.output;
+  if (!checksResult.ok) {
+    if (isNoChecksError(checksResult.error)) {
+      const checks = Array.isArray(prData.statusCheckRollup)
+        ? prData.statusCheckRollup
+        : [];
+      ciStatus = serializeCheckStates(checks);
+    } else {
+      return "";
+    }
+  }
+
+  const submittedIds = reviews
+    .filter((review) => review.state !== "PENDING")
+    .map((review) => review.id);
+  const filteredCommentIds = JSON.stringify(
+    comments
+      .filter((comment) =>
+        comment.pull_request_review_id === null ||
+        submittedIds.includes(comment.pull_request_review_id)
+      )
+      .map((comment) => comment.id)
+      .sort()
+  );
+  const issueCommentIds = JSON.stringify(
+    issueComments.map((comment) => comment.id).sort()
+  );
+  const reviewIds = JSON.stringify(
+    reviews
+      .filter((review) => review.state !== "PENDING")
+      .map((review) => ({ id: review.id, state: review.state ?? "" }))
+      .sort((a, b) => a.id - b.id)
+  );
   const combined = `${headSha}|${filteredCommentIds}|${issueCommentIds}|${reviewIds}|${ciStatus}`;
   return createHash("sha256").update(combined).digest("hex").slice(0, 16);
 }
