@@ -267,7 +267,7 @@ For first-time host setup, run:
 scripts/bootstrap-ssh.sh ubuntu@your-server
 ```
 
-The bootstrap script installs base packages, installs Node.js, creates the app user, prepares `/opt/cortex-city/app` and `/etc/cortex-city`, and writes starter `web.env` and `worker.env` files. It does not install nginx or any reverse proxy.
+The bootstrap script installs base packages, installs Node.js plus `gh`, `codex`, `claude`, and `wrangler`, creates the app user, prepares `/opt/cortex-city/app` and `/etc/cortex-city`, and writes starter `web.env` and `worker.env` files. It does not install nginx or any reverse proxy.
 
 ## Local State
 

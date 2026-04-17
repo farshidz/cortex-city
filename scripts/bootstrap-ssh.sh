@@ -8,6 +8,7 @@ Usage: scripts/bootstrap-ssh.sh user@host
 Bootstrap a fresh Linux host for Cortex City. The script connects over SSH and:
   - installs base packages
   - installs Node.js from NodeSource
+  - installs gh, codex, claude, and wrangler
   - creates the app user/group
   - creates /opt/cortex-city/app and /etc/cortex-city
   - creates starter web.env and worker.env files
@@ -22,6 +23,9 @@ Environment overrides:
   WORKER_ENV_FILE=/etc/cortex-city/worker.env
   NODE_MAJOR=22
   INSTALL_GH=1
+  INSTALL_CODEX=1
+  INSTALL_CLAUDE=1
+  INSTALL_WRANGLER=1
   SSH_PORT=22
   SSH_KEY_PATH=~/.ssh/your-key.pem
   SSH_STRICT_HOST_KEY_CHECKING=accept-new
@@ -69,6 +73,9 @@ WEB_ENV_FILE="${WEB_ENV_FILE:-$CONFIG_DIR/web.env}"
 WORKER_ENV_FILE="${WORKER_ENV_FILE:-$CONFIG_DIR/worker.env}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 INSTALL_GH="${INSTALL_GH:-1}"
+INSTALL_CODEX="${INSTALL_CODEX:-1}"
+INSTALL_CLAUDE="${INSTALL_CLAUDE:-1}"
+INSTALL_WRANGLER="${INSTALL_WRANGLER:-1}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
 SSH_STRICT_HOST_KEY_CHECKING="${SSH_STRICT_HOST_KEY_CHECKING:-accept-new}"
@@ -94,6 +101,9 @@ WEB_ENV_FILE=$(quote "$WEB_ENV_FILE")
 WORKER_ENV_FILE=$(quote "$WORKER_ENV_FILE")
 NODE_MAJOR=$(quote "$NODE_MAJOR")
 INSTALL_GH=$(quote "$INSTALL_GH")
+INSTALL_CODEX=$(quote "$INSTALL_CODEX")
+INSTALL_CLAUDE=$(quote "$INSTALL_CLAUDE")
+INSTALL_WRANGLER=$(quote "$INSTALL_WRANGLER")
 
 if ! command -v systemctl >/dev/null 2>&1; then
   echo 'systemd is required on the remote host.' >&2
@@ -138,6 +148,18 @@ case \${ID:-} in
     exit 1
     ;;
 esac
+
+if [[ \$INSTALL_CODEX == 1 ]]; then
+  \$SUDO npm install -g @openai/codex@latest
+fi
+
+if [[ \$INSTALL_CLAUDE == 1 ]]; then
+  \$SUDO npm install -g @anthropic-ai/claude-code@latest
+fi
+
+if [[ \$INSTALL_WRANGLER == 1 ]]; then
+  \$SUDO npm install -g wrangler@latest
+fi
 
 if ! getent group \"\$APP_GROUP\" >/dev/null 2>&1; then
   \$SUDO groupadd --system \"\$APP_GROUP\"
@@ -201,10 +223,29 @@ if command -v gh >/dev/null 2>&1; then
 else
   echo 'gh not installed'
 fi
+if command -v codex >/dev/null 2>&1; then
+  codex --version | head -n 1
+else
+  echo 'codex not installed'
+fi
+if command -v claude >/dev/null 2>&1; then
+  claude --version | head -n 1
+else
+  echo 'claude not installed'
+fi
+if command -v wrangler >/dev/null 2>&1; then
+  wrangler --version | head -n 1
+else
+  echo 'wrangler not installed'
+fi
 echo
 echo 'Next steps:'
 echo '  1. Put required credentials into the env files if needed.'
-echo '  2. Authenticate gh / Claude / Codex for the service user if required.'
+echo '  2. Authenticate each CLI as the service user:'
+echo \"     sudo -u \$APP_USER -H gh auth login\"
+echo \"     sudo -u \$APP_USER -H codex --login\"
+echo \"     sudo -u \$APP_USER -H claude\"
+echo \"     sudo -u \$APP_USER -H wrangler login\"
 echo '  3. Run scripts/deploy-ssh.sh to sync the app and install systemd units.'
 "
 
