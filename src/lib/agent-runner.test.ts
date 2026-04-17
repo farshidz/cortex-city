@@ -28,7 +28,7 @@ function writeTemplates(workspace: string) {
   mkdirSync(path.join(workspace, "prompts", "templates"), { recursive: true });
   writeFileSync(
     path.join(workspace, "prompts", "templates", "initial.md"),
-    "INITIAL {{TASK_TITLE}} | {{TASK_DESCRIPTION}} | {{TASK_PLAN}} | {{AGENT_NAME}}"
+    "INITIAL {{TASK_TITLE}} | {{TASK_DESCRIPTION}} | {{TASK_PLAN}} | {{BASE_BRANCH}} | {{AGENT_NAME}}"
   );
   writeFileSync(
     path.join(workspace, "prompts", "templates", "review.md"),
@@ -55,6 +55,10 @@ function writeConfig(workspace: string) {
     "Agent-specific prompt"
   );
   writeFileSync(
+    path.join(workspace, "prompts", "agents", "marqo-documentation-agent.md"),
+    "Docs prompt"
+  );
+  writeFileSync(
     path.join(workspace, ".cortex", "config.json"),
     JSON.stringify(
       {
@@ -74,6 +78,13 @@ function writeConfig(workspace: string) {
             prompt_file: "prompts/agents/cortex-city-swe.md",
             default_branch: "main",
             description: "Owns the control panel and worker.",
+          },
+          "marqo-documentation-agent": {
+            name: "Marqo Documentation Agent",
+            repo_slug: "marqo-ai/marqodocs",
+            repo_path: workspace,
+            prompt_file: "prompts/agents/marqo-documentation-agent.md",
+            default_branch: "docusaurus-main",
           },
         },
       },
@@ -384,6 +395,71 @@ test("spawnAgentSession uses the review prompt and creates follow-up tasks from 
   assert.equal(followupTask.permission_mode, "bypassPermissions");
   assert.equal(followupTask.model, "gpt-5.5-codex");
   assert.equal(followupTask.effort, "medium");
+});
+
+test("spawnAgentSession uses the configured default branch in the initial prompt", () => {
+  const workspace = setupWorkspace();
+  const argsFile = path.join(workspace, "initial-args.json");
+  const worktreePath = path.join(workspace, "worktree");
+  const report = {
+    status: "completed",
+    summary: "Opened docs PR",
+    pr_url: "https://github.com/marqo-ai/marqodocs/pull/12",
+    branch_name: "agent/docs-change",
+    files_changed: ["docusaurus/docs/example.md"],
+    assumptions: [],
+    blockers: [],
+    next_steps: [],
+  };
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          status: "open",
+          agent: "marqo-documentation-agent",
+          worktree_path: worktreePath,
+        })
+      )};
+      await createTask(task);
+      process.env.FAKE_AGENT_ARGS_FILE = ${JSON.stringify(argsFile)};
+      process.env.FAKE_AGENT_STDOUT = ${JSON.stringify(
+        [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-docs" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "agent_message",
+              text: JSON.stringify(report),
+            },
+          }),
+          JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: 7, cached_input_tokens: 0, output_tokens: 3 },
+          }),
+        ].join("\\n")
+      )};
+
+      await new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined))
+          .catch(reject);
+      });
+
+      console.log(
+        JSON.stringify({
+          tasks: readTasks(),
+          args: JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8")),
+        })
+      );
+    `
+  );
+
+  assert.match(
+    result.args.args.at(-1),
+    /^INITIAL Cover orchestration edges \| Exercise agent-runner prompt selection \| Add focused tests \| docusaurus-main \| Marqo Documentation Agent$/
+  );
+  assert.equal(result.tasks[0].pr_url, "https://github.com/marqo-ai/marqodocs/pull/12");
 });
 
 test("cleanup runs use the cleanup prompt even when a session already exists", () => {

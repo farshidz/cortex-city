@@ -50,6 +50,8 @@ function writeTestTemplates(workspace: string) {
       "Title={{TASK_TITLE}}",
       "Description={{TASK_DESCRIPTION}}",
       "Plan={{TASK_PLAN}}",
+      "Base={{BASE_BRANCH}}",
+      "Again={{BASE_BRANCH}}",
       "Agent={{AGENT_NAME}}",
       "{{REPO_CONTEXT_SECTION}}",
       "Directory={{AGENT_DIRECTORY}}",
@@ -160,6 +162,8 @@ test("buildInitialPrompt fills the template with task, agent, and directory deta
   assert.match(result, /Title=Add unit tests/);
   assert.match(result, /Description=Add comprehensive coverage/);
   assert.match(result, /Plan=Cover the lib modules/);
+  assert.match(result, /Base=main/);
+  assert.match(result, /Again=main/);
   assert.match(result, /Agent=Cortex City SWE/);
   assert.match(result, /## Repository Context\nRepository Context/);
   assert.match(
@@ -191,6 +195,7 @@ test("buildInitialPrompt falls back when the task plan or agent prompt file is m
   );
 
   assert.match(result, /Plan=No detailed plan provided\. Determine the best approach\./);
+  assert.match(result, /Base=trunk/);
   assert.match(result, /## Repository Context\nNo agent-specific context configured\./);
 });
 
@@ -248,7 +253,7 @@ test("buildReviewPrompt uses sensible defaults for unknown mergeability", () => 
   assert.match(result, /PR=Unknown/);
   assert.match(
     result,
-    /Status=Mergeability unknown\. Fetch latest main and assume conflicts until proven otherwise\./
+    /Status=Mergeability unknown\. Fetch latest trunk and assume conflicts until proven otherwise\./
   );
   assert.match(result, /Base=trunk/);
   assert.doesNotMatch(result, /Agent Review Context/);
