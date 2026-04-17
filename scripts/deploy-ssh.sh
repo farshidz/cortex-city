@@ -165,11 +165,13 @@ rsync -az --delete \
   --exclude='.cortex/' \
   --exclude='logs/' \
   --exclude='.DS_Store' \
+  --rsync-path="$SUDO rsync" \
   -e "$rsync_rsh" \
   "$REPO_ROOT/" "$REMOTE:$APP_DIR/"
 
 log "Uploading rendered systemd units"
 rsync -az --delete \
+  --rsync-path="$SUDO rsync" \
   -e "$rsync_rsh" \
   "$tmpdir/systemd/" "$REMOTE:$REMOTE_RENDER_DIR/"
 
