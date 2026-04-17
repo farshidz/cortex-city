@@ -26,6 +26,9 @@ Environment overrides:
   INSTALL_CODEX=1
   INSTALL_CLAUDE=1
   INSTALL_WRANGLER=1
+  GH_TOKEN=github_pat_...
+  CLOUDFLARE_API_TOKEN=...
+  CLOUDFLARE_ACCOUNT_ID=...
   SSH_PORT=22
   SSH_KEY_PATH=~/.ssh/your-key.pem
   SSH_STRICT_HOST_KEY_CHECKING=accept-new
@@ -51,7 +54,7 @@ require_local_command() {
 
 run_remote() {
   local script="$1"
-  "${ssh_cmd[@]}" "$REMOTE" "bash -lc $(printf '%q' "$script")"
+  printf '%s' "$script" | "${ssh_cmd[@]}" "$REMOTE" "bash -s"
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -76,6 +79,9 @@ INSTALL_GH="${INSTALL_GH:-1}"
 INSTALL_CODEX="${INSTALL_CODEX:-1}"
 INSTALL_CLAUDE="${INSTALL_CLAUDE:-1}"
 INSTALL_WRANGLER="${INSTALL_WRANGLER:-1}"
+GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
+CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
 SSH_STRICT_HOST_KEY_CHECKING="${SSH_STRICT_HOST_KEY_CHECKING:-accept-new}"
@@ -104,6 +110,9 @@ INSTALL_GH=$(quote "$INSTALL_GH")
 INSTALL_CODEX=$(quote "$INSTALL_CODEX")
 INSTALL_CLAUDE=$(quote "$INSTALL_CLAUDE")
 INSTALL_WRANGLER=$(quote "$INSTALL_WRANGLER")
+GH_TOKEN=$(quote "$GH_TOKEN")
+CLOUDFLARE_API_TOKEN=$(quote "$CLOUDFLARE_API_TOKEN")
+CLOUDFLARE_ACCOUNT_ID=$(quote "$CLOUDFLARE_ACCOUNT_ID")
 
 if ! command -v systemctl >/dev/null 2>&1; then
   echo 'systemd is required on the remote host.' >&2
@@ -116,6 +125,21 @@ else
   echo 'Unable to detect remote OS.' >&2
   exit 1
 fi
+
+upsert_env_file_var() {
+  local file="\$1"
+  local key="\$2"
+  local value="\$3"
+  local tmp
+
+  tmp=\$(mktemp)
+  if [[ -f "\$file" ]]; then
+    grep -vE \"^\${key}=\" \"\$file\" >\"\$tmp\" || true
+  fi
+  printf '%s=%s\n' \"\$key\" \"\$value\" >>\"\$tmp\"
+  \$SUDO install -m 640 -o root -g \"\$APP_GROUP\" \"\$tmp\" \"\$file\"
+  rm -f \"\$tmp\"
+}
 
 install_packages_apt() {
   \$SUDO apt-get update
@@ -204,8 +228,24 @@ HOME=/home/\$APP_USER
 EOF_WORKER
 fi
 
+if [[ -n \"\$GH_TOKEN\" ]]; then
+  upsert_env_file_var \"\$WORKER_ENV_FILE\" GH_TOKEN \"\$GH_TOKEN\"
+fi
+
+if [[ -n \"\$CLOUDFLARE_API_TOKEN\" ]]; then
+  upsert_env_file_var \"\$WORKER_ENV_FILE\" CLOUDFLARE_API_TOKEN \"\$CLOUDFLARE_API_TOKEN\"
+fi
+
+if [[ -n \"\$CLOUDFLARE_ACCOUNT_ID\" ]]; then
+  upsert_env_file_var \"\$WORKER_ENV_FILE\" CLOUDFLARE_ACCOUNT_ID \"\$CLOUDFLARE_ACCOUNT_ID\"
+fi
+
 \$SUDO chmod 640 \"\$WEB_ENV_FILE\" \"\$WORKER_ENV_FILE\"
 \$SUDO chown root:\"\$APP_GROUP\" \"\$WEB_ENV_FILE\" \"\$WORKER_ENV_FILE\"
+
+if [[ -n \"\$GH_TOKEN\" ]] && command -v gh >/dev/null 2>&1; then
+  \$SUDO -u \"\$APP_USER\" -H env GH_TOKEN=\"\$GH_TOKEN\" sh -lc 'printf "%s" "$GH_TOKEN" | gh auth login --with-token'
+fi
 
 echo
 echo 'Bootstrap complete.'
@@ -240,12 +280,16 @@ else
 fi
 echo
 echo 'Next steps:'
-echo '  1. Put required credentials into the env files if needed.'
-echo '  2. Authenticate each CLI as the service user:'
-echo \"     sudo -u \$APP_USER -H gh auth login\"
+echo '  1. worker.env has been updated with any GH / Cloudflare values passed to bootstrap.'
+echo '  2. Authenticate subscription-backed CLIs as the service user:'
+if [[ -z \"\$GH_TOKEN\" ]]; then
+  echo \"     sudo -u \$APP_USER -H gh auth login\"
+fi
 echo \"     sudo -u \$APP_USER -H codex --login\"
 echo \"     sudo -u \$APP_USER -H claude\"
-echo \"     sudo -u \$APP_USER -H wrangler login\"
+if [[ -z \"\$CLOUDFLARE_API_TOKEN\" ]]; then
+  echo \"     sudo -u \$APP_USER -H wrangler login\"
+fi
 echo '  3. Run scripts/deploy-ssh.sh to sync the app and install systemd units.'
 "
 
