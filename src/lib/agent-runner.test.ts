@@ -259,7 +259,10 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
     `
   );
 
-  assert.deepEqual(result.args.args.slice(0, 3), ["exec", "resume", "--json"]);
+  assert.equal(result.args.args[0], "exec");
+  assert.equal(result.args.args[1], "--json");
+  assert.ok(result.args.args.includes("--output-schema"));
+  assert.ok(result.args.args.includes("resume"));
   assert.ok(result.args.args.includes("thread-123"));
   assert.equal(result.args.args.at(-1), "Apply the reviewer feedback");
   assert.ok(
@@ -367,6 +370,7 @@ test("spawnAgentSession uses the review prompt and creates follow-up tasks from 
 
   assert.equal(result.args.args[0], "exec");
   assert.equal(result.args.args[1], "--json");
+  assert.ok(result.args.args.includes("--output-schema"));
   assert.ok(result.args.args.includes("--model"));
   assert.ok(result.args.args.includes("gpt-5.5-codex"));
   assert.ok(result.args.args.includes('model_reasoning_effort="medium"'));
@@ -517,7 +521,10 @@ test("cleanup runs use the cleanup prompt even when a session already exists", (
     `
   );
 
-  assert.deepEqual(result.args.args.slice(0, 3), ["exec", "resume", "--json"]);
+  assert.equal(result.args.args[0], "exec");
+  assert.equal(result.args.args[1], "--json");
+  assert.ok(result.args.args.includes("--output-schema"));
+  assert.ok(result.args.args.includes("resume"));
   assert.ok(result.args.args.includes("thread-cleanup"));
   assert.match(result.args.args.at(-1), /^CLEANUP closed \| Cover orchestration edges \|/);
   assert.equal(result.tasks[0].last_run_result, "success");
@@ -570,7 +577,10 @@ test("plain-text PR output still moves the task into review and keeps the existi
     `
   );
 
-  assert.equal(result.args.args[1], "resume");
+  assert.equal(result.args.args[0], "exec");
+  assert.equal(result.args.args[1], "--json");
+  assert.ok(result.args.args.includes("--output-schema"));
+  assert.ok(result.args.args.includes("resume"));
   assert.equal(result.tasks[0].session_id, "existing-thread");
   assert.equal(result.tasks[0].pr_url, "https://github.com/farshidz/cortex-city/pull/11");
   assert.equal(result.tasks[0].status, "in_review");
@@ -670,6 +680,7 @@ test("spawnAgentSession passes Claude model and effort flags", () => {
           permission_mode: "acceptEdits",
           model: "claude-opus-4-1",
           effort: "high",
+          session_id: "claude-existing-session",
           worktree_path: worktreePath,
         })
       )};
@@ -698,5 +709,8 @@ test("spawnAgentSession passes Claude model and effort flags", () => {
   assert.ok(result.args.args.includes("high"));
   assert.ok(result.args.args.includes("--permission-mode"));
   assert.ok(result.args.args.includes("acceptEdits"));
+  assert.ok(result.args.args.includes("--json-schema"));
+  assert.ok(result.args.args.includes("--resume"));
+  assert.ok(result.args.args.includes("claude-existing-session"));
   assert.equal(result.tasks[0].session_id, "claude-session");
 });
