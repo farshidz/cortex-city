@@ -897,8 +897,9 @@ async function handleRunComplete(
     const outputTokens = result.usage?.output_tokens || 0;
     const didFail = exitCode !== 0 || result.is_error;
     const isBudgetExceeded = result.terminal_reason === "budget_exceeded";
-    // Failed or over-budget runs can still emit a structured payload; keep the
-    // metrics, but do not open review loops or spawn follow-up tasks from them.
+    // `handleRunComplete` parses whatever payload the runtime returned before
+    // it decides whether the run succeeded, so only apply review/follow-up
+    // side effects when the exit status and terminal reason are both healthy.
     const shouldApplySuccessSideEffects = !didFail && !isBudgetExceeded;
 
     const updates: Partial<Task> = {
