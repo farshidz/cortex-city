@@ -476,6 +476,8 @@ export async function spawnAgentSession(
     }
   });
 
+  // EventEmitter listeners do not await returned promises, so keep the
+  // listener itself synchronous and funnel async cleanup through finalizeRun.
   child.on("close", (code) => {
     void finalizeRun(async () => {
       const durationMs = Date.now() - spawnedAt;
