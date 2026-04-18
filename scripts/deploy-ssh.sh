@@ -20,6 +20,7 @@ Environment overrides:
   REMOTE_GROUP=cortex
   WEB_SERVICE_NAME=cortex-city-web.service
   WORKER_SERVICE_NAME=cortex-city-worker.service
+  HOST_METRICS_SERVICE_NAME=cortex-city-host-metrics.service
   REMOTE_SYSTEMD_DIR=/etc/systemd/system
   SSH_PORT=22
   SSH_KEY_PATH=~/.ssh/your-key.pem
@@ -82,6 +83,7 @@ WEB_ENV_FILE="${WEB_ENV_FILE:-$CONFIG_DIR/web.env}"
 WORKER_ENV_FILE="${WORKER_ENV_FILE:-$CONFIG_DIR/worker.env}"
 WEB_SERVICE_NAME="${WEB_SERVICE_NAME:-cortex-city-web.service}"
 WORKER_SERVICE_NAME="${WORKER_SERVICE_NAME:-cortex-city-worker.service}"
+HOST_METRICS_SERVICE_NAME="${HOST_METRICS_SERVICE_NAME:-cortex-city-host-metrics.service}"
 REMOTE_SYSTEMD_DIR="${REMOTE_SYSTEMD_DIR:-/etc/systemd/system}"
 REMOTE_RENDER_DIR="$APP_DIR/.deploy/systemd"
 SSH_PORT="${SSH_PORT:-22}"
@@ -133,6 +135,10 @@ render_service \
   "$REPO_ROOT/deploy/systemd/cortex-city-worker.service" \
   "$tmpdir/systemd/$WORKER_SERVICE_NAME" \
   "$WORKER_ENV_FILE"
+render_service \
+  "$REPO_ROOT/deploy/systemd/cortex-city-host-metrics.service" \
+  "$tmpdir/systemd/$HOST_METRICS_SERVICE_NAME" \
+  "$CONFIG_DIR/host-metrics.env"
 
 log "Checking remote prerequisites on $REMOTE"
 run_remote "
@@ -151,6 +157,7 @@ set -euo pipefail
 $SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$APP_DIR")
 $SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$REMOTE_RENDER_DIR")
 $SUDO install -d -m 755 $(quote "$CONFIG_DIR")
+$SUDO systemctl stop $(quote "$HOST_METRICS_SERVICE_NAME") || true
 $SUDO systemctl stop $(quote "$WORKER_SERVICE_NAME") || true
 $SUDO systemctl stop $(quote "$WEB_SERVICE_NAME") || true
 "
@@ -188,11 +195,12 @@ run_remote "
 set -euo pipefail
 $SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$WEB_SERVICE_NAME") $(quote "$REMOTE_SYSTEMD_DIR/$WEB_SERVICE_NAME")
 $SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$WORKER_SERVICE_NAME") $(quote "$REMOTE_SYSTEMD_DIR/$WORKER_SERVICE_NAME")
+$SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$HOST_METRICS_SERVICE_NAME") $(quote "$REMOTE_SYSTEMD_DIR/$HOST_METRICS_SERVICE_NAME")
 $SUDO touch $(quote "$WEB_ENV_FILE") $(quote "$WORKER_ENV_FILE")
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME")
-$SUDO systemctl restart $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME")
-$SUDO systemctl --no-pager --full --lines=0 status $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME")
+$SUDO systemctl enable $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
+$SUDO systemctl restart $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
+$SUDO systemctl --no-pager --full --lines=0 status $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
 "
 
 log "Deploy complete"

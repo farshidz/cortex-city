@@ -1,0 +1,18 @@
+[Unit]
+Description=Cortex City host metrics logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cortex
+Group=cortex
+WorkingDirectory=/opt/cortex-city/app
+ExecStart=/usr/bin/env bash ./scripts/host-metrics-logger.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

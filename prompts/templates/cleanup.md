@@ -16,10 +16,10 @@ Your response MUST conform to the required JSON schema. Provide:
 - **assumptions**: Any decisions made
 - **blockers**: Issues encountered (empty array if none)
 - **next_steps**: Any remaining manual cleanup needed
-- **tool_calls**: Object describing any tool usage (see Available Tools). Only include when actually invoking a tool such as `create_task`.
+- **tool_calls**: Optional object for orchestrator follow-up task requests. If you need a follow-up task, include it in your final JSON response under `tool_calls.create_task`. Do not attempt to invoke `create_task` as an interactive session tool.
 
-## Available Tools
-- `create_task` (follow-up task request)
+## Follow-up Task Requests
+- `create_task` (include this request in your final JSON as `tool_calls.create_task`)
   - `title` *(required, string)*: Short identifier for the new task
   - `description` *(required, string)*: Detailed instructions for the follow-up work
   - `agent` *(required, string)*: Agent ID from the Available Agents list below

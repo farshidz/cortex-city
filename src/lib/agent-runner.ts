@@ -254,12 +254,11 @@ export async function spawnAgentSession(
   // Build CLI args
   const args: string[] = [];
   if (runtime === "codex") {
+    const schemaPath = writeSchemaFile(AGENT_REPORT_SCHEMA);
+    args.push("exec", "--json", "--output-schema", schemaPath);
     if (shouldResume) {
-      args.push("exec", "resume", "--json");
+      args.push("resume");
     } else {
-      args.push("exec", "--json");
-      const schemaPath = writeSchemaFile(AGENT_REPORT_SCHEMA);
-      args.push("--output-schema", schemaPath);
     }
   } else {
     args.push(
