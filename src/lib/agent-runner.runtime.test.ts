@@ -98,7 +98,9 @@ test("handleRunComplete marks malformed runtime output as error", () => {
   assert.equal(result.tasks[0].current_run_pid, undefined);
 });
 
-test("handleRunComplete treats non-zero exits as errors without transitioning review state", () => {
+test(
+  "handleRunComplete treats non-zero exits as errors without transitioning review state even when parsed payloads include review fields",
+  () => {
   const { workspace } = setupWorkspace();
   const result = runAgentRunnerScript(
     workspace,
@@ -150,9 +152,12 @@ test("handleRunComplete treats non-zero exits as errors without transitioning re
   assert.equal(result.tasks[0].status, "open");
   assert.equal(result.tasks[0].run_count, 1);
   assert.equal(result.tasks[0].session_id, "claude-session");
-});
+  }
+);
 
-test("handleRunComplete records budget exceeded results without follow-up transitions", () => {
+test(
+  "handleRunComplete records budget exceeded results without follow-up transitions even when parsed payloads include review fields",
+  () => {
   const { workspace } = setupWorkspace();
   const result = runAgentRunnerScript(
     workspace,
@@ -203,7 +208,8 @@ test("handleRunComplete records budget exceeded results without follow-up transi
   assert.equal(result.tasks[0].last_run_result, "budget_exceeded");
   assert.equal(result.tasks[0].status, "open");
   assert.equal(result.tasks[0].run_count, 1);
-});
+  }
+);
 
 test("handleRunComplete creates Claude follow-up tasks and updates review metadata", () => {
   const { workspace } = setupWorkspace();
