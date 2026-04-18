@@ -12,6 +12,8 @@ import { pathToFileURL } from "node:url";
 
 import type { AgentConfig, OrchestratorConfig } from "./types";
 
+// Shared temp-workspace fixtures for orchestration tests. The helpers only
+// write synthetic prompts, config, and CLI shims under a temp directory.
 export const REPO_ROOT = process.cwd();
 export const TSX_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "tsx");
 
@@ -55,7 +57,7 @@ export function writeAgentPrompts(workspace: string): void {
     "Agent-specific prompt"
   );
   writeFileSync(
-    path.join(workspace, "prompts", "agents", "marqo-documentation-agent.md"),
+    path.join(workspace, "prompts", "agents", "docs-agent.md"),
     "Docs prompt"
   );
 }
@@ -68,20 +70,20 @@ export function buildTestConfig(
   const agents: Record<string, AgentConfig> = {
     "cortex-city-swe": {
       name: "Cortex City SWE",
-      repo_slug: "farshidz/marqo-cortex-city",
+      repo_slug: "example/cortex-city",
       repo_path: workspace,
       prompt_file: "prompts/agents/cortex-city-swe.md",
       default_branch: "main",
       description: "Owns the control panel and worker.",
       ...agentOverrides["cortex-city-swe"],
     },
-    "marqo-documentation-agent": {
-      name: "Marqo Documentation Agent",
-      repo_slug: "marqo-ai/marqodocs",
+    "docs-agent": {
+      name: "Docs Agent",
+      repo_slug: "example/docs-site",
       repo_path: workspace,
-      prompt_file: "prompts/agents/marqo-documentation-agent.md",
-      default_branch: "docusaurus-main",
-      ...agentOverrides["marqo-documentation-agent"],
+      prompt_file: "prompts/agents/docs-agent.md",
+      default_branch: "docs-main",
+      ...agentOverrides["docs-agent"],
     },
   };
 
@@ -106,6 +108,8 @@ export function writeTestConfig(
   agentOverrides: Partial<Record<string, Partial<AgentConfig>>> = {}
 ): OrchestratorConfig {
   const config = buildTestConfig(workspace, overrides, agentOverrides);
+  // Store helpers resolve config from <cwd>/.cortex, so tests write synthetic
+  // state into the temp workspace instead of reading repo-local files.
   writeJson(path.join(workspace, ".cortex", "config.json"), config);
   return config;
 }

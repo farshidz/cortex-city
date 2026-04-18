@@ -69,7 +69,7 @@ export async function PUT(
     // If transitioning to a final status, clean up the worktree
     if (body.status === "merged" || body.status === "closed") {
       if (task?.worktree_path) {
-        removeWorktree(task);
+        await removeWorktree(task);
         body.worktree_path = undefined;
       }
     }
@@ -95,7 +95,7 @@ export async function DELETE(
   }
   try {
     if (task.worktree_path) {
-      removeWorktree(task);
+      await removeWorktree(task);
     }
     await deleteTask(id);
     return NextResponse.json({ ok: true });

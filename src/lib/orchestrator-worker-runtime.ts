@@ -1,3 +1,6 @@
+// This module owns a single worker poll. The long-running loop, heartbeat, and
+// signal handling stay in src/orchestrator-worker.ts so tests can exercise one
+// poll without touching process lifecycle behavior.
 import { spawnAgentSession, removeWorktree } from "./agent-runner";
 import { shouldStartFinalCleanup } from "./final-task-cleanup";
 import { getPRStateHash, getPRStatus, isPRMergedOrClosed } from "./github";
@@ -141,7 +144,7 @@ export async function pollOnce(
         const currentTask = await deps.getTask(taskId);
         if (!currentTask) return;
         if (currentTask.worktree_path) {
-          deps.removeWorktree(currentTask);
+          await deps.removeWorktree(currentTask);
         }
         await deps.updateTask(taskId, {
           worktree_path: undefined,

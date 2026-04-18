@@ -788,7 +788,7 @@ test("removeWorktree swallows git failures", () => {
       const task = ${JSON.stringify(sampleTask({
         worktree_path: missingWorktreePath,
       }))};
-      removeWorktree(task);
+      await removeWorktree(task);
       console.log(JSON.stringify({ ok: true }));
     `
   );

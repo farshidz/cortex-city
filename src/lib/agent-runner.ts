@@ -1,4 +1,4 @@
-import { spawn, execFileSync, type ChildProcess } from "child_process";
+import { spawn, execFile, type ChildProcess } from "child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
 import path from "path";
 import os from "os";
@@ -33,6 +33,7 @@ import { buildInterruptedTaskUpdates, shouldUseContinuePrompt } from "./orchestr
 const GLOBAL_ENV_FILE = path.join(/* turbopackIgnore: true */ process.cwd(), ".env");
 const DEFAULT_TASK_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 const FORCE_KILL_GRACE_MS = 5_000;
+const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
 function loadEnvFile(filePath: string): Record<string, string> {
   const vars: Record<string, string> = {};
@@ -217,20 +218,34 @@ function getExecErrorMessage(error: unknown): string {
   return [stderr, message].filter(Boolean).join("\n");
 }
 
-function execGit(repoPath: string, args: string[]): string {
-  return execFileSync("git", args, {
-    cwd: repoPath,
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+function execGit(repoPath: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      args,
+      {
+        cwd: repoPath,
+        encoding: "utf-8",
+        maxBuffer: GIT_MAX_BUFFER_BYTES,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const wrapped = error as Error & { stdout?: string; stderr?: string };
+          wrapped.stdout = stdout || "";
+          wrapped.stderr = stderr || "";
+          reject(wrapped);
+          return;
+        }
+
+        resolve((stdout || "").trim());
+      }
+    );
+  });
 }
 
-function branchExists(repoPath: string, branchName: string): boolean {
+async function branchExists(repoPath: string, branchName: string): Promise<boolean> {
   try {
-    execFileSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], {
-      cwd: repoPath,
-      stdio: "ignore",
-    });
+    await execGit(repoPath, ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`]);
     return true;
   } catch {
     return false;
@@ -243,9 +258,12 @@ function isBranchCheckedOutError(error: unknown): boolean {
   );
 }
 
-function findAvailableBranchName(repoPath: string, branchName: string): string {
+async function findAvailableBranchName(
+  repoPath: string,
+  branchName: string
+): Promise<string> {
   let suffix = 2;
-  while (branchExists(repoPath, `${branchName}-${suffix}`)) {
+  while (await branchExists(repoPath, `${branchName}-${suffix}`)) {
     suffix++;
   }
   return `${branchName}-${suffix}`;
@@ -538,9 +556,10 @@ async function ensureWorktree(
     return task.worktree_path;
   }
 
-  // Fetch latest from remote before creating worktree
+  // Worktree tests cover branch collisions; keep the git calls async here so
+  // task creation still yields to the event loop while we probe git state.
   try {
-    execGit(repoPath, ["fetch", "origin", defaultBranch]);
+    await execGit(repoPath, ["fetch", "origin", defaultBranch]);
   } catch (err) {
     console.error(`[agent-runner] git fetch failed:`, err);
   }
@@ -570,10 +589,10 @@ async function ensureWorktree(
 
     // Try to create worktree on existing branch first, fall back to new branch
     try {
-      execGit(repoPath, ["worktree", "add", worktreePath, branchName]);
+      await execGit(repoPath, ["worktree", "add", worktreePath, branchName]);
     } catch (err) {
-      if (!branchExists(repoPath, branchName)) {
-        execGit(repoPath, [
+      if (!(await branchExists(repoPath, branchName))) {
+        await execGit(repoPath, [
           "worktree",
           "add",
           "-b",
@@ -582,8 +601,8 @@ async function ensureWorktree(
           `origin/${defaultBranch}`,
         ]);
       } else if (isBranchCheckedOutError(err)) {
-        branchName = findAvailableBranchName(repoPath, branchName);
-        execGit(repoPath, [
+        branchName = await findAvailableBranchName(repoPath, branchName);
+        await execGit(repoPath, [
           "worktree",
           "add",
           "-b",
@@ -610,7 +629,7 @@ async function ensureWorktree(
   return worktreePath;
 }
 
-export function removeWorktree(task: Task): void {
+export async function removeWorktree(task: Task): Promise<void> {
   if (!task.worktree_path) return;
 
   const agentConfig = readConfig().agents[task.agent];
@@ -618,7 +637,7 @@ export function removeWorktree(task: Task): void {
   if (!repoPath) return;
 
   try {
-    execGit(repoPath, ["worktree", "remove", task.worktree_path, "--force"]);
+    await execGit(repoPath, ["worktree", "remove", task.worktree_path, "--force"]);
     console.log(`[agent-runner] Removed worktree at ${task.worktree_path}`);
   } catch (err) {
     console.error(`[agent-runner] Failed to remove worktree at ${task.worktree_path}:`, err);
@@ -876,6 +895,8 @@ async function handleRunComplete(
     const outputTokens = result.usage?.output_tokens || 0;
     const didFail = exitCode !== 0 || result.is_error;
     const isBudgetExceeded = result.terminal_reason === "budget_exceeded";
+    // Failed or over-budget runs can still emit a structured payload; keep the
+    // metrics, but do not open review loops or spawn follow-up tasks from them.
     const shouldApplySuccessSideEffects = !didFail && !isBudgetExceeded;
 
     const updates: Partial<Task> = {
