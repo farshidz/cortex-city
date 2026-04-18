@@ -1,4 +1,4 @@
-import { spawn, execSync, type ChildProcess } from "child_process";
+import { spawn, execFileSync, type ChildProcess } from "child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
 import path from "path";
 import os from "os";
@@ -28,9 +28,11 @@ import type {
   FollowupTaskRequest,
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
-import { shouldUseContinuePrompt } from "./orchestrator-runtime";
+import { buildInterruptedTaskUpdates, shouldUseContinuePrompt } from "./orchestrator-runtime";
 
 const GLOBAL_ENV_FILE = path.join(/* turbopackIgnore: true */ process.cwd(), ".env");
+const DEFAULT_TASK_RUN_TIMEOUT_MS = 10 * 60 * 1000;
+const FORCE_KILL_GRACE_MS = 5_000;
 
 function loadEnvFile(filePath: string): Record<string, string> {
   const vars: Record<string, string> = {};
@@ -203,6 +205,52 @@ function writeSchemaFile(schema: string): string {
   return schemaPath;
 }
 
+function getExecErrorMessage(error: unknown): string {
+  if (!error || typeof error !== "object") {
+    return String(error || "");
+  }
+
+  const stderr =
+    "stderr" in error && typeof error.stderr === "string" ? error.stderr.trim() : "";
+  const message = error instanceof Error ? error.message.trim() : String(error).trim();
+
+  return [stderr, message].filter(Boolean).join("\n");
+}
+
+function execGit(repoPath: string, args: string[]): string {
+  return execFileSync("git", args, {
+    cwd: repoPath,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+function branchExists(repoPath: string, branchName: string): boolean {
+  try {
+    execFileSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], {
+      cwd: repoPath,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isBranchCheckedOutError(error: unknown): boolean {
+  return /already checked out|is already used by worktree/i.test(
+    getExecErrorMessage(error)
+  );
+}
+
+function findAvailableBranchName(repoPath: string, branchName: string): string {
+  let suffix = 2;
+  while (branchExists(repoPath, `${branchName}-${suffix}`)) {
+    suffix++;
+  }
+  return `${branchName}-${suffix}`;
+}
+
 export async function spawnAgentSession(
   task: Task,
   mode: "initial" | "review" | "cleanup",
@@ -287,7 +335,7 @@ export async function spawnAgentSession(
   const repoPath = agentConfig?.repo_path || process.cwd();
 
   // Create or reuse a git worktree for isolation
-  const cwd = ensureWorktree(task, repoPath, agentConfig?.default_branch || "main");
+  const cwd = await ensureWorktree(task, repoPath, agentConfig?.default_branch || "main");
 
   const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
   console.log(
@@ -318,6 +366,7 @@ export async function spawnAgentSession(
   }
 
   const spawnedAt = Date.now();
+  const runTimeoutMs = config.task_run_timeout_ms ?? DEFAULT_TASK_RUN_TIMEOUT_MS;
 
   const envFile = resolveEnvPath(agentConfig, task.agent);
   const child = spawn(runtime === "codex" ? "codex" : "claude", args, {
@@ -334,6 +383,28 @@ export async function spawnAgentSession(
   let stdoutLineBuffer = "";
   let transcriptLineBuffer = "";
   let capturedSessionId = false;
+  let didTimeout = false;
+  let didFinalize = false;
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  let forceKillHandle: NodeJS.Timeout | undefined;
+
+  const clearRunTimers = () => {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (forceKillHandle) clearTimeout(forceKillHandle);
+  };
+
+  const finalizeRun = async (handler: () => Promise<void>) => {
+    if (didFinalize) return;
+    didFinalize = true;
+    clearRunTimers();
+    if (runtime === "codex") {
+      flushCodexTranscriptBuffer("", transcriptLineBuffer, sessionLog.transcript);
+    }
+    sessionLog.machine.end();
+    sessionLog.transcript.end();
+    await handler();
+    onComplete(task.id);
+  };
 
   child.stdout?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
@@ -387,43 +458,63 @@ export async function spawnAgentSession(
     }
   });
 
-  child.on("close", async (code) => {
-    if (runtime === "codex") {
-      flushCodexTranscriptBuffer("", transcriptLineBuffer, sessionLog.transcript);
-    }
-    sessionLog.machine.end();
-    sessionLog.transcript.end();
-    const durationMs = Date.now() - spawnedAt;
-    console.log(
-      `[agent-runner] Session for task "${task.title}" exited with code ${code} (${Math.round(durationMs / 1000)}s)`
-    );
-    await handleRunComplete(
-      task.id,
-      code,
-      stdout,
-      stderr,
-      durationMs,
-      preRunCommentIds,
-      runtime,
-      runReason
-    );
-    onComplete(task.id);
+  child.on("close", (code) => {
+    void finalizeRun(async () => {
+      const durationMs = Date.now() - spawnedAt;
+      console.log(
+        `[agent-runner] Session for task "${task.title}" exited with code ${code} (${Math.round(durationMs / 1000)}s)`
+      );
+      if (didTimeout) {
+        await handleRunTimeout(task.id, durationMs, runTimeoutMs);
+        return;
+      }
+      await handleRunComplete(
+        task.id,
+        code,
+        stdout,
+        stderr,
+        durationMs,
+        preRunCommentIds,
+        runtime,
+        runReason
+      );
+    });
   });
 
-  child.on("error", async (err) => {
-    sessionLog.machine.end();
-    sessionLog.transcript.end();
-    console.error(
-      `[agent-runner] Failed to spawn for task "${task.title}":`,
-      err
-    );
-    await updateTask(task.id, {
-      last_run_result: "error",
-      error_log: err.message,
-      current_run_pid: undefined,
+  child.on("error", (err) => {
+    void finalizeRun(async () => {
+      console.error(
+        `[agent-runner] Failed to spawn for task "${task.title}":`,
+        err
+      );
+      await updateTask(task.id, {
+        last_run_result: "error",
+        error_log: err.message,
+        current_run_pid: undefined,
+      });
     });
-    onComplete(task.id);
   });
+
+  if (runTimeoutMs > 0) {
+    timeoutHandle = setTimeout(() => {
+      didTimeout = true;
+      console.error(
+        `[agent-runner] Session for task "${task.title}" timed out after ${runTimeoutMs}ms`
+      );
+      try {
+        child.kill("SIGTERM");
+      } catch {}
+      forceKillHandle = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }
+      }, FORCE_KILL_GRACE_MS);
+      forceKillHandle.unref?.();
+    }, runTimeoutMs);
+    timeoutHandle.unref?.();
+  }
 
   return { pid: child.pid!, child };
 }
@@ -436,7 +527,11 @@ function slugify(title: string, maxLen: number): string {
     .slice(0, maxLen);
 }
 
-function ensureWorktree(task: Task, repoPath: string, defaultBranch: string): string {
+async function ensureWorktree(
+  task: Task,
+  repoPath: string,
+  defaultBranch: string
+): Promise<string> {
   // Reuse existing worktree if it still exists on disk
   if (task.worktree_path && existsSync(task.worktree_path)) {
     console.log(`[agent-runner] Reusing existing worktree at ${task.worktree_path}`);
@@ -445,7 +540,7 @@ function ensureWorktree(task: Task, repoPath: string, defaultBranch: string): st
 
   // Fetch latest from remote before creating worktree
   try {
-    execSync(`git fetch origin ${defaultBranch}`, { cwd: repoPath, stdio: "pipe" });
+    execGit(repoPath, ["fetch", "origin", defaultBranch]);
   } catch (err) {
     console.error(`[agent-runner] git fetch failed:`, err);
   }
@@ -461,30 +556,44 @@ function ensureWorktree(task: Task, repoPath: string, defaultBranch: string): st
   const worktreePath = path.join(worktreesBase, slug);
 
   // Branch name: agent/<slug> (max 20 chars for the slug part)
-  const branchName = task.branch_name || `agent/${slug}`;
+  let branchName = task.branch_name || `agent/${slug}`;
 
   try {
     if (existsSync(worktreePath)) {
       // Worktree directory exists but wasn't tracked — reuse it and persist
       console.log(`[agent-runner] Found worktree directory at ${worktreePath}`);
       if (!task.worktree_path) {
-        updateTask(task.id, { worktree_path: worktreePath, branch_name: branchName });
+        await updateTask(task.id, { worktree_path: worktreePath, branch_name: branchName });
       }
       return worktreePath;
     }
 
     // Try to create worktree on existing branch first, fall back to new branch
     try {
-      execSync(`git worktree add "${worktreePath}" "${branchName}"`, {
-        cwd: repoPath,
-        stdio: "pipe",
-      });
-    } catch {
-      // Branch doesn't exist yet — create from latest remote default branch
-      execSync(
-        `git worktree add -b "${branchName}" "${worktreePath}" "origin/${defaultBranch}"`,
-        { cwd: repoPath, stdio: "pipe" }
-      );
+      execGit(repoPath, ["worktree", "add", worktreePath, branchName]);
+    } catch (err) {
+      if (!branchExists(repoPath, branchName)) {
+        execGit(repoPath, [
+          "worktree",
+          "add",
+          "-b",
+          branchName,
+          worktreePath,
+          `origin/${defaultBranch}`,
+        ]);
+      } else if (isBranchCheckedOutError(err)) {
+        branchName = findAvailableBranchName(repoPath, branchName);
+        execGit(repoPath, [
+          "worktree",
+          "add",
+          "-b",
+          branchName,
+          worktreePath,
+          `origin/${defaultBranch}`,
+        ]);
+      } else {
+        throw err;
+      }
     }
 
     console.log(`[agent-runner] Created worktree at ${worktreePath} (branch: ${branchName})`);
@@ -496,7 +605,7 @@ function ensureWorktree(task: Task, repoPath: string, defaultBranch: string): st
   }
 
   // Persist worktree path and branch name to task
-  updateTask(task.id, { worktree_path: worktreePath, branch_name: branchName });
+  await updateTask(task.id, { worktree_path: worktreePath, branch_name: branchName });
 
   return worktreePath;
 }
@@ -509,10 +618,7 @@ export function removeWorktree(task: Task): void {
   if (!repoPath) return;
 
   try {
-    execSync(`git worktree remove "${task.worktree_path}" --force`, {
-      cwd: repoPath,
-      stdio: "pipe",
-    });
+    execGit(repoPath, ["worktree", "remove", task.worktree_path, "--force"]);
     console.log(`[agent-runner] Removed worktree at ${task.worktree_path}`);
   } catch (err) {
     console.error(`[agent-runner] Failed to remove worktree at ${task.worktree_path}:`, err);
@@ -729,6 +835,27 @@ async function createFollowupTasks(
   }
 }
 
+async function handleRunTimeout(
+  taskId: string,
+  durationMs: number,
+  timeoutMs: number
+): Promise<void> {
+  const { getTask } = await import("./store");
+  const currentTask = await getTask(taskId);
+  const resumedUpdates = currentTask
+    ? buildInterruptedTaskUpdates(currentTask)
+    : { current_run_pid: undefined };
+
+  await updateTask(taskId, {
+    ...resumedUpdates,
+    last_run_result: "timeout",
+    error_log: `Timed out after ${timeoutMs}ms`,
+    last_run_at: new Date().toISOString(),
+    total_duration_ms: (currentTask?.total_duration_ms || 0) + durationMs,
+    run_count: (currentTask?.run_count || 0) + 1,
+  });
+}
+
 async function handleRunComplete(
   taskId: string,
   exitCode: number | null,
@@ -742,20 +869,25 @@ async function handleRunComplete(
   try {
     const result: ClaudeRunResult =
       runtime === "codex" ? parseCodexResult(stdout) : JSON.parse(stdout);
+    const { getTask } = await import("./store");
+    const currentTask = await getTask(taskId);
 
     const inputTokens = (result.usage?.input_tokens || 0) + (result.usage?.cache_read_input_tokens || 0);
     const outputTokens = result.usage?.output_tokens || 0;
+    const didFail = exitCode !== 0 || result.is_error;
+    const isBudgetExceeded = result.terminal_reason === "budget_exceeded";
+    const shouldApplySuccessSideEffects = !didFail && !isBudgetExceeded;
 
     const updates: Partial<Task> = {
       session_id: result.session_id,
-      last_run_result: result.is_error ? "error" : "success",
+      last_run_result: didFail ? "error" : "success",
       last_run_input_tokens: inputTokens,
       last_run_output_tokens: outputTokens,
       current_run_pid: undefined,
       last_run_at: new Date().toISOString(),
     };
 
-    if (result.terminal_reason === "budget_exceeded") {
+    if (isBudgetExceeded) {
       updates.last_run_result = "budget_exceeded";
     }
 
@@ -774,6 +906,7 @@ async function handleRunComplete(
 
       // Auto-transition status based on agent report
       if (
+        shouldApplySuccessSideEffects &&
         runReason !== "cleanup" &&
         (report.status === "completed" || report.status === "needs_review")
       ) {
@@ -781,7 +914,7 @@ async function handleRunComplete(
           updates.status = "in_review";
         }
       }
-    } else {
+    } else if (shouldApplySuccessSideEffects) {
       // Fallback: regex-match PR URL from plain text result
       const prMatch = result.result?.match(
         /https:\/\/github\.com\/[^\s)]+\/pull\/\d+/
@@ -793,8 +926,6 @@ async function handleRunComplete(
     }
 
     // Accumulate costs and run count
-    const { getTask } = await import("./store");
-    const currentTask = await getTask(taskId);
     if (!updates.session_id && currentTask?.session_id) {
       updates.session_id = currentTask.session_id;
     }
@@ -808,7 +939,7 @@ async function handleRunComplete(
       updates.run_count = (currentTask.run_count || 0) + 1;
 
       const followups = report?.tool_calls?.create_task;
-      if (followups?.length) {
+      if (followups?.length && shouldApplySuccessSideEffects) {
         await createFollowupTasks(currentTask, followups);
       }
     }
@@ -816,7 +947,7 @@ async function handleRunComplete(
     // Capture GH state hash AFTER run so we don't re-trigger on our own changes
     // But if new submitted comments appeared mid-run, skip hash update so next poll picks them up
     const prUrl = updates.pr_url || currentTask?.pr_url;
-    if (prUrl && runReason !== "manual_instruction") {
+    if (prUrl && shouldApplySuccessSideEffects && runReason !== "manual_instruction") {
       const postRunCommentIds = await getSubmittedCommentIds(prUrl);
       const newComments = postRunCommentIds.filter((id) => !preRunCommentIds.includes(id));
       if (newComments.length > 0) {
@@ -829,7 +960,7 @@ async function handleRunComplete(
           updates.last_review_gh_state = newHash;
         }
       }
-    } else if (prUrl) {
+    } else if (prUrl && shouldApplySuccessSideEffects) {
       console.log(
         `[agent-runner] Skipping review hash update for manual-instruction run on task ${taskId}`
       );
@@ -847,6 +978,11 @@ async function handleRunComplete(
 }
 
 export const __testUtils = {
+  buildModelArgs,
+  buildPermissionArgs,
   createFollowupTasks,
+  ensureWorktree,
+  handleRunComplete,
+  handleRunTimeout,
   parseCodexResult,
 };

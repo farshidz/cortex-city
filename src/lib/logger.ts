@@ -12,6 +12,10 @@ import path from "path";
 const LOGS_DIR = path.join(process.cwd(), "logs");
 const MAX_AGE_DAYS = 14;
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function ensureLogsDir() {
   if (!existsSync(LOGS_DIR)) {
     mkdirSync(LOGS_DIR, { recursive: true });
@@ -124,4 +128,18 @@ export function createSessionLog(taskId: string): {
   transcript.write(header);
 
   return { machine, transcript, machinePath, transcriptPath };
+}
+
+export function deleteTaskLogs(taskId: string): void {
+  if (!existsSync(LOGS_DIR)) return;
+
+  const pattern = new RegExp(`^task-${escapeRegex(taskId)}-.*\\.(jsonl|log)$`);
+  try {
+    for (const file of readdirSync(LOGS_DIR)) {
+      if (!pattern.test(file)) continue;
+      unlinkSync(path.join(LOGS_DIR, file));
+    }
+  } catch {
+    // Best effort cleanup
+  }
 }

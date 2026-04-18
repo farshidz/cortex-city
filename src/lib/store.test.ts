@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -63,6 +69,7 @@ test("readConfig creates defaults when no config file exists", () => {
   assert.deepEqual(config, {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
+    task_run_timeout_ms: 600000,
     default_permission_mode: "bypassPermissions",
     default_agent_runner: "claude",
     agents: {},
@@ -97,6 +104,7 @@ test("readConfig migrates legacy runner and permission fields", () => {
   assert.deepEqual(config, {
     max_parallel_sessions: 4,
     poll_interval_seconds: 15,
+    task_run_timeout_ms: 600000,
     default_permission_mode: "acceptEdits",
     default_agent_runner: "codex",
     agents: {},
@@ -145,6 +153,7 @@ test("writeConfig persists the supplied configuration", () => {
   const config: OrchestratorConfig = {
     max_parallel_sessions: 5,
     poll_interval_seconds: 10,
+    task_run_timeout_ms: 300000,
     default_permission_mode: "yolo",
     default_agent_runner: "codex",
       agents: {
@@ -178,6 +187,7 @@ test("writeConfig persists runtime-specific model and effort defaults", () => {
   const config: OrchestratorConfig = {
     max_parallel_sessions: 3,
     poll_interval_seconds: 20,
+    task_run_timeout_ms: 120000,
     default_permission_mode: "default",
     default_agent_runner: "claude",
     default_claude_model: "claude-sonnet-4-6",
@@ -220,4 +230,41 @@ test("updateTask and deleteTask reject unknown task ids", () => {
   );
 
   assert.deepEqual(result, ["Task missing not found", "Task missing not found"]);
+});
+
+test("deleteTask removes only the deleted task session logs", () => {
+  const workspace = createTempWorkspace();
+  mkdirSync(path.join(workspace, "logs"), { recursive: true });
+  writeFileSync(path.join(workspace, "logs", "task-task-1-run.log"), "log");
+  writeFileSync(path.join(workspace, "logs", "task-task-1-run.jsonl"), "machine");
+  writeFileSync(path.join(workspace, "logs", "task-task-2-run.log"), "keep");
+  writeFileSync(path.join(workspace, "logs", "server-2026-04-15.log"), "server");
+
+  const result = runStoreScript(
+    workspace,
+    `
+      await store.createTask(${JSON.stringify(sampleTask())});
+      await store.deleteTask("task-1");
+      console.log(JSON.stringify({
+        deletedLogExists: require("node:fs").existsSync(${JSON.stringify(
+          path.join(workspace, "logs", "task-task-1-run.log")
+        )}),
+        deletedJsonExists: require("node:fs").existsSync(${JSON.stringify(
+          path.join(workspace, "logs", "task-task-1-run.jsonl")
+        )}),
+        otherLogExists: require("node:fs").existsSync(${JSON.stringify(
+          path.join(workspace, "logs", "task-task-2-run.log")
+        )}),
+        serverLogExists: require("node:fs").existsSync(${JSON.stringify(
+          path.join(workspace, "logs", "server-2026-04-15.log")
+        )}),
+      }));
+    `
+  );
+
+  assert.equal(result.deletedLogExists, false);
+  assert.equal(result.deletedJsonExists, false);
+  assert.equal(result.otherLogExists, true);
+  assert.equal(result.serverLogExists, true);
+  assert.equal(existsSync(path.join(workspace, "logs", "task-task-2-run.log")), true);
 });
