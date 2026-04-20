@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import path from "path";
 import type { Task, OrchestratorConfig } from "./types";
 import { snapshotCortex } from "./cortex-git";
+import { deleteTaskLogs } from "./logger";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
@@ -68,6 +69,7 @@ export async function deleteTask(id: string): Promise<void> {
   const filtered = tasks.filter((t) => t.id !== id);
   if (filtered.length === tasks.length) throw new Error(`Task ${id} not found`);
   await writeTasks(filtered);
+  deleteTaskLogs(id);
 }
 
 // --- Config ---
@@ -105,6 +107,7 @@ function getDefaultConfig(): OrchestratorConfig {
   return {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
+    task_run_timeout_ms: 10 * 60 * 1000,
     default_permission_mode: "bypassPermissions",
     default_agent_runner: "claude",
     agents: {},

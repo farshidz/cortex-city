@@ -108,6 +108,7 @@ if (process.env.FAKE_AGENT_ARGS_FILE) {
     process.env.FAKE_AGENT_ARGS_FILE,
     JSON.stringify({
       args: process.argv.slice(2),
+      cwd: process.cwd(),
       env: {
         GLOBAL_ONLY: process.env.GLOBAL_ONLY,
         AGENT_ONLY: process.env.AGENT_ONLY,
@@ -531,6 +532,70 @@ test("cleanup runs use the cleanup prompt even when a session already exists", (
   assert.equal(result.tasks[0].status, "closed");
 });
 
+test("resume-after-kill runs use the continue prompt for Codex", () => {
+  const workspace = setupWorkspace();
+  const argsFile = path.join(workspace, "continue-args.json");
+  const worktreePath = path.join(workspace, "worktree");
+  const report = {
+    status: "completed",
+    summary: "Resumed the interrupted run",
+    pr_url: "",
+    branch_name: "agent/continue",
+    files_changed: [],
+    assumptions: [],
+    blockers: [],
+    next_steps: [],
+  };
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          status: "in_progress",
+          session_id: "thread-resume",
+          resume_requested: true,
+          permission_mode: "default",
+          worktree_path: worktreePath,
+        })
+      )};
+      await createTask(task);
+      process.env.FAKE_AGENT_ARGS_FILE = ${JSON.stringify(argsFile)};
+      process.env.FAKE_AGENT_STDOUT = ${JSON.stringify(
+        [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-resume" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "agent_message",
+              text: JSON.stringify(report),
+            },
+          }),
+        ].join("\n")
+      )};
+
+      await new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined))
+          .catch(reject);
+      });
+
+      console.log(
+        JSON.stringify({
+          tasks: readTasks(),
+          args: JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8")),
+        })
+      );
+    `
+  );
+
+  assert.equal(result.args.args[0], "exec");
+  assert.ok(result.args.args.includes("resume"));
+  assert.ok(result.args.args.includes("thread-resume"));
+  assert.equal(result.args.args.at(-1), "continue");
+  assert.ok(result.args.args.includes("--full-auto"));
+  assert.ok(!result.args.args.includes("--dangerously-bypass-approvals-and-sandbox"));
+});
+
 test("plain-text PR output still moves the task into review and keeps the existing session id", () => {
   const workspace = setupWorkspace();
   const argsFile = path.join(workspace, "fallback-args.json");
@@ -585,6 +650,86 @@ test("plain-text PR output still moves the task into review and keeps the existi
   assert.equal(result.tasks[0].pr_url, "https://github.com/farshidz/cortex-city/pull/11");
   assert.equal(result.tasks[0].status, "in_review");
   assert.equal(result.tasks[0].run_count, 1);
+});
+
+test("spawnAgentSession maps Claude initial-run permissions and uses the task worktree as cwd", () => {
+  const workspace = setupWorkspace();
+  const argsFile = path.join(workspace, "claude-initial-args.json");
+  const worktreePath = path.join(workspace, "claude-worktree");
+  mkdirSync(worktreePath, { recursive: true });
+  const report = {
+    type: "result",
+    subtype: "print",
+    is_error: false,
+    duration_ms: 25,
+    result: JSON.stringify({
+      status: "completed",
+      summary: "Claude initial run",
+      pr_url: "",
+      branch_name: "agent/claude-initial",
+      files_changed: [],
+      assumptions: [],
+      blockers: [],
+      next_steps: [],
+    }),
+    session_id: "claude-initial-session",
+    terminal_reason: "completed",
+    total_cost_usd: 0,
+    num_turns: 1,
+    structured_output: {
+      status: "completed",
+      summary: "Claude initial run",
+      pr_url: "",
+      branch_name: "agent/claude-initial",
+      files_changed: [],
+      assumptions: [],
+      blockers: [],
+      next_steps: [],
+    },
+    usage: {
+      input_tokens: 2,
+      output_tokens: 1,
+      cache_read_input_tokens: 0,
+    },
+  };
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          status: "open",
+          agent_runner: "claude",
+          permission_mode: "yolo",
+          worktree_path: worktreePath,
+        })
+      )};
+      await createTask(task);
+      process.env.FAKE_AGENT_ARGS_FILE = ${JSON.stringify(argsFile)};
+      process.env.FAKE_AGENT_STDOUT = ${JSON.stringify(JSON.stringify(report))};
+
+      await new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined))
+          .catch(reject);
+      });
+
+      console.log(
+        JSON.stringify({
+          tasks: readTasks(),
+          args: JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8")),
+        })
+      );
+    `
+  );
+
+  assert.equal(result.args.args[0], "-p");
+  assert.ok(result.args.args.includes("--output-format"));
+  assert.ok(result.args.args.includes("--json-schema"));
+  assert.ok(!result.args.args.includes("--resume"));
+  assert.ok(result.args.args.includes("--permission-mode"));
+  assert.ok(result.args.args.includes("bypassPermissions"));
+  assert.equal(result.args.cwd, worktreePath);
+  assert.equal(result.tasks[0].session_id, "claude-initial-session");
 });
 
 test("createFollowupTasks trims task data, inherits runtime settings, and skips invalid requests", () => {

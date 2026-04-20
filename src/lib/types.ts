@@ -88,6 +88,7 @@ export type PermissionMode =
 export interface OrchestratorConfig {
   max_parallel_sessions: number;
   poll_interval_seconds: number;
+  task_run_timeout_ms?: number;
   default_permission_mode: PermissionMode;
   default_agent_runner: AgentRuntime;
   default_claude_model?: string;
