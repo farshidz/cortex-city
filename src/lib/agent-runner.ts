@@ -34,6 +34,8 @@ const GLOBAL_ENV_FILE = path.join(/* turbopackIgnore: true */ process.cwd(), ".e
 const DEFAULT_TASK_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 const FORCE_KILL_GRACE_MS = 5_000;
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+const MAX_RUNTIME_STDOUT_BYTES = 4 * 1024 * 1024;
+const MAX_RUNTIME_STDERR_BYTES = 1 * 1024 * 1024;
 
 function loadEnvFile(filePath: string): Record<string, string> {
   const vars: Record<string, string> = {};
@@ -206,6 +208,29 @@ function writeSchemaFile(schema: string): string {
   return schemaPath;
 }
 
+interface BoundedTextBuffer {
+  value: string;
+  truncated: boolean;
+}
+
+function appendToBoundedTextBuffer(
+  buffer: BoundedTextBuffer,
+  text: string,
+  maxBytes: number
+): void {
+  if (!text) return;
+  const combined = buffer.value + text;
+  if (Buffer.byteLength(combined, "utf8") <= maxBytes) {
+    buffer.value = combined;
+    return;
+  }
+
+  buffer.value = Buffer.from(combined, "utf8")
+    .subarray(-maxBytes)
+    .toString("utf8");
+  buffer.truncated = true;
+}
+
 function getExecErrorMessage(error: unknown): string {
   if (!error || typeof error !== "object") {
     return String(error || "");
@@ -272,7 +297,7 @@ async function findAvailableBranchName(
 export async function spawnAgentSession(
   task: Task,
   mode: "initial" | "review" | "cleanup",
-  onComplete: (taskId: string) => void
+  onComplete: (taskId: string) => void | Promise<void>
 ): Promise<{ pid: number; child: ChildProcess }> {
   const config = readConfig();
   const runtime: AgentRuntime =
@@ -280,7 +305,7 @@ export async function spawnAgentSession(
   const permissionMode: PermissionMode =
     task.permission_mode || config.default_permission_mode || "bypassPermissions";
   const agentConfig = config.agents[task.agent];
-  const shouldResume = Boolean(task.session_id);
+  const shouldResume = mode !== "cleanup" && Boolean(task.session_id);
   const hasManualInstruction = Boolean(task.pending_manual_instruction?.trim());
   const isResumeAfterKill = shouldUseContinuePrompt(task);
   const runReason =
@@ -396,10 +421,10 @@ export async function spawnAgentSession(
   // We pass prompts via args, so leaving stdin open only creates delays or hangs.
   child.stdin?.end();
 
-  let stdout = "";
-  let stderr = "";
-  let stdoutLineBuffer = "";
-  let transcriptLineBuffer = "";
+  const stdoutBuffer: BoundedTextBuffer = { value: "", truncated: false };
+  const stderrBuffer: BoundedTextBuffer = { value: "", truncated: false };
+  const codexAccumulator = createCodexResultAccumulator();
+  let codexEventBuffer = "";
   let capturedSessionId = false;
   let didTimeout = false;
   let didFinalize = false;
@@ -416,57 +441,48 @@ export async function spawnAgentSession(
     didFinalize = true;
     clearRunTimers();
     if (runtime === "codex") {
-      flushCodexTranscriptBuffer("", transcriptLineBuffer, sessionLog.transcript);
+      codexEventBuffer = flushCodexEventBuffer("\n", codexEventBuffer, (event) => {
+        handleCodexEvent(event, codexAccumulator, sessionLog.transcript);
+      });
     }
     sessionLog.machine.end();
     sessionLog.transcript.end();
     await handler();
-    onComplete(task.id);
+    await onComplete(task.id);
+  };
+
+  const handleCodexEvent = (
+    event: CodexEvent,
+    accumulator: CodexResultAccumulator,
+    transcript: NodeJS.WritableStream
+  ) => {
+    const rendered = formatCodexEventForTranscript(event);
+    if (rendered) transcript.write(rendered);
+    updateCodexResultAccumulator(accumulator, event);
+    if (!capturedSessionId && event.type === "thread.started" && event.thread_id) {
+      capturedSessionId = true;
+      void updateTask(task.id, { session_id: event.thread_id });
+    }
   };
 
   child.stdout?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
-    stdout += text;
     sessionLog.machine.write(text);
     if (runtime === "codex") {
-      transcriptLineBuffer = flushCodexTranscriptBuffer(
+      codexEventBuffer = flushCodexEventBuffer(
         text,
-        transcriptLineBuffer,
-        sessionLog.transcript
+        codexEventBuffer,
+        (event) => handleCodexEvent(event, codexAccumulator, sessionLog.transcript)
       );
     } else {
+      appendToBoundedTextBuffer(stdoutBuffer, text, MAX_RUNTIME_STDOUT_BYTES);
       sessionLog.transcript.write(text);
-    }
-
-    // Capture Codex session/thread ID as soon as it appears so the UI can show
-    // live session data while the run is still active.
-    if (runtime === "codex" && !capturedSessionId) {
-      stdoutLineBuffer += text;
-      const lines = stdoutLineBuffer.split(/\r?\n/);
-      stdoutLineBuffer = lines.pop() || "";
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        try {
-          const evt = JSON.parse(line) as {
-            type?: string;
-            thread_id?: string;
-          };
-          if (evt.type === "thread.started" && evt.thread_id) {
-            capturedSessionId = true;
-            void updateTask(task.id, { session_id: evt.thread_id });
-            break;
-          }
-        } catch {
-          // Ignore non-JSON lines
-        }
-      }
     }
   });
 
   child.stderr?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
-    stderr += text;
+    appendToBoundedTextBuffer(stderrBuffer, text, MAX_RUNTIME_STDERR_BYTES);
     if (runtime === "codex") {
       sessionLog.transcript.write(
         `${formatTranscriptHeading("STDERR", new Date().toISOString())}\n${text}\n`
@@ -491,12 +507,13 @@ export async function spawnAgentSession(
       await handleRunComplete(
         task.id,
         code,
-        stdout,
-        stderr,
+        stdoutBuffer.value,
+        stderrBuffer.value,
         durationMs,
         preRunCommentIds,
         runtime,
-        runReason
+        runReason,
+        runtime === "codex" ? buildCodexResult(codexAccumulator) : undefined
       );
     });
   });
@@ -666,6 +683,59 @@ interface CodexEvent {
   };
 }
 
+interface CodexResultAccumulator {
+  session_id: string;
+  result_text: string;
+  structured_output?: AgentReport;
+  usage: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+  };
+}
+
+function createCodexResultAccumulator(): CodexResultAccumulator {
+  return {
+    session_id: "",
+    result_text: "",
+    structured_output: undefined,
+    usage: {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+    },
+  };
+}
+
+function updateCodexResultAccumulator(
+  accumulator: CodexResultAccumulator,
+  event: CodexEvent
+): void {
+  if (event.type === "thread.started" && event.thread_id) {
+    accumulator.session_id = event.thread_id;
+    return;
+  }
+
+  if (event.type === "item.completed" && event.item?.type === "agent_message") {
+    const resultText = event.item.text || "";
+    accumulator.result_text = resultText;
+    try {
+      accumulator.structured_output = JSON.parse(resultText) as AgentReport;
+    } catch {
+      accumulator.structured_output = undefined;
+    }
+    return;
+  }
+
+  if (event.type === "turn.completed" && event.usage) {
+    accumulator.usage = {
+      input_tokens: event.usage.input_tokens || 0,
+      cached_input_tokens: event.usage.cached_input_tokens || 0,
+      output_tokens: event.usage.output_tokens || 0,
+    };
+  }
+}
+
 function formatTranscriptHeading(
   label: string,
   timestamp?: string,
@@ -734,10 +804,10 @@ function formatCodexEventForTranscript(event: CodexEvent): string | null {
   return null;
 }
 
-function flushCodexTranscriptBuffer(
+function flushCodexEventBuffer(
   text: string,
   carry: string,
-  transcript: NodeJS.WritableStream
+  onEvent: (event: CodexEvent) => void
 ): string {
   const lines = (carry + text).split(/\r?\n/);
   const remainder = lines.pop() || "";
@@ -746,63 +816,47 @@ function flushCodexTranscriptBuffer(
     const line = rawLine.trim();
     if (!line.startsWith("{")) continue;
     try {
-      const rendered = formatCodexEventForTranscript(JSON.parse(line) as CodexEvent);
-      if (rendered) transcript.write(rendered);
+      onEvent(JSON.parse(line) as CodexEvent);
     } catch {
-      // Ignore malformed JSON lines in the transcript stream.
+      // Ignore malformed JSON lines in the Codex event stream.
     }
   }
 
   return remainder;
 }
 
-function parseCodexResult(stdout: string): ClaudeRunResult {
-  const lines = stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  const events = lines
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean) as CodexEvent[];
-  const threadEvent = events.find((evt) => evt.type === "thread.started");
-  const agentMessages = events.filter(
-    (evt) => evt.type === "item.completed" && evt.item?.type === "agent_message"
-  );
-  const finalMessage = agentMessages[agentMessages.length - 1];
-  let structured: AgentReport | undefined;
-  const resultText = finalMessage?.item?.text || "";
-  if (resultText) {
-    try {
-      structured = JSON.parse(resultText);
-    } catch {
-      structured = undefined;
-    }
-  }
-  const usageEvent = events.find((evt) => evt.type === "turn.completed");
-  const usage = usageEvent?.usage || {};
+function buildCodexResult(
+  accumulator: CodexResultAccumulator,
+  fallbackResult = ""
+): ClaudeRunResult {
   return {
     type: "codex",
     subtype: "exec",
     is_error: false,
     duration_ms: 0,
-    result: resultText || stdout,
-    session_id: threadEvent?.thread_id || "",
+    result: accumulator.result_text || fallbackResult,
+    session_id: accumulator.session_id,
     terminal_reason: "completed",
     total_cost_usd: 0,
     num_turns: 1,
-    structured_output: structured,
+    structured_output: accumulator.structured_output,
     usage: {
-      input_tokens: usage.input_tokens || 0,
-      output_tokens: usage.output_tokens || 0,
-      cache_read_input_tokens: usage.cached_input_tokens || 0,
+      input_tokens: accumulator.usage.input_tokens,
+      output_tokens: accumulator.usage.output_tokens,
+      cache_read_input_tokens: accumulator.usage.cached_input_tokens,
     },
   };
+}
+
+function parseCodexResult(stdout: string): ClaudeRunResult {
+  const accumulator = createCodexResultAccumulator();
+  const remainder = flushCodexEventBuffer(stdout, "", (event) => {
+    updateCodexResultAccumulator(accumulator, event);
+  });
+  flushCodexEventBuffer("\n", remainder, (event) => {
+    updateCodexResultAccumulator(accumulator, event);
+  });
+  return buildCodexResult(accumulator, stdout);
 }
 
 async function createFollowupTasks(
@@ -885,11 +939,12 @@ async function handleRunComplete(
   durationMs: number,
   preRunCommentIds: number[],
   runtime: AgentRuntime,
-  runReason: "initial" | "review" | "cleanup" | "manual_instruction" | "resume_after_kill"
+  runReason: "initial" | "review" | "cleanup" | "manual_instruction" | "resume_after_kill",
+  preParsedResult?: ClaudeRunResult
 ) {
   try {
     const result: ClaudeRunResult =
-      runtime === "codex" ? parseCodexResult(stdout) : JSON.parse(stdout);
+      preParsedResult || (runtime === "codex" ? parseCodexResult(stdout) : JSON.parse(stdout));
     const { getTask } = await import("./store");
     const currentTask = await getTask(taskId);
 
@@ -1002,6 +1057,7 @@ async function handleRunComplete(
 }
 
 export const __testUtils = {
+  appendToBoundedTextBuffer,
   buildModelArgs,
   buildPermissionArgs,
   createFollowupTasks,

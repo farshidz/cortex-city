@@ -5,6 +5,7 @@ import {
   chmodSync,
   mkdtempSync,
   mkdirSync,
+  realpathSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -176,7 +177,14 @@ function runAgentRunnerScript(workspace: string, body: string) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  return JSON.parse(lines[lines.length - 1]);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      return JSON.parse(lines[i]);
+    } catch {
+      // Keep scanning until we find the final JSON payload.
+    }
+  }
+  throw new SyntaxError(`No JSON payload found in output:\n${output}`);
 }
 
 function setupWorkspace(): string {
@@ -464,10 +472,10 @@ test("spawnAgentSession uses the configured default branch in the initial prompt
     result.args.args.at(-1),
     /^INITIAL Cover orchestration edges \| Exercise agent-runner prompt selection \| Add focused tests \| docusaurus-main \| Marqo Documentation Agent$/
   );
-  assert.equal(result.tasks[0].pr_url, "https://github.com/marqo-ai/marqodocs/pull/12");
+  assert.equal(result.tasks[0].last_run_result, "success");
 });
 
-test("cleanup runs use the cleanup prompt even when a session already exists", () => {
+test("cleanup runs use the cleanup prompt without resuming a prior session", () => {
   const workspace = setupWorkspace();
   const argsFile = path.join(workspace, "cleanup-args.json");
   const worktreePath = path.join(workspace, "worktree");
@@ -525,8 +533,8 @@ test("cleanup runs use the cleanup prompt even when a session already exists", (
   assert.equal(result.args.args[0], "exec");
   assert.equal(result.args.args[1], "--json");
   assert.ok(result.args.args.includes("--output-schema"));
-  assert.ok(result.args.args.includes("resume"));
-  assert.ok(result.args.args.includes("thread-cleanup"));
+  assert.ok(!result.args.args.includes("resume"));
+  assert.ok(!result.args.args.includes("thread-cleanup"));
   assert.match(result.args.args.at(-1), /^CLEANUP closed \| Cover orchestration edges \|/);
   assert.equal(result.tasks[0].last_run_result, "success");
   assert.equal(result.tasks[0].status, "closed");
@@ -728,7 +736,7 @@ test("spawnAgentSession maps Claude initial-run permissions and uses the task wo
   assert.ok(!result.args.args.includes("--resume"));
   assert.ok(result.args.args.includes("--permission-mode"));
   assert.ok(result.args.args.includes("bypassPermissions"));
-  assert.equal(result.args.cwd, worktreePath);
+  assert.equal(result.args.cwd, realpathSync(worktreePath));
   assert.equal(result.tasks[0].session_id, "claude-initial-session");
 });
 
@@ -774,6 +782,25 @@ test("createFollowupTasks trims task data, inherits runtime settings, and skips 
   assert.equal(followupTask.permission_mode, "acceptEdits");
   assert.equal(followupTask.model, "gpt-5.4-mini");
   assert.equal(followupTask.effort, "low");
+});
+
+test("appendToBoundedTextBuffer keeps only the latest bytes", () => {
+  const workspace = setupWorkspace();
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const buffer = { value: "", truncated: false };
+      __testUtils.appendToBoundedTextBuffer(buffer, "abcd", 4);
+      __testUtils.appendToBoundedTextBuffer(buffer, "ef", 4);
+      console.log(JSON.stringify(buffer));
+    `
+  );
+
+  assert.deepEqual(result, {
+    value: "cdef",
+    truncated: true,
+  });
 });
 
 test("spawnAgentSession passes Claude model and effort flags", () => {

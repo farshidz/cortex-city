@@ -14,6 +14,15 @@ import type { Task } from "./types";
 
 export const PRUNE_AGE_MS = 12 * 60 * 60 * 1000;
 
+function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boolean {
+  return Boolean(
+    (task.status === "merged" || task.status === "closed") &&
+      task.final_cleanup_state === "finished" &&
+      task.worktree_path &&
+      !hasActivePid
+  );
+}
+
 interface WorkerLogger {
   log: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
@@ -76,13 +85,14 @@ async function launchTaskRun(
       await options.onComplete?.(taskId);
     });
 
+    activePids.set(task.id, pid);
     await deps.updateTask(task.id, {
       current_run_pid: pid,
       ...options.postSpawnUpdates,
     });
-    activePids.set(task.id, pid);
     return true;
   } catch (error) {
+    activePids.delete(task.id);
     deps.logger.error(
       `[worker] Failed to start ${options.mode} run for task ${task.id}:`,
       error
@@ -143,20 +153,37 @@ export async function pollOnce(
       onComplete: async (taskId) => {
         const currentTask = await deps.getTask(taskId);
         if (!currentTask) return;
-        if (currentTask.worktree_path) {
-          await deps.removeWorktree(currentTask);
-        }
         await deps.updateTask(taskId, {
-          worktree_path: undefined,
           final_cleanup_state: "finished",
           current_run_pid: undefined,
         });
+        if (currentTask.worktree_path) {
+          await deps.removeWorktree(currentTask);
+          await deps.updateTask(taskId, {
+            worktree_path: undefined,
+          });
+        }
       },
-      postSpawnUpdates: {
+      preSpawnUpdates: {
         final_cleanup_state: "running",
       },
     });
   }
+
+  tasks = deps.readTasks();
+
+  deps.logger.log("[worker] Poll phase: finalize cleanup worktrees");
+  for (const task of tasks) {
+    if (!shouldFinalizeCleanupWorktree(task, activePids.has(task.id))) continue;
+
+    deps.logger.log(`[worker] Removing leftover worktree for task "${task.title}" (${task.id})`);
+    await deps.removeWorktree(task);
+    await deps.updateTask(task.id, {
+      worktree_path: undefined,
+    });
+  }
+
+  tasks = deps.readTasks();
 
   deps.logger.log("[worker] Poll phase: prune old final tasks");
   const now = Date.now();

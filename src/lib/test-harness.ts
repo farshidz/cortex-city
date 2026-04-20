@@ -336,7 +336,14 @@ export function runTsxScript(
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  return JSON.parse(lines[lines.length - 1]);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      return JSON.parse(lines[i]);
+    } catch {
+      // Keep scanning until we find the final JSON payload.
+    }
+  }
+  throw new SyntaxError(`No JSON payload found in output:\n${output}`);
 }
 
 function runGit(cwd: string, args: string[]) {
