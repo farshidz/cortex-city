@@ -15,7 +15,7 @@ You are working in a git worktree. A branch has already been created for you.
 
 1. Implement the changes described above
 2. If you need the latest base-branch changes, merge `origin/{{BASE_BRANCH}}` into your working branch. Do not rebase.
-3. If you validate locally, run only the narrowest checks relevant to the files you changed. Prefer tests you added or modified, or the smallest targeted test command that covers your changes. Do not run the full local test suite unless it is absolutely required.
+3. If you validate locally, run only the narrowest checks relevant to the files you changed. Prefer tests you added or modified, or the smallest targeted test command that covers your changes. Do not run the full local test suite on this host.
 4. Push the branch so GitHub Actions or other remote CI can run the full test suite and broader validation. Rely on CI for full test coverage rather than heavy local runs on this host.
 5. Commit your changes with clear, descriptive commit messages
 6. Push the branch and create a pull request targeting `{{BASE_BRANCH}}` with a clear title and description
