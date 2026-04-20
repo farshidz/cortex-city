@@ -731,6 +731,14 @@ export default function TaskDetailPage({
                   </p>
                 </div>
                 <div>
+                  <span className="text-muted-foreground">Cached Input Tokens:</span>
+                  <p>
+                    {typeof task.total_cached_input_tokens === "number"
+                      ? task.total_cached_input_tokens.toLocaleString()
+                      : "—"}
+                  </p>
+                </div>
+                <div>
                   <span className="text-muted-foreground">Total Time:</span>
                   <p>
                     {task.total_duration_ms

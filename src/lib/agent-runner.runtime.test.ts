@@ -594,6 +594,130 @@ test("spawnAgentSession marks timed out runs resumable", () => {
   assert.equal(result.tasks[0].current_run_pid, undefined);
 });
 
+test("handleRunComplete uses Codex session deltas instead of re-adding cumulative usage", () => {
+  const { workspace } = setupWorkspace();
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_review",
+        session_id: "thread-codex",
+        codex_usage_session_id: "thread-codex",
+        codex_cumulative_input_tokens: 100,
+        codex_cumulative_cached_input_tokens: 80,
+        codex_cumulative_output_tokens: 20,
+        total_input_tokens: 100,
+        total_cached_input_tokens: 80,
+        total_output_tokens: 20,
+      }))};
+      await createTask(task);
+      await __testUtils.handleRunComplete(
+        "task-1",
+        0,
+        "",
+        "",
+        65,
+        [],
+        "codex",
+        "review",
+        {
+          type: "codex",
+          subtype: "exec",
+          is_error: false,
+          duration_ms: 0,
+          result: JSON.stringify({
+            status: "needs_review",
+            summary: "Kept the existing PR current",
+            pr_url: "",
+            branch_name: "agent/codex-cumulative",
+            files_changed: [],
+            assumptions: [],
+            blockers: [],
+            next_steps: [],
+          }),
+          session_id: "thread-codex",
+          terminal_reason: "completed",
+          total_cost_usd: 0,
+          num_turns: 1,
+          structured_output: {
+            status: "needs_review",
+            summary: "Kept the existing PR current",
+            pr_url: "",
+            branch_name: "agent/codex-cumulative",
+            files_changed: [],
+            assumptions: [],
+            blockers: [],
+            next_steps: [],
+          },
+          usage: {
+            input_tokens: 140,
+            cache_read_input_tokens: 110,
+            output_tokens: 27,
+          },
+        }
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `
+  );
+
+  assert.equal(result.tasks[0].last_run_input_tokens, 40);
+  assert.equal(result.tasks[0].last_run_cached_input_tokens, 30);
+  assert.equal(result.tasks[0].last_run_output_tokens, 7);
+  assert.equal(result.tasks[0].total_input_tokens, 140);
+  assert.equal(result.tasks[0].total_cached_input_tokens, 110);
+  assert.equal(result.tasks[0].total_output_tokens, 27);
+  assert.equal(result.tasks[0].codex_usage_session_id, "thread-codex");
+  assert.equal(result.tasks[0].codex_cumulative_input_tokens, 140);
+  assert.equal(result.tasks[0].codex_cumulative_cached_input_tokens, 110);
+  assert.equal(result.tasks[0].codex_cumulative_output_tokens, 27);
+});
+
+test("handleRunTimeout preserves Codex usage already observed before timeout", () => {
+  const { workspace } = setupWorkspace();
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        session_id: "thread-timeout",
+      }))};
+      await createTask(task);
+      await __testUtils.handleRunTimeout(
+        "task-1",
+        42,
+        50,
+        "codex",
+        {
+          type: "codex",
+          subtype: "exec",
+          is_error: false,
+          duration_ms: 0,
+          result: "",
+          session_id: "thread-timeout",
+          terminal_reason: "completed",
+          total_cost_usd: 0,
+          num_turns: 1,
+          usage: {
+            input_tokens: 12,
+            cache_read_input_tokens: 9,
+            output_tokens: 3,
+          },
+        }
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `
+  );
+
+  assert.equal(result.tasks[0].last_run_result, "timeout");
+  assert.equal(result.tasks[0].last_run_input_tokens, 12);
+  assert.equal(result.tasks[0].last_run_cached_input_tokens, 9);
+  assert.equal(result.tasks[0].last_run_output_tokens, 3);
+  assert.equal(result.tasks[0].total_input_tokens, 12);
+  assert.equal(result.tasks[0].total_cached_input_tokens, 9);
+  assert.equal(result.tasks[0].total_output_tokens, 3);
+  assert.equal(result.tasks[0].codex_usage_session_id, "thread-timeout");
+});
+
 test("spawnAgentSession handles child spawn errors", () => {
   const { workspace } = setupWorkspace();
   const worktreePath = path.join(workspace, "worktree");

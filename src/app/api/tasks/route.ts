@@ -44,6 +44,7 @@ export async function POST(request: NextRequest) {
     updated_at: now,
     run_count: 0,
     total_input_tokens: 0,
+    total_cached_input_tokens: 0,
     total_output_tokens: 0,
   };
   await createTask(task);

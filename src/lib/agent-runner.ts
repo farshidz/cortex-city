@@ -501,7 +501,13 @@ export async function spawnAgentSession(
         `[agent-runner] Session for task "${task.title}" exited with code ${code} (${Math.round(durationMs / 1000)}s)`
       );
       if (didTimeout) {
-        await handleRunTimeout(task.id, durationMs, runTimeoutMs);
+        await handleRunTimeout(
+          task.id,
+          durationMs,
+          runTimeoutMs,
+          runtime,
+          runtime === "codex" ? buildCodexResult(codexAccumulator) : undefined
+        );
         return;
       }
       await handleRunComplete(
@@ -694,6 +700,13 @@ interface CodexResultAccumulator {
   };
 }
 
+interface UsageAccounting {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  updates: Partial<Task>;
+}
+
 function createCodexResultAccumulator(): CodexResultAccumulator {
   return {
     session_id: "",
@@ -704,6 +717,75 @@ function createCodexResultAccumulator(): CodexResultAccumulator {
       cached_input_tokens: 0,
       output_tokens: 0,
     },
+  };
+}
+
+function computeCodexUsageDelta(
+  current: number,
+  previous: number,
+  sameSession: boolean
+): number {
+  if (!sameSession) return current;
+  if (current >= previous) return current - previous;
+  return current;
+}
+
+function buildUsageAccounting(
+  runtime: AgentRuntime,
+  result: ClaudeRunResult,
+  currentTask?: Task
+): UsageAccounting {
+  const rawInputTokens = result.usage?.input_tokens || 0;
+  const rawCachedInputTokens = result.usage?.cache_read_input_tokens || 0;
+  const rawOutputTokens = result.usage?.output_tokens || 0;
+
+  let inputTokens = rawInputTokens;
+  let cachedInputTokens = rawCachedInputTokens;
+  let outputTokens = rawOutputTokens;
+  const updates: Partial<Task> = {};
+
+  if (runtime === "codex") {
+    const usageSessionId = result.session_id || currentTask?.session_id;
+    if (usageSessionId) {
+      const sameSession = currentTask?.codex_usage_session_id === usageSessionId;
+      inputTokens = computeCodexUsageDelta(
+        rawInputTokens,
+        currentTask?.codex_cumulative_input_tokens || 0,
+        sameSession
+      );
+      cachedInputTokens = computeCodexUsageDelta(
+        rawCachedInputTokens,
+        currentTask?.codex_cumulative_cached_input_tokens || 0,
+        sameSession
+      );
+      outputTokens = computeCodexUsageDelta(
+        rawOutputTokens,
+        currentTask?.codex_cumulative_output_tokens || 0,
+        sameSession
+      );
+      updates.codex_usage_session_id = usageSessionId;
+      updates.codex_cumulative_input_tokens = rawInputTokens;
+      updates.codex_cumulative_cached_input_tokens = rawCachedInputTokens;
+      updates.codex_cumulative_output_tokens = rawOutputTokens;
+    }
+  }
+
+  updates.last_run_input_tokens = inputTokens;
+  updates.last_run_cached_input_tokens = cachedInputTokens;
+  updates.last_run_output_tokens = outputTokens;
+
+  if (currentTask) {
+    updates.total_input_tokens = (currentTask.total_input_tokens || 0) + inputTokens;
+    updates.total_cached_input_tokens =
+      (currentTask.total_cached_input_tokens || 0) + cachedInputTokens;
+    updates.total_output_tokens = (currentTask.total_output_tokens || 0) + outputTokens;
+  }
+
+  return {
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    updates,
   };
 }
 
@@ -913,16 +995,23 @@ async function createFollowupTasks(
 async function handleRunTimeout(
   taskId: string,
   durationMs: number,
-  timeoutMs: number
+  timeoutMs: number,
+  runtime?: AgentRuntime,
+  preParsedResult?: ClaudeRunResult
 ): Promise<void> {
   const { getTask } = await import("./store");
   const currentTask = await getTask(taskId);
   const resumedUpdates = currentTask
     ? buildInterruptedTaskUpdates(currentTask)
     : { current_run_pid: undefined };
+  const usageUpdates =
+    currentTask && preParsedResult && runtime
+      ? buildUsageAccounting(runtime, preParsedResult, currentTask).updates
+      : {};
 
   await updateTask(taskId, {
     ...resumedUpdates,
+    ...usageUpdates,
     last_run_result: "timeout",
     error_log: `Timed out after ${timeoutMs}ms`,
     last_run_at: new Date().toISOString(),
@@ -947,9 +1036,7 @@ async function handleRunComplete(
       preParsedResult || (runtime === "codex" ? parseCodexResult(stdout) : JSON.parse(stdout));
     const { getTask } = await import("./store");
     const currentTask = await getTask(taskId);
-
-    const inputTokens = (result.usage?.input_tokens || 0) + (result.usage?.cache_read_input_tokens || 0);
-    const outputTokens = result.usage?.output_tokens || 0;
+    const usageAccounting = buildUsageAccounting(runtime, result, currentTask);
     const didFail = exitCode !== 0 || result.is_error;
     const isBudgetExceeded = result.terminal_reason === "budget_exceeded";
     // `handleRunComplete` parses whatever payload the runtime returned before
@@ -959,9 +1046,8 @@ async function handleRunComplete(
 
     const updates: Partial<Task> = {
       session_id: result.session_id,
+      ...usageAccounting.updates,
       last_run_result: didFail ? "error" : "success",
-      last_run_input_tokens: inputTokens,
-      last_run_output_tokens: outputTokens,
       current_run_pid: undefined,
       last_run_at: new Date().toISOString(),
     };
@@ -1009,10 +1095,6 @@ async function handleRunComplete(
       updates.session_id = currentTask.session_id;
     }
     if (currentTask) {
-      updates.total_input_tokens =
-        (currentTask.total_input_tokens || 0) + inputTokens;
-      updates.total_output_tokens =
-        (currentTask.total_output_tokens || 0) + outputTokens;
       updates.total_duration_ms =
         (currentTask.total_duration_ms || 0) + durationMs;
       updates.run_count = (currentTask.run_count || 0) + 1;
@@ -1058,6 +1140,7 @@ async function handleRunComplete(
 
 export const __testUtils = {
   appendToBoundedTextBuffer,
+  buildUsageAccounting,
   buildModelArgs,
   buildPermissionArgs,
   createFollowupTasks,
