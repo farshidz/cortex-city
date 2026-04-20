@@ -20,6 +20,8 @@ Environment overrides:
   APP_USER=cortex
   APP_GROUP=cortex
   APP_DIR=/opt/cortex-city/app
+  GIT_USER_NAME="Cortex City"
+  GIT_USER_EMAIL="farshid@marqo.ai"
   CONFIG_DIR=/etc/cortex-city
   WEB_ENV_FILE=/etc/cortex-city/web.env
   WORKER_ENV_FILE=/etc/cortex-city/worker.env
@@ -106,6 +108,8 @@ fi
 APP_USER="${APP_USER:-cortex}"
 APP_GROUP="${APP_GROUP:-$APP_USER}"
 APP_DIR="${APP_DIR:-/opt/cortex-city/app}"
+GIT_USER_NAME="${GIT_USER_NAME:-Cortex City}"
+GIT_USER_EMAIL="${GIT_USER_EMAIL:-farshid@marqo.ai}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/cortex-city}"
 WEB_ENV_FILE="${WEB_ENV_FILE:-$CONFIG_DIR/web.env}"
 WORKER_ENV_FILE="${WORKER_ENV_FILE:-$CONFIG_DIR/worker.env}"
@@ -137,6 +141,8 @@ SUDO=$(quote "$SUDO")
 APP_USER=$(quote "$APP_USER")
 APP_GROUP=$(quote "$APP_GROUP")
 APP_DIR=$(quote "$APP_DIR")
+GIT_USER_NAME=$(quote "$GIT_USER_NAME")
+GIT_USER_EMAIL=$(quote "$GIT_USER_EMAIL")
 CONFIG_DIR=$(quote "$CONFIG_DIR")
 WEB_ENV_FILE=$(quote "$WEB_ENV_FILE")
 WORKER_ENV_FILE=$(quote "$WORKER_ENV_FILE")
@@ -240,6 +246,11 @@ fi
 \$SUDO install -d -m 755 -o \"\$APP_USER\" -g \"\$APP_GROUP\" \"\$APP_DIR/.cortex\"
 \$SUDO install -d -m 755 \"\$CONFIG_DIR\"
 
+if command -v git >/dev/null 2>&1; then
+  \$SUDO -u \"\$APP_USER\" -H git config --global user.name \"\$GIT_USER_NAME\"
+  \$SUDO -u \"\$APP_USER\" -H git config --global user.email \"\$GIT_USER_EMAIL\"
+fi
+
 if [[ ! -f \"\$WEB_ENV_FILE\" ]]; then
   cat <<EOF_WEB | \$SUDO tee \"\$WEB_ENV_FILE\" >/dev/null
 # Cortex City web service environment
@@ -288,6 +299,7 @@ echo
 echo 'Bootstrap complete.'
 echo \"App user:      \$APP_USER:\$APP_GROUP\"
 echo \"App dir:       \$APP_DIR\"
+echo \"Git identity:  \$GIT_USER_NAME <\$GIT_USER_EMAIL>\"
 echo \"Config dir:    \$CONFIG_DIR\"
 echo \"Web env file:  \$WEB_ENV_FILE\"
 echo \"Worker env:    \$WORKER_ENV_FILE\"

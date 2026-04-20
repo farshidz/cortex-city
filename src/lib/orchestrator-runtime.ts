@@ -11,6 +11,8 @@ export function buildInterruptedTaskUpdates(task: Task): Partial<Task> {
 
   if (isResumableStatus(task)) {
     updates.resume_requested = true;
+  } else if (task.final_cleanup_state === "running") {
+    updates.final_cleanup_state = undefined;
   }
 
   return updates;

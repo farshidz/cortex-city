@@ -49,6 +49,21 @@ test("buildInterruptedTaskUpdates only clears pid for final tasks", () => {
   });
 });
 
+test("buildInterruptedTaskUpdates resets orphaned final cleanup runs", () => {
+  const updates = buildInterruptedTaskUpdates(
+    sampleTask({
+      status: "closed",
+      current_run_pid: 12345,
+      final_cleanup_state: "running",
+    })
+  );
+
+  assert.deepEqual(updates, {
+    current_run_pid: undefined,
+    final_cleanup_state: undefined,
+  });
+});
+
 test("shouldResumeTask accepts interrupted review runs and manual instructions", () => {
   assert.equal(
     shouldResumeTask(

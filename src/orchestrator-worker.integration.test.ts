@@ -521,7 +521,13 @@ test("pollOnce runs final cleanup, removes worktrees, and prunes old task logs",
       }))});
 
       await pollOnce(activePids);
-      await new Promise((resolve) => setTimeout(resolve, 120));
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const cleanupTask = readTasks().find((task) => task.id === "cleanup-task");
+        if (cleanupTask?.final_cleanup_state === "finished" && !cleanupTask.worktree_path) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       console.log(JSON.stringify({ tasks: readTasks() }));
     `,
     {

@@ -32,11 +32,15 @@ export function readTasks(): Task[] {
   return JSON.parse(raw);
 }
 
+function writeTasksLocked(tasks: Task[]): void {
+  ensureCortexDir();
+  writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
+  snapshotCortex("tasks");
+}
+
 export function writeTasks(tasks: Task[]): Promise<void> {
   return withWriteLock(() => {
-    ensureCortexDir();
-    writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
-    snapshotCortex("tasks");
+    writeTasksLocked(tasks);
   });
 }
 
@@ -45,31 +49,37 @@ export async function getTask(id: string): Promise<Task | undefined> {
 }
 
 export async function createTask(task: Task): Promise<Task> {
-  const tasks = readTasks();
-  tasks.push(task);
-  await writeTasks(tasks);
-  return task;
+  return withWriteLock(() => {
+    const tasks = readTasks();
+    tasks.push(task);
+    writeTasksLocked(tasks);
+    return task;
+  });
 }
 
 export async function updateTask(id: string, updates: Partial<Task>): Promise<Task> {
-  const tasks = readTasks();
-  const index = tasks.findIndex((t) => t.id === id);
-  if (index === -1) throw new Error(`Task ${id} not found`);
-  tasks[index] = {
-    ...tasks[index],
-    ...updates,
-    updated_at: new Date().toISOString(),
-  };
-  await writeTasks(tasks);
-  return tasks[index];
+  return withWriteLock(() => {
+    const tasks = readTasks();
+    const index = tasks.findIndex((t) => t.id === id);
+    if (index === -1) throw new Error(`Task ${id} not found`);
+    tasks[index] = {
+      ...tasks[index],
+      ...updates,
+      updated_at: new Date().toISOString(),
+    };
+    writeTasksLocked(tasks);
+    return tasks[index];
+  });
 }
 
 export async function deleteTask(id: string): Promise<void> {
-  const tasks = readTasks();
-  const filtered = tasks.filter((t) => t.id !== id);
-  if (filtered.length === tasks.length) throw new Error(`Task ${id} not found`);
-  await writeTasks(filtered);
-  deleteTaskLogs(id);
+  return withWriteLock(() => {
+    const tasks = readTasks();
+    const filtered = tasks.filter((t) => t.id !== id);
+    if (filtered.length === tasks.length) throw new Error(`Task ${id} not found`);
+    writeTasksLocked(filtered);
+    deleteTaskLogs(id);
+  });
 }
 
 // --- Config ---

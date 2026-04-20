@@ -148,6 +148,36 @@ test("task CRUD helpers persist updates and refresh timestamps", () => {
   assert.deepEqual(result.remaining, []);
 });
 
+test("updateTask merges concurrent writes without dropping earlier fields", () => {
+  const workspace = createTempWorkspace();
+  const task = sampleTask();
+
+  const result = runStoreScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(task)};
+      await store.createTask(task);
+      await Promise.all([
+        store.updateTask("task-1", {
+          session_id: "thread-123",
+        }),
+        store.updateTask("task-1", {
+          status: "in_review",
+          pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/456",
+        }),
+      ]);
+      console.log(JSON.stringify(store.readTasks()[0]));
+    `
+  );
+
+  assert.equal(result.session_id, "thread-123");
+  assert.equal(result.status, "in_review");
+  assert.equal(
+    result.pr_url,
+    "https://github.com/farshidz/marqo-cortex-city/pull/456"
+  );
+});
+
 test("writeConfig persists the supplied configuration", () => {
   const workspace = createTempWorkspace();
   const config: OrchestratorConfig = {

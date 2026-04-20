@@ -267,7 +267,7 @@ For first-time host setup, run:
 scripts/bootstrap-ssh.sh ubuntu@your-server
 ```
 
-The bootstrap script installs base packages, installs Node.js plus `gh`, `codex`, `claude`, and `wrangler`, creates the app user, prepares `/opt/cortex-city/app` and `/etc/cortex-city`, and writes starter `web.env` and `worker.env` files. It does not install nginx or any reverse proxy.
+The bootstrap script installs base packages, installs Node.js plus `gh`, `codex`, `claude`, and `wrangler`, creates the app user, sets a global git identity for that service user, prepares `/opt/cortex-city/app` and `/etc/cortex-city`, and writes starter `web.env` and `worker.env` files. It does not install nginx or any reverse proxy.
 
 By default bootstrap also reads deploy credentials from a gitignored repo-local `.env.prod`, writes the GitHub and Cloudflare values into the remote `worker.env`, and pre-authenticates `gh` for the `cortex` service user:
 
@@ -282,6 +282,8 @@ scripts/bootstrap-ssh.sh ubuntu@your-server
 ```
 
 Set `BOOTSTRAP_ENV_FILE=/path/to/file` if you want a different local credentials file, or override individual values from your shell for a single run.
+
+Bootstrap defaults the service user's git identity to `Cortex City <farshid@marqo.ai>`. Override that with `GIT_USER_NAME=...` and `GIT_USER_EMAIL=...` if a host should use a different author identity.
 
 `codex` and `claude` still require a one-time interactive login as `cortex` when you want to use subscription-based access instead of API keys.
 
