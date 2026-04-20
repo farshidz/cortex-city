@@ -3,8 +3,8 @@ import { Inter, JetBrains_Mono } from "next/font/google";
 import Image from "next/image";
 import Link from "next/link";
 import { ThemeProvider } from "next-themes";
+import { CortexGitStatusIndicator } from "@/components/cortex-git-status";
 import { ThemeSwitcher } from "@/components/theme-switcher";
-import { getCortexGitStatus } from "@/lib/cortex-git";
 import "./globals.css";
 
 const inter = Inter({
@@ -30,8 +30,6 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const cortexGit = getCortexGitStatus();
-
   return (
     <html
       lang="en"
@@ -66,23 +64,7 @@ export default async function RootLayout({
               <NavLink href="/sessions">Sessions</NavLink>
               <NavLink href="/settings">Settings</NavLink>
             </div>
-            {cortexGit.pushing && (
-              <div className="mb-3 rounded-lg border bg-background/70 px-3 py-2 text-xs">
-                <div className="text-muted-foreground">
-                  State snapshots auto-sync to{" "}
-                  <span className="font-mono text-[11px] text-foreground">
-                    {cortexGit.remoteSlug ||
-                      cortexGit.remoteName ||
-                      "configured remote"}
-                  </span>
-                </div>
-              </div>
-            )}
-            {!cortexGit.enabled && (
-              <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
-                State snapshots not synced as `.cortex` is not a git repository.
-              </div>
-            )}
+            <CortexGitStatusIndicator />
             <ThemeSwitcher />
           </nav>
           <main className="flex-1 p-6 overflow-auto">{children}</main>
