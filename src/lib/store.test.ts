@@ -69,7 +69,6 @@ test("readConfig creates defaults when no config file exists", () => {
   assert.deepEqual(config, {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
-    task_run_timeout_ms: 600000,
     default_permission_mode: "bypassPermissions",
     default_agent_runner: "claude",
     agents: {},
@@ -104,7 +103,6 @@ test("readConfig migrates legacy runner and permission fields", () => {
   assert.deepEqual(config, {
     max_parallel_sessions: 4,
     poll_interval_seconds: 15,
-    task_run_timeout_ms: 600000,
     default_permission_mode: "acceptEdits",
     default_agent_runner: "codex",
     agents: {},

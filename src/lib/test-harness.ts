@@ -90,7 +90,6 @@ export function buildTestConfig(
   return {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
-    task_run_timeout_ms: 10 * 60 * 1000,
     default_permission_mode: "bypassPermissions",
     default_agent_runner: "codex",
     default_codex_model: "gpt-5.4",
