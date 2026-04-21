@@ -297,7 +297,8 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
   assert.equal(updatedTask.session_id, "thread-123");
   assert.equal(updatedTask.last_run_result, "success");
   assert.equal(updatedTask.run_count, 1);
-  assert.equal(updatedTask.total_input_tokens, 7);
+  assert.equal(updatedTask.total_input_tokens, 4);
+  assert.equal(updatedTask.total_cached_input_tokens, 3);
   assert.equal(updatedTask.total_output_tokens, 2);
 });
 
@@ -397,7 +398,8 @@ test("spawnAgentSession uses the review prompt and creates follow-up tasks from 
   assert.equal(parentTask.last_agent_report.summary, "Opened the PR and delegated docs follow-up");
   assert.equal(parentTask.last_agent_report.tool_calls.create_task.length, 2);
   assert.equal(parentTask.run_count, 1);
-  assert.equal(parentTask.total_input_tokens, 12);
+  assert.equal(parentTask.total_input_tokens, 11);
+  assert.equal(parentTask.total_cached_input_tokens, 1);
   assert.equal(parentTask.total_output_tokens, 5);
 
   assert.equal(followupTask.title, "Document the follow-up");
