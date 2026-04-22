@@ -441,7 +441,9 @@ export async function spawnAgentSession(
     clearRunTimers();
     if (runtime === "codex") {
       codexEventBuffer = flushCodexEventBuffer("\n", codexEventBuffer, (event) => {
-        handleCodexEvent(event, codexAccumulator, sessionLog.transcript);
+        const normalizedEvent = withCodexReceivedAt(event);
+        sessionLog.machine.write(`${JSON.stringify(normalizedEvent)}\n`);
+        handleCodexEvent(normalizedEvent, codexAccumulator, sessionLog.transcript);
       });
     }
     sessionLog.machine.end();
@@ -466,14 +468,18 @@ export async function spawnAgentSession(
 
   child.stdout?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
-    sessionLog.machine.write(text);
     if (runtime === "codex") {
       codexEventBuffer = flushCodexEventBuffer(
         text,
         codexEventBuffer,
-        (event) => handleCodexEvent(event, codexAccumulator, sessionLog.transcript)
+        (event) => {
+          const normalizedEvent = withCodexReceivedAt(event);
+          sessionLog.machine.write(`${JSON.stringify(normalizedEvent)}\n`);
+          handleCodexEvent(normalizedEvent, codexAccumulator, sessionLog.transcript);
+        }
       );
     } else {
+      sessionLog.machine.write(text);
       appendToBoundedTextBuffer(stdoutBuffer, text, MAX_RUNTIME_STDOUT_BYTES);
       sessionLog.transcript.write(text);
     }
@@ -672,6 +678,7 @@ interface CodexEvent {
   type: string;
   thread_id?: string;
   timestamp?: string;
+  received_at?: string;
   mode?: string;
   message?: string;
   content?: string;
@@ -704,6 +711,17 @@ interface UsageAccounting {
   cachedInputTokens: number;
   outputTokens: number;
   updates: Partial<Task>;
+}
+
+function withCodexReceivedAt(event: CodexEvent): CodexEvent {
+  return {
+    ...event,
+    received_at: new Date().toISOString(),
+  };
+}
+
+function getCodexEventTimestamp(event: CodexEvent): string | undefined {
+  return event.timestamp || event.received_at;
 }
 
 function createCodexResultAccumulator(): CodexResultAccumulator {
@@ -856,30 +874,31 @@ function formatStructuredAgentMessage(text: string): string {
 }
 
 function formatCodexEventForTranscript(event: CodexEvent): string | null {
+  const eventTimestamp = getCodexEventTimestamp(event);
   if (event.type === "prompt") {
     const modeLabel = event.mode
       ? `${event.mode.charAt(0).toUpperCase()}${event.mode.slice(1)} prompt`
       : "Prompt";
-    return `${formatTranscriptHeading("USER", event.timestamp, `(${modeLabel})`)}\n${event.content || ""}\n\n`;
+    return `${formatTranscriptHeading("USER", eventTimestamp, `(${modeLabel})`)}\n${event.content || ""}\n\n`;
   }
 
   if (event.type === "thread.started" && event.thread_id) {
-    return `${formatTranscriptHeading("SYSTEM", event.timestamp)}\nSession started: ${event.thread_id}\n\n`;
+    return `${formatTranscriptHeading("SYSTEM", eventTimestamp)}\nSession started: ${event.thread_id}\n\n`;
   }
 
   if (event.type === "item.completed" && event.item?.type === "agent_message") {
-    return `${formatTranscriptHeading("CODEX", event.timestamp)}\n${formatStructuredAgentMessage(event.item.text || "")}\n\n`;
+    return `${formatTranscriptHeading("CODEX", eventTimestamp)}\n${formatStructuredAgentMessage(event.item.text || "")}\n\n`;
   }
 
   if (event.type === "item.completed" && event.item?.type === "command_execution") {
     const body = [`$ ${event.item.command || ""}`];
     const output = event.item.aggregated_output?.trim();
     if (output) body.push(output);
-    return `${formatTranscriptHeading("CODEX", event.timestamp, "(command)")}\n${body.join("\n")}\n\n`;
+    return `${formatTranscriptHeading("CODEX", eventTimestamp, "(command)")}\n${body.join("\n")}\n\n`;
   }
 
   if (event.type === "error" && event.message) {
-    return `${formatTranscriptHeading("ERROR", event.timestamp)}\n${event.message}\n\n`;
+    return `${formatTranscriptHeading("ERROR", eventTimestamp)}\n${event.message}\n\n`;
   }
 
   return null;

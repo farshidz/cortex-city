@@ -288,6 +288,17 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
   });
   assert.match(result.machine, /"mode":"manual"/);
   assert.match(result.machine, /"content":"Apply the reviewer feedback"/);
+  const machineEvents = result.machine
+    .split(/\r?\n/)
+    .filter((line: string) => line.trim().startsWith("{"))
+    .map((line: string) => JSON.parse(line));
+  const codexEvents = machineEvents.filter(
+    (event: { type?: string }) => event.type !== "prompt"
+  );
+  assert.ok(codexEvents.length > 0);
+  for (const event of codexEvents) {
+    assert.equal(typeof event.received_at, "string");
+  }
   assert.match(result.transcript, /USER \(Manual prompt\)/);
   assert.match(result.transcript, /Apply the reviewer feedback/);
   assert.match(result.transcript, /Status: completed/);
