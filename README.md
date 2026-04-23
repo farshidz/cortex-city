@@ -301,4 +301,4 @@ This directory is intentionally ignored by git so local machine state does not g
 
 ## License
 
-This project is licensed under the GNU GPLv3. See [LICENSE](/Users/farshid/code/cortex-city/LICENSE) for the full text.
+This project is licensed under Apache 2.0. See [LICENSE](/Users/farshid/code/cortex-city/LICENSE) for the full text.
