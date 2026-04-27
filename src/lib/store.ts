@@ -117,6 +117,7 @@ function getDefaultConfig(): OrchestratorConfig {
   return {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
+    task_run_timeout_ms: 2 * 60 * 60 * 1000,
     default_permission_mode: "bypassPermissions",
     default_agent_runner: "claude",
     agents: {},

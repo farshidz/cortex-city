@@ -32,6 +32,7 @@ import { buildInterruptedTaskUpdates, shouldUseContinuePrompt } from "./orchestr
 
 const GLOBAL_ENV_FILE = path.join(/* turbopackIgnore: true */ process.cwd(), ".env");
 const FORCE_KILL_GRACE_MS = 5_000;
+const DEFAULT_TASK_RUN_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const MAX_RUNTIME_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_STDERR_BYTES = 1 * 1024 * 1024;
@@ -408,7 +409,10 @@ export async function spawnAgentSession(
   }
 
   const spawnedAt = Date.now();
-  const runTimeoutMs = config.task_run_timeout_ms;
+  const runTimeoutMs =
+    typeof config.task_run_timeout_ms === "number"
+      ? config.task_run_timeout_ms
+      : DEFAULT_TASK_RUN_TIMEOUT_MS;
 
   const envFile = resolveEnvPath(agentConfig, task.agent);
   const child = spawn(runtime === "codex" ? "codex" : "claude", args, {
@@ -546,14 +550,17 @@ export async function spawnAgentSession(
   if (typeof runTimeoutMs === "number" && runTimeoutMs > 0) {
     timeoutHandle = setTimeout(() => {
       didTimeout = true;
-      console.error(
-        `[agent-runner] Session for task "${task.title}" timed out after ${runTimeoutMs}ms`
+      console.warn(
+        `[agent-runner] WARNING: Session for task "${task.title}" timed out after ${runTimeoutMs}ms; killing runtime process ${child.pid}`
       );
       try {
         child.kill("SIGTERM");
       } catch {}
       forceKillHandle = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) {
+          console.warn(
+            `[agent-runner] WARNING: Session for task "${task.title}" did not exit after SIGTERM; force killing runtime process ${child.pid}`
+          );
           try {
             child.kill("SIGKILL");
           } catch {}
