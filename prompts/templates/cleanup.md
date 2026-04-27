@@ -1,10 +1,12 @@
 The task is complete and the PR has been {{FINAL_STATUS}}. Perform any cleanup needed.
 
 ## Instructions
-1. Delete the local and remote branch if it still exists (the PR is already {{FINAL_STATUS}})
-2. Do not rebase the branch during cleanup. If you need any base-branch changes before deleting it, merge them instead.
-3. Do not create any new commits or PRs
-4. Verify your workspace is clean and nothing is left running
+1. Do not remove the local worktree. The orchestrator removes the task worktree after this cleanup run exits.
+2. Do not delete the local branch. The orchestrator removes the local branch/worktree after this cleanup run exits.
+3. Delete the remote branch only if it still exists and the PR is already {{FINAL_STATUS}}.
+4. Do not rebase the branch during cleanup. If you need any base-branch changes before deleting it, merge them instead.
+5. Do not create any new commits or PRs.
+6. Verify any task-specific temporary resources are cleaned up. Avoid broad process scans that match this cleanup agent process.
 
 ## Response Format
 Your response MUST conform to the required JSON schema. Provide:

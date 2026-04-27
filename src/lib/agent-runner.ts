@@ -32,6 +32,7 @@ import { buildInterruptedTaskUpdates, shouldUseContinuePrompt } from "./orchestr
 
 const GLOBAL_ENV_FILE = path.join(/* turbopackIgnore: true */ process.cwd(), ".env");
 const FORCE_KILL_GRACE_MS = 5_000;
+const DEFAULT_TASK_RUN_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const MAX_RUNTIME_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_STDERR_BYTES = 1 * 1024 * 1024;
@@ -408,7 +409,10 @@ export async function spawnAgentSession(
   }
 
   const spawnedAt = Date.now();
-  const runTimeoutMs = config.task_run_timeout_ms;
+  const runTimeoutMs =
+    typeof config.task_run_timeout_ms === "number"
+      ? config.task_run_timeout_ms
+      : DEFAULT_TASK_RUN_TIMEOUT_MS;
 
   const envFile = resolveEnvPath(agentConfig, task.agent);
   const child = spawn(runtime === "codex" ? "codex" : "claude", args, {
@@ -441,7 +445,9 @@ export async function spawnAgentSession(
     clearRunTimers();
     if (runtime === "codex") {
       codexEventBuffer = flushCodexEventBuffer("\n", codexEventBuffer, (event) => {
-        handleCodexEvent(event, codexAccumulator, sessionLog.transcript);
+        const normalizedEvent = withCodexReceivedAt(event);
+        sessionLog.machine.write(`${JSON.stringify(normalizedEvent)}\n`);
+        handleCodexEvent(normalizedEvent, codexAccumulator, sessionLog.transcript);
       });
     }
     sessionLog.machine.end();
@@ -466,14 +472,18 @@ export async function spawnAgentSession(
 
   child.stdout?.on("data", (chunk: Buffer) => {
     const text = chunk.toString();
-    sessionLog.machine.write(text);
     if (runtime === "codex") {
       codexEventBuffer = flushCodexEventBuffer(
         text,
         codexEventBuffer,
-        (event) => handleCodexEvent(event, codexAccumulator, sessionLog.transcript)
+        (event) => {
+          const normalizedEvent = withCodexReceivedAt(event);
+          sessionLog.machine.write(`${JSON.stringify(normalizedEvent)}\n`);
+          handleCodexEvent(normalizedEvent, codexAccumulator, sessionLog.transcript);
+        }
       );
     } else {
+      sessionLog.machine.write(text);
       appendToBoundedTextBuffer(stdoutBuffer, text, MAX_RUNTIME_STDOUT_BYTES);
       sessionLog.transcript.write(text);
     }
@@ -540,14 +550,17 @@ export async function spawnAgentSession(
   if (typeof runTimeoutMs === "number" && runTimeoutMs > 0) {
     timeoutHandle = setTimeout(() => {
       didTimeout = true;
-      console.error(
-        `[agent-runner] Session for task "${task.title}" timed out after ${runTimeoutMs}ms`
+      console.warn(
+        `[agent-runner] WARNING: Session for task "${task.title}" timed out after ${runTimeoutMs}ms; killing runtime process ${child.pid}`
       );
       try {
         child.kill("SIGTERM");
       } catch {}
       forceKillHandle = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) {
+          console.warn(
+            `[agent-runner] WARNING: Session for task "${task.title}" did not exit after SIGTERM; force killing runtime process ${child.pid}`
+          );
           try {
             child.kill("SIGKILL");
           } catch {}
@@ -672,6 +685,7 @@ interface CodexEvent {
   type: string;
   thread_id?: string;
   timestamp?: string;
+  received_at?: string;
   mode?: string;
   message?: string;
   content?: string;
@@ -704,6 +718,17 @@ interface UsageAccounting {
   cachedInputTokens: number;
   outputTokens: number;
   updates: Partial<Task>;
+}
+
+function withCodexReceivedAt(event: CodexEvent): CodexEvent {
+  return {
+    ...event,
+    received_at: new Date().toISOString(),
+  };
+}
+
+function getCodexEventTimestamp(event: CodexEvent): string | undefined {
+  return event.timestamp || event.received_at;
 }
 
 function createCodexResultAccumulator(): CodexResultAccumulator {
@@ -856,30 +881,31 @@ function formatStructuredAgentMessage(text: string): string {
 }
 
 function formatCodexEventForTranscript(event: CodexEvent): string | null {
+  const eventTimestamp = getCodexEventTimestamp(event);
   if (event.type === "prompt") {
     const modeLabel = event.mode
       ? `${event.mode.charAt(0).toUpperCase()}${event.mode.slice(1)} prompt`
       : "Prompt";
-    return `${formatTranscriptHeading("USER", event.timestamp, `(${modeLabel})`)}\n${event.content || ""}\n\n`;
+    return `${formatTranscriptHeading("USER", eventTimestamp, `(${modeLabel})`)}\n${event.content || ""}\n\n`;
   }
 
   if (event.type === "thread.started" && event.thread_id) {
-    return `${formatTranscriptHeading("SYSTEM", event.timestamp)}\nSession started: ${event.thread_id}\n\n`;
+    return `${formatTranscriptHeading("SYSTEM", eventTimestamp)}\nSession started: ${event.thread_id}\n\n`;
   }
 
   if (event.type === "item.completed" && event.item?.type === "agent_message") {
-    return `${formatTranscriptHeading("CODEX", event.timestamp)}\n${formatStructuredAgentMessage(event.item.text || "")}\n\n`;
+    return `${formatTranscriptHeading("CODEX", eventTimestamp)}\n${formatStructuredAgentMessage(event.item.text || "")}\n\n`;
   }
 
   if (event.type === "item.completed" && event.item?.type === "command_execution") {
     const body = [`$ ${event.item.command || ""}`];
     const output = event.item.aggregated_output?.trim();
     if (output) body.push(output);
-    return `${formatTranscriptHeading("CODEX", event.timestamp, "(command)")}\n${body.join("\n")}\n\n`;
+    return `${formatTranscriptHeading("CODEX", eventTimestamp, "(command)")}\n${body.join("\n")}\n\n`;
   }
 
   if (event.type === "error" && event.message) {
-    return `${formatTranscriptHeading("ERROR", event.timestamp)}\n${event.message}\n\n`;
+    return `${formatTranscriptHeading("ERROR", eventTimestamp)}\n${event.message}\n\n`;
   }
 
   return null;

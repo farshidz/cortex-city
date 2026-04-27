@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -257,6 +257,27 @@ test("buildReviewPrompt uses sensible defaults for unknown mergeability", () => 
   );
   assert.match(result, /Base=trunk/);
   assert.doesNotMatch(result, /Agent Review Context/);
+});
+
+test("shared review template requires the robot prefix in GitHub replies", () => {
+  const reviewTemplate = readFileSync(
+    path.join(REPO_ROOT, "prompts", "templates", "review.md"),
+    "utf-8"
+  );
+
+  assert.match(reviewTemplate, /Prefix your response with `\*\*🤖\[\{\{AGENT_NAME\}\}\]\*\* `/);
+});
+
+test("shared cleanup template leaves local worktree cleanup to the orchestrator", () => {
+  const cleanupTemplate = readFileSync(
+    path.join(REPO_ROOT, "prompts", "templates", "cleanup.md"),
+    "utf-8"
+  );
+
+  assert.match(cleanupTemplate, /Do not remove the local worktree/);
+  assert.match(cleanupTemplate, /Do not delete the local branch/);
+  assert.match(cleanupTemplate, /The orchestrator removes the task worktree after this cleanup run exits/);
+  assert.doesNotMatch(cleanupTemplate, /Delete the local and remote branch/);
 });
 
 test("buildCleanupPrompt and manual helpers provide the expected fallbacks", () => {

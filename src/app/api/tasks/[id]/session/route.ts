@@ -166,7 +166,6 @@ function loadCodexSession(task: Task) {
   for (const file of logFiles) {
     const fullPath = path.join(LOGS_DIR, file);
     const content = readFileSync(fullPath, "utf-8");
-    if (task.session_id && !content.includes(task.session_id)) continue;
     const startTimestamp = parseCodexStartTimestamp(content) || task.last_run_at;
     const parsed = parseCodexLog(content, startTimestamp);
     if (!parsed) continue;
@@ -210,6 +209,7 @@ interface CodexEvent {
   type: string;
   thread_id?: string;
   timestamp?: string;
+  received_at?: string;
   mode?: string;
   item?: {
     type?: string;
@@ -222,6 +222,13 @@ interface CodexEvent {
 }
 
 type CodexSessionMessage = SessionMessage & { agent_label?: string };
+
+function getCodexEventTimestamp(
+  entry: CodexEvent,
+  fallbackTimestamp?: string
+): string | undefined {
+  return entry.timestamp || entry.received_at || fallbackTimestamp;
+}
 
 function parseCodexLog(content: string, fallbackTimestamp?: string): {
   sessionId?: string;
@@ -246,7 +253,7 @@ function parseCodexLog(content: string, fallbackTimestamp?: string): {
       messages.push({
         role: "user",
         content: text,
-        timestamp: entry.timestamp || fallbackTimestamp,
+        timestamp: getCodexEventTimestamp(entry, fallbackTimestamp),
       });
       continue;
     }
@@ -257,7 +264,7 @@ function parseCodexLog(content: string, fallbackTimestamp?: string): {
       messages.push({
         role: "assistant",
         content: entry.item.text || "",
-        timestamp: entry.timestamp || fallbackTimestamp,
+        timestamp: getCodexEventTimestamp(entry, fallbackTimestamp),
         agent_label: "Codex",
       });
     }
@@ -267,7 +274,7 @@ function parseCodexLog(content: string, fallbackTimestamp?: string): {
       messages.push({
         role: "assistant",
         content: text,
-        timestamp: entry.timestamp || fallbackTimestamp,
+        timestamp: getCodexEventTimestamp(entry, fallbackTimestamp),
         agent_label: "Codex",
       });
     }
@@ -275,7 +282,7 @@ function parseCodexLog(content: string, fallbackTimestamp?: string): {
       messages.push({
         role: "assistant",
         content: `Error: ${entry.message}`,
-        timestamp: entry.timestamp || fallbackTimestamp,
+        timestamp: getCodexEventTimestamp(entry, fallbackTimestamp),
         agent_label: "Codex",
       });
     }
@@ -283,3 +290,8 @@ function parseCodexLog(content: string, fallbackTimestamp?: string): {
   if (messages.length === 0) return null;
   return { sessionId, messages };
 }
+
+export const __testUtils = {
+  getCodexEventTimestamp,
+  parseCodexLog,
+};
