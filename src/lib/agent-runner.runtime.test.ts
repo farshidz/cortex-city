@@ -489,8 +489,8 @@ test("new GitHub comments during a run skip review hash updates", () => {
         headRefOid: "xyz789",
         reviews: [{ id: 90, state: "COMMENTED" }],
         comments: [
-          { id: 15, pull_request_review_id: null },
-          { id: 16, pull_request_review_id: null },
+          { id: 15, pull_request_review_id: 90 },
+          { id: 16, pull_request_review_id: 90 },
         ],
         issueComments: [],
         checks: [{ name: "test", state: "SUCCESS" }],

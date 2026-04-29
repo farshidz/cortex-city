@@ -62,7 +62,7 @@ function runGithubScript(
     [
       "--eval",
       [
-        `import { getPRStateHash } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { getPRStateHash, getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
         "(async () => {",
         body,
         "})().catch((error) => {",
@@ -179,4 +179,91 @@ test("getPRStateHash fails closed when a GitHub review fetch is throttled", () =
   );
 
   assert.equal(hash, "");
+});
+
+test("submitted comment tracking ignores pending inline review comments", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const responses = {
+    [reviewsKey()]: {
+      stdout: JSON.stringify([
+        [
+          { id: 10, state: "APPROVED" },
+          { id: 11, state: "PENDING" },
+        ],
+      ]),
+    },
+    [reviewCommentsKey()]: {
+      stdout: JSON.stringify([
+        [
+          { id: 100, pull_request_review_id: 10 },
+          { id: 101, pull_request_review_id: 11 },
+          { id: 102, pull_request_review_id: null },
+        ],
+      ]),
+    },
+    [issueCommentsKey()]: {
+      stdout: JSON.stringify([[{ id: 200 }]]),
+    },
+  };
+
+  const ids = runGithubScript(
+    workspace,
+    responses,
+    `
+      const ids = await getSubmittedCommentIds(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(ids));
+    `
+  );
+
+  assert.deepEqual(ids, [100, 200]);
+});
+
+test("getPRStateHash ignores pending inline review comments", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const responses = {
+    [prViewKey(prUrl)]: {
+      stdout: JSON.stringify({
+        headRefOid: "abc123",
+        statusCheckRollup: [],
+      }),
+    },
+    [reviewsKey()]: {
+      stdout: JSON.stringify([
+        [
+          { id: 10, state: "COMMENTED" },
+          { id: 11, state: "PENDING" },
+        ],
+      ]),
+    },
+    [reviewCommentsKey()]: {
+      stdout: JSON.stringify([
+        [
+          { id: 100, pull_request_review_id: 10 },
+          { id: 101, pull_request_review_id: 11 },
+          { id: 102, pull_request_review_id: null },
+        ],
+      ]),
+    },
+    [issueCommentsKey()]: {
+      stdout: JSON.stringify([[{ id: 200 }]]),
+    },
+    [checksKey(prUrl)]: { stdout: "" },
+  };
+
+  const hash = runGithubScript(
+    workspace,
+    responses,
+    `
+      const hash = await getPRStateHash(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(hash));
+    `
+  );
+
+  const expected = createHash("sha256")
+    .update('abc123|[100]|[200]|[{"id":10,"state":"COMMENTED"}]|')
+    .digest("hex")
+    .slice(0, 16);
+  assert.equal(hash, expected);
 });
