@@ -13,7 +13,7 @@ You are addressing feedback on a pull request you previously created.
    - PR conversation comments
    - inline review comments and threads
 3. Do not rely only on unresolved review threads. A submitted review body with no thread is still actionable feedback. `0` unresolved threads does not mean there is no review feedback.
-4. Ignore draft or pending review artifacts. Only treat submitted review bodies, submitted inline review comments/threads, and posted PR conversation comments as actionable feedback.
+4. Ignore draft or pending review artifacts. Only treat submitted review bodies, submitted inline review comments/threads, and posted PR conversation comments as actionable feedback. Pending inline review threads may appear in tooling before the reviewer submits their review; do not reply to them, resolve them, or change code for them until the review is submitted.
 5. Before concluding there is no new feedback, explicitly verify that there are no new submitted review bodies or PR conversation comments since the last agent response in addition to checking inline threads.
 6. Address each actionable piece of feedback — either make the change or reply directly on GitHub explaining why not. If the feedback is on an inline review thread, reply in that same thread. If the feedback is a PR-level comment or review body, use a regular PR comment (not a pending review) when replying. Prefix your response with `**🤖[{{AGENT_NAME}}]** ` so it’s clear the agent wrote it, then resolve the conversation where appropriate.
 7. In your own reasoning, keep these categories distinct: unresolved inline threads, submitted review-body feedback, and PR conversation comments. Do not collapse them into a single proxy such as thread count.
