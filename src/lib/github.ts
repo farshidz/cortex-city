@@ -18,6 +18,11 @@ interface StatusCheckRollupItem {
   state?: string;
 }
 
+interface ReviewCommentItem {
+  id: number;
+  pull_request_review_id: number | null;
+}
+
 function parsePRUrl(url: string): PRInfo | null {
   const match = url.match(
     /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/
@@ -105,6 +110,16 @@ function serializeCheckStates(checks: StatusCheckRollupItem[]): string {
 
 function isNoChecksError(message: string): boolean {
   return /no checks reported/i.test(message);
+}
+
+function isCommentFromSubmittedReview(
+  comment: ReviewCommentItem,
+  submittedReviewIds: Set<number>
+): boolean {
+  return (
+    typeof comment.pull_request_review_id === "number" &&
+    submittedReviewIds.has(comment.pull_request_review_id)
+  );
 }
 
 export async function getCIStatus(prUrl: string): Promise<string> {
@@ -228,7 +243,7 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
     execPaginatedArray<{ id: number; state?: string }>(
       `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
     ),
-    execPaginatedArray<{ id: number; pull_request_review_id: number | null }>(
+    execPaginatedArray<ReviewCommentItem>(
       `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
     ),
     execPaginatedArray<{ id: number }>(
@@ -236,16 +251,17 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
     ),
   ]);
 
-  const submittedIds = reviews
-    .filter((review) => review.state !== "PENDING")
-    .map((review) => review.id);
+  const submittedIds = new Set(
+    reviews
+      .filter((review) => review.state !== "PENDING")
+      .map((review) => review.id)
+  );
 
-  // Inline review comments from submitted reviews + PR-level conversation comments
+  // `/pulls/{n}/comments` is the inline-review surface. PR conversation
+  // comments come from `/issues/{n}/comments`; review-id-null inline comments
+  // can be draft review artifacts and must not trigger review runs.
   const reviewCommentIds = comments
-    .filter((comment) =>
-      comment.pull_request_review_id === null ||
-      submittedIds.includes(comment.pull_request_review_id)
-    )
+    .filter((comment) => isCommentFromSubmittedReview(comment, submittedIds))
     .map((comment) => comment.id);
 
   return [...reviewCommentIds, ...issueComments.map((comment) => comment.id)].sort();
@@ -265,7 +281,7 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
     execPaginatedArrayStrict<{ id: number; state?: string }>(
       `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
     ),
-    execPaginatedArrayStrict<{ id: number; pull_request_review_id: number | null }>(
+    execPaginatedArrayStrict<ReviewCommentItem>(
       `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
     ),
     execPaginatedArrayStrict<{ id: number }>(
@@ -300,15 +316,14 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
     }
   }
 
-  const submittedIds = reviews
-    .filter((review) => review.state !== "PENDING")
-    .map((review) => review.id);
+  const submittedIds = new Set(
+    reviews
+      .filter((review) => review.state !== "PENDING")
+      .map((review) => review.id)
+  );
   const filteredCommentIds = JSON.stringify(
     comments
-      .filter((comment) =>
-        comment.pull_request_review_id === null ||
-        submittedIds.includes(comment.pull_request_review_id)
-      )
+      .filter((comment) => isCommentFromSubmittedReview(comment, submittedIds))
       .map((comment) => comment.id)
       .sort()
   );
