@@ -291,6 +291,7 @@ Bootstrap defaults the service user's git identity to `Cortex City <farshid@marq
 ## Local State
 
 Cortex City keeps its local runtime state under `.cortex/`.
+It creates `.cortex/.gitignore` automatically for local-only runtime files such as `orchestrator-state.json`, `.env`, and `.env.*`.
 
 That includes things like:
 

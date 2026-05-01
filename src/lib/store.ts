@@ -7,10 +7,15 @@ import { deleteTaskLogs } from "./logger";
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
+const GITIGNORE_FILE = path.join(CORTEX_DIR, ".gitignore");
+const DEFAULT_CORTEX_GITIGNORE = "orchestrator-state.json\n.env.*\n.env\n";
 
 function ensureCortexDir() {
   if (!existsSync(CORTEX_DIR)) {
     mkdirSync(CORTEX_DIR, { recursive: true });
+  }
+  if (!existsSync(GITIGNORE_FILE)) {
+    writeFileSync(GITIGNORE_FILE, DEFAULT_CORTEX_GITIGNORE);
   }
 }
 
