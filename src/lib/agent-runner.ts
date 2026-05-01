@@ -294,6 +294,23 @@ async function findAvailableBranchName(
   return `${branchName}-${suffix}`;
 }
 
+interface GitIdentity {
+  name?: string;
+  email?: string;
+}
+
+async function configureWorktreeGitIdentity(
+  worktreePath: string,
+  identity?: GitIdentity
+): Promise<void> {
+  const name = identity?.name?.trim();
+  const email = identity?.email?.trim();
+  if (!name || !email) return;
+
+  await execGit(worktreePath, ["config", "user.name", name]);
+  await execGit(worktreePath, ["config", "user.email", email]);
+}
+
 export async function spawnAgentSession(
   task: Task,
   mode: "initial" | "review" | "cleanup",
@@ -378,7 +395,10 @@ export async function spawnAgentSession(
   const repoPath = agentConfig?.repo_path || process.cwd();
 
   // Create or reuse a git worktree for isolation
-  const cwd = await ensureWorktree(task, repoPath, agentConfig?.default_branch || "main");
+  const cwd = await ensureWorktree(task, repoPath, agentConfig?.default_branch || "main", {
+    name: agentConfig?.git_user_name,
+    email: agentConfig?.git_user_email,
+  });
 
   const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
   console.log(
@@ -585,11 +605,13 @@ function slugify(title: string, maxLen: number): string {
 async function ensureWorktree(
   task: Task,
   repoPath: string,
-  defaultBranch: string
+  defaultBranch: string,
+  gitIdentity?: GitIdentity
 ): Promise<string> {
   // Reuse existing worktree if it still exists on disk
   if (task.worktree_path && existsSync(task.worktree_path)) {
     console.log(`[agent-runner] Reusing existing worktree at ${task.worktree_path}`);
+    await configureWorktreeGitIdentity(task.worktree_path, gitIdentity);
     return task.worktree_path;
   }
 
@@ -621,6 +643,7 @@ async function ensureWorktree(
       if (!task.worktree_path) {
         await updateTask(task.id, { worktree_path: worktreePath, branch_name: branchName });
       }
+      await configureWorktreeGitIdentity(worktreePath, gitIdentity);
       return worktreePath;
     }
 
@@ -653,6 +676,7 @@ async function ensureWorktree(
     }
 
     console.log(`[agent-runner] Created worktree at ${worktreePath} (branch: ${branchName})`);
+    await configureWorktreeGitIdentity(worktreePath, gitIdentity);
   } catch (err) {
     console.error(`[agent-runner] Failed to create worktree:`, err);
     throw err instanceof Error

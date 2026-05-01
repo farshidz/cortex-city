@@ -25,26 +25,6 @@ function buildPromptSection(title: string, content?: string): string {
   return `## ${title}\n${content.trim()}\n`;
 }
 
-function buildGitIdentityPreview(name?: string, email?: string): string {
-  const trimmedName = name?.trim();
-  const trimmedEmail = email?.trim();
-  if (!trimmedName || !trimmedEmail) {
-    return "";
-  }
-  return [
-    "## Git Author Identity",
-    "Before creating commits, configure the worktree to use this Git author identity:",
-    "",
-    "```bash",
-    `git config user.name '${trimmedName.replace(/'/g, "'\\''")}'`,
-    `git config user.email '${trimmedEmail.replace(/'/g, "'\\''")}'`,
-    "```",
-    "",
-    "Commit as this name and email for this task. Do not invent or substitute another author identity.",
-    "",
-  ].join("\n");
-}
-
 export default function AgentsPage() {
   const { data: config, mutate } = useSWR<OrchestratorConfig>(
     "/api/config",
@@ -186,11 +166,6 @@ export default function AgentsPage() {
         .replace("{{TASK_DESCRIPTION}}", "(task description)")
         .replace("{{TASK_PLAN}}", "(task plan or 'No detailed plan provided')")
         .replace("{{AGENT_NAME}}", newAgent.name || "(agent name)")
-        .replace(/\{\{BASE_BRANCH\}\}/g, newAgent.default_branch || "main")
-        .replace(
-          "{{GIT_IDENTITY_SECTION}}",
-          buildGitIdentityPreview(newAgent.git_user_name, newAgent.git_user_email)
-        )
         .replace(
           "{{REPO_CONTEXT_SECTION}}",
           buildPromptSection(
@@ -205,10 +180,6 @@ export default function AgentsPage() {
         .replace("{{PR_URL}}", "(pr url)")
         .replace("{{AGENT_NAME}}", newAgent.name || "(agent name)")
         .replace("{{MERGE_STATUS}}", "(merge status)")
-        .replace(
-          "{{GIT_IDENTITY_SECTION}}",
-          buildGitIdentityPreview(newAgent.git_user_name, newAgent.git_user_email)
-        )
         .replace(/\{\{BASE_BRANCH\}\}/g, newAgent.default_branch || "main")
         .replace(
           "{{REPO_CONTEXT_SECTION}}",
