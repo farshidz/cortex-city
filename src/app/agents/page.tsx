@@ -43,6 +43,8 @@ export default function AgentsPage() {
     repo_path: "",
     prompt_file: "",
     default_branch: "main",
+    git_user_name: "",
+    git_user_email: "",
     description: "",
   });
   const [promptContent, setPromptContent] = useState<Record<PromptMode, string>>({
@@ -129,6 +131,8 @@ export default function AgentsPage() {
       repo_path: "",
       prompt_file: "",
       default_branch: "main",
+      git_user_name: "",
+      git_user_email: "",
       description: "",
     });
     setPromptContent({
@@ -277,6 +281,32 @@ export default function AgentsPage() {
                     })
                   }
                   placeholder="main"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Git Author Name</Label>
+                <Input
+                  value={newAgent.git_user_name}
+                  onChange={(e) =>
+                    setNewAgent({
+                      ...newAgent,
+                      git_user_name: e.target.value,
+                    })
+                  }
+                  placeholder="Use repo or machine config"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Git Author Email</Label>
+                <Input
+                  value={newAgent.git_user_email}
+                  onChange={(e) =>
+                    setNewAgent({
+                      ...newAgent,
+                      git_user_email: e.target.value,
+                    })
+                  }
+                  placeholder="Use repo or machine config"
                 />
               </div>
               <div className="col-span-2 space-y-1">

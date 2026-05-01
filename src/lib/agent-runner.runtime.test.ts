@@ -790,6 +790,39 @@ test("ensureWorktree creates a missing branch from origin/main", () => {
   assert.equal(result.tasks[0].worktree_path, result.worktreePath);
 });
 
+test("ensureWorktree configures the requested Git author identity locally", () => {
+  const workspace = createTempWorkspace("agent-runner-git-identity-");
+  const { repoPath } = initGitTestRepo(workspace);
+  const setup = setupWorkspace({ repoPath });
+
+  const result = runAgentRunnerScript(
+    setup.workspace,
+    `
+      const { execFileSync } = require("node:child_process");
+      const task = ${JSON.stringify(sampleTask({
+        title: "Configure git identity",
+      }))};
+      await createTask(task);
+      const worktreePath = await __testUtils.ensureWorktree(
+        task,
+        ${JSON.stringify(repoPath)},
+        "main",
+        { name: "Agent Bot", email: "agent@example.com" }
+      );
+      const name = execFileSync("git", ["-C", worktreePath, "config", "--local", "user.name"], {
+        encoding: "utf-8",
+      }).trim();
+      const email = execFileSync("git", ["-C", worktreePath, "config", "--local", "user.email"], {
+        encoding: "utf-8",
+      }).trim();
+      console.log(JSON.stringify({ name, email, tasks: readTasks() }));
+    `
+  );
+
+  assert.equal(result.name, "Agent Bot");
+  assert.equal(result.email, "agent@example.com");
+});
+
 test("ensureWorktree reuses an existing local branch", () => {
   const workspace = createTempWorkspace("agent-runner-branch-");
   const { repoPath } = initGitTestRepo(workspace);
