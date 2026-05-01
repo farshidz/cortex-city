@@ -41,21 +41,12 @@ function buildGitIdentitySection(agent: AgentConfig | undefined): string {
   const name = agent?.git_user_name?.trim();
   const email = agent?.git_user_email?.trim();
 
-  if (!name && !email) {
-    return [
-      "No agent-specific Git author identity is configured.",
-      "Leave the repository or machine Git config unchanged when committing.",
-    ].join("\n");
-  }
-
   if (!name || !email) {
-    return [
-      "The agent-specific Git author identity is incomplete.",
-      "Do not use the partial identity; leave the repository or machine Git config unchanged when committing.",
-    ].join("\n");
+    return "";
   }
 
   return [
+    "## Git Author Identity",
     "Before creating commits, configure the worktree to use this Git author identity:",
     "",
     "```bash",
@@ -64,6 +55,7 @@ function buildGitIdentitySection(agent: AgentConfig | undefined): string {
     "```",
     "",
     "Commit as this name and email for this task. Do not invent or substitute another author identity.",
+    "",
   ].join("\n");
 }
 

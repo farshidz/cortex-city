@@ -32,19 +32,11 @@ function buildPromptSection(title: string, content?: string): string {
 function buildGitIdentityPreview(name?: string, email?: string): string {
   const trimmedName = name?.trim();
   const trimmedEmail = email?.trim();
-  if (!trimmedName && !trimmedEmail) {
-    return [
-      "No agent-specific Git author identity is configured.",
-      "Leave the repository or machine Git config unchanged when committing.",
-    ].join("\n");
-  }
   if (!trimmedName || !trimmedEmail) {
-    return [
-      "The agent-specific Git author identity is incomplete.",
-      "Do not use the partial identity; leave the repository or machine Git config unchanged when committing.",
-    ].join("\n");
+    return "";
   }
   return [
+    "## Git Author Identity",
     "Before creating commits, configure the worktree to use this Git author identity:",
     "",
     "```bash",
@@ -53,6 +45,7 @@ function buildGitIdentityPreview(name?: string, email?: string): string {
     "```",
     "",
     "Commit as this name and email for this task. Do not invent or substitute another author identity.",
+    "",
   ].join("\n");
 }
 
