@@ -71,6 +71,8 @@ export interface AgentConfig {
   review_prompt_file?: string; // optional relative path to review-specific prompt file
   cleanup_prompt_file?: string; // optional relative path to cleanup-specific prompt file
   default_branch: string;
+  git_user_name?: string; // optional per-agent Git author name
+  git_user_email?: string; // optional per-agent Git author email
   env_file?: string; // optional path to .env file with agent-specific secrets
   description?: string;
 }

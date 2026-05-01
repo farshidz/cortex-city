@@ -33,6 +33,40 @@ function buildPromptContextSection(title: string, content?: string): string {
   return `## ${title}\n${content}\n`;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function buildGitIdentitySection(agent: AgentConfig | undefined): string {
+  const name = agent?.git_user_name?.trim();
+  const email = agent?.git_user_email?.trim();
+
+  if (!name && !email) {
+    return [
+      "No agent-specific Git author identity is configured.",
+      "Leave the repository or machine Git config unchanged when committing.",
+    ].join("\n");
+  }
+
+  if (!name || !email) {
+    return [
+      "The agent-specific Git author identity is incomplete.",
+      "Do not use the partial identity; leave the repository or machine Git config unchanged when committing.",
+    ].join("\n");
+  }
+
+  return [
+    "Before creating commits, configure the worktree to use this Git author identity:",
+    "",
+    "```bash",
+    `git config user.name ${shellQuote(name)}`,
+    `git config user.email ${shellQuote(email)}`,
+    "```",
+    "",
+    "Commit as this name and email for this task. Do not invent or substitute another author identity.",
+  ].join("\n");
+}
+
 export function buildContinuePrompt(): string {
   return "continue";
 }
@@ -78,6 +112,7 @@ export function buildInitialPrompt(task: Task, options?: InitialPromptOptions): 
       task.plan || "No detailed plan provided. Determine the best approach."
     )
     .replace("{{AGENT_NAME}}", agentName)
+    .replace("{{GIT_IDENTITY_SECTION}}", buildGitIdentitySection(agentConfig))
     .replace(/\{\{BASE_BRANCH\}\}/g, baseBranch)
     .replace(
       "{{REPO_CONTEXT_SECTION}}",
@@ -103,6 +138,7 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
   return template
     .replace("{{PR_URL}}", task.pr_url || "Unknown")
     .replace("{{AGENT_NAME}}", agentName)
+    .replace("{{GIT_IDENTITY_SECTION}}", buildGitIdentitySection(agentConfig))
     .replace("{{MERGE_STATUS}}", describeMergeStatus(options?.prStatus || task.pr_status, baseBranch))
     .replace(/\{\{BASE_BRANCH\}\}/g, baseBranch)
     .replace(

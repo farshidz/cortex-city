@@ -53,6 +53,7 @@ function writeTestTemplates(workspace: string) {
       "Base={{BASE_BRANCH}}",
       "Again={{BASE_BRANCH}}",
       "Agent={{AGENT_NAME}}",
+      "Git={{GIT_IDENTITY_SECTION}}",
       "{{REPO_CONTEXT_SECTION}}",
       "Directory={{AGENT_DIRECTORY}}",
     ].join("\n")
@@ -63,6 +64,7 @@ function writeTestTemplates(workspace: string) {
       "PR={{PR_URL}}",
       "Agent={{AGENT_NAME}}",
       "Status={{MERGE_STATUS}}",
+      "Git={{GIT_IDENTITY_SECTION}}",
       "Base={{BASE_BRANCH}}",
       "Again={{BASE_BRANCH}}",
       "{{REPO_CONTEXT_SECTION}}",
@@ -103,6 +105,8 @@ function writeConfig(workspace: string) {
             review_prompt_file: "prompts/agents/cortex-city-swe.review.md",
             cleanup_prompt_file: "prompts/agents/cortex-city-swe.cleanup.md",
             default_branch: "main",
+            git_user_name: "Cortex Committer",
+            git_user_email: "cortex@example.com",
             description: "Owns the Cortex City control panel.",
           },
           "marqo-documentation-agent": {
@@ -165,6 +169,10 @@ test("buildInitialPrompt fills the template with task, agent, and directory deta
   assert.match(result, /Base=main/);
   assert.match(result, /Again=main/);
   assert.match(result, /Agent=Cortex City SWE/);
+  assert.match(result, /Git=Before creating commits, configure the worktree/);
+  assert.match(result, /git config user\.name 'Cortex Committer'/);
+  assert.match(result, /git config user\.email 'cortex@example\.com'/);
+  assert.match(result, /Commit as this name and email for this task/);
   assert.match(result, /## Repository Context\nRepository Context/);
   assert.match(
     result,
@@ -196,6 +204,10 @@ test("buildInitialPrompt falls back when the task plan or agent prompt file is m
 
   assert.match(result, /Plan=No detailed plan provided\. Determine the best approach\./);
   assert.match(result, /Base=trunk/);
+  assert.match(
+    result,
+    /Git=No agent-specific Git author identity is configured\.\nLeave the repository or machine Git config unchanged when committing\./
+  );
   assert.match(result, /## Repository Context\nNo agent-specific context configured\./);
 });
 
@@ -226,6 +238,7 @@ test("buildReviewPrompt maps PR states and replaces every base-branch placeholde
 
   assert.match(result, /PR=https:\/\/github.com\/farshidz\/marqo-cortex-city\/pull\/123/);
   assert.match(result, /Status=Checks are failing — fix CI during this run\./);
+  assert.match(result, /Git=Before creating commits, configure the worktree/);
   assert.match(result, /Base=develop/);
   assert.match(result, /Again=develop/);
   assert.match(result, /## Agent Review Context\nReview Context/);

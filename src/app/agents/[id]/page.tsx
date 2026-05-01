@@ -29,6 +29,33 @@ function buildPromptSection(title: string, content?: string): string {
   return `## ${title}\n${content.trim()}\n`;
 }
 
+function buildGitIdentityPreview(name?: string, email?: string): string {
+  const trimmedName = name?.trim();
+  const trimmedEmail = email?.trim();
+  if (!trimmedName && !trimmedEmail) {
+    return [
+      "No agent-specific Git author identity is configured.",
+      "Leave the repository or machine Git config unchanged when committing.",
+    ].join("\n");
+  }
+  if (!trimmedName || !trimmedEmail) {
+    return [
+      "The agent-specific Git author identity is incomplete.",
+      "Do not use the partial identity; leave the repository or machine Git config unchanged when committing.",
+    ].join("\n");
+  }
+  return [
+    "Before creating commits, configure the worktree to use this Git author identity:",
+    "",
+    "```bash",
+    `git config user.name '${trimmedName.replace(/'/g, "'\\''")}'`,
+    `git config user.email '${trimmedEmail.replace(/'/g, "'\\''")}'`,
+    "```",
+    "",
+    "Commit as this name and email for this task. Do not invent or substitute another author identity.",
+  ].join("\n");
+}
+
 export default function AgentDetailPage({
   params,
 }: {
@@ -72,6 +99,8 @@ export default function AgentDetailPage({
     repo_slug: "",
     repo_path: "",
     default_branch: "",
+    git_user_name: "",
+    git_user_email: "",
     description: "",
   });
   const [activeTab, setActiveTab] = useState<PromptMode>("initial");
@@ -162,6 +191,8 @@ export default function AgentDetailPage({
       repo_slug: currentAgent.repo_slug,
       repo_path: currentAgent.repo_path,
       default_branch: currentAgent.default_branch,
+      git_user_name: currentAgent.git_user_name || "",
+      git_user_email: currentAgent.git_user_email || "",
       description: currentAgent.description || "",
     });
     setEditingConfig(true);
@@ -221,6 +252,11 @@ export default function AgentDetailPage({
         .replace("{{TASK_DESCRIPTION}}", "(task description)")
         .replace("{{TASK_PLAN}}", "(task plan or 'No detailed plan provided')")
         .replace("{{AGENT_NAME}}", currentAgent.name || id)
+        .replace(/\{\{BASE_BRANCH\}\}/g, currentAgent.default_branch || "main")
+        .replace(
+          "{{GIT_IDENTITY_SECTION}}",
+          buildGitIdentityPreview(currentAgent.git_user_name, currentAgent.git_user_email)
+        )
         .replace(
           "{{REPO_CONTEXT_SECTION}}",
           buildPromptSection(
@@ -235,6 +271,10 @@ export default function AgentDetailPage({
         .replace("{{PR_URL}}", "(pr url)")
         .replace("{{AGENT_NAME}}", currentAgent.name || id)
         .replace("{{MERGE_STATUS}}", "(merge status)")
+        .replace(
+          "{{GIT_IDENTITY_SECTION}}",
+          buildGitIdentityPreview(currentAgent.git_user_name, currentAgent.git_user_email)
+        )
         .replace(/\{\{BASE_BRANCH\}\}/g, currentAgent.default_branch || "main")
         .replace(
           "{{REPO_CONTEXT_SECTION}}",
@@ -353,6 +393,32 @@ export default function AgentDetailPage({
                   />
                 </div>
                 <div className="space-y-1">
+                  <Label className="text-xs">Git Author Name</Label>
+                  <Input
+                    value={configForm.git_user_name}
+                    onChange={(e) =>
+                      setConfigForm({
+                        ...configForm,
+                        git_user_name: e.target.value,
+                      })
+                    }
+                    placeholder="Use repo or machine config"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Git Author Email</Label>
+                  <Input
+                    value={configForm.git_user_email}
+                    onChange={(e) =>
+                      setConfigForm({
+                        ...configForm,
+                        git_user_email: e.target.value,
+                      })
+                    }
+                    placeholder="Use repo or machine config"
+                  />
+                </div>
+                <div className="space-y-1">
                   <Label className="text-xs">Description</Label>
                   <textarea
                     className="w-full min-h-[80px] rounded-md border bg-transparent px-3 py-2 text-sm"
@@ -393,6 +459,12 @@ export default function AgentDetailPage({
               <div>
                 <span className="text-muted-foreground">Branch: </span>
                 {currentAgent.default_branch}
+              </div>
+              <div>
+                <span className="text-muted-foreground">Git author: </span>
+                {currentAgent.git_user_name?.trim() && currentAgent.git_user_email?.trim()
+                  ? `${currentAgent.git_user_name} <${currentAgent.git_user_email}>`
+                  : "Repo or machine config"}
               </div>
               <div>
                 <span className="text-muted-foreground">Prompt file: </span>

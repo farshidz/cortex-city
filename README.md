@@ -39,6 +39,7 @@ Each agent has:
 - A GitHub repo slug
 - A local path to the repo it should work on
 - A default branch
+- An optional Git author name and email for commits the agent creates
 - An optional custom prompt
 - Optional environment variables
 

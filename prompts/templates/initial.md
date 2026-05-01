@@ -10,6 +10,9 @@ You are working on a software engineering task. Implement the following carefull
 ## Base Branch
 The base branch for this task is `{{BASE_BRANCH}}`.
 
+## Git Author Identity
+{{GIT_IDENTITY_SECTION}}
+
 ## Instructions
 You are working in a git worktree. A branch has already been created for you.
 
