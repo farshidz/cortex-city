@@ -23,6 +23,15 @@ function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boole
   );
 }
 
+function shouldResetStaleFinalCleanup(task: Task, hasActivePid: boolean): boolean {
+  return Boolean(
+    (task.status === "merged" || task.status === "closed") &&
+      task.final_cleanup_state === "running" &&
+      !task.current_run_pid &&
+      !hasActivePid
+  );
+}
+
 interface WorkerLogger {
   log: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
@@ -141,6 +150,17 @@ export async function pollOnce(
     }
   }
 
+  for (const task of tasks) {
+    if (!shouldResetStaleFinalCleanup(task, activePids.has(task.id))) continue;
+
+    deps.logger.log(
+      `[worker] Resetting stale final cleanup state for task "${task.title}" (${task.id})`
+    );
+    await deps.updateTask(task.id, {
+      final_cleanup_state: undefined,
+    });
+  }
+
   tasks = deps.readTasks();
 
   deps.logger.log("[worker] Poll phase: cleanup final tasks");
@@ -166,6 +186,10 @@ export async function pollOnce(
       },
       preSpawnUpdates: {
         final_cleanup_state: "running",
+      },
+      rollbackOnError: {
+        final_cleanup_state: undefined,
+        current_run_pid: undefined,
       },
     });
   }
