@@ -497,6 +497,8 @@ test("pollOnce runs final cleanup, removes worktrees, and prunes old task logs",
 
   const cleanupWorktreePath = path.join(workspaceRoot, "cleanup-worktree");
   execFileSync("git", ["-C", repoPath, "worktree", "add", "-b", "agent/cleanup", cleanupWorktreePath, "origin/main"]);
+  const staleCleanupWorktreePath = path.join(workspaceRoot, "stale-cleanup-worktree");
+  execFileSync("git", ["-C", repoPath, "worktree", "add", "-b", "agent/stale-cleanup", staleCleanupWorktreePath, "origin/main"]);
   const logsDir = path.join(workspace, "logs");
   mkdirSync(logsDir, { recursive: true });
   writeFileSync(path.join(logsDir, "task-prune-me-2026-04-10.log"), "old log");
@@ -515,6 +517,14 @@ test("pollOnce runs final cleanup, removes worktrees, and prunes old task logs",
         worktree_path: cleanupWorktreePath,
       }))});
       await createTask(${JSON.stringify(sampleTask({
+        id: "stale-cleanup-task",
+        status: "closed",
+        agent_runner: "claude",
+        branch_name: "agent/stale-cleanup",
+        worktree_path: staleCleanupWorktreePath,
+        final_cleanup_state: "running",
+      }))});
+      await createTask(${JSON.stringify(sampleTask({
         id: "prune-me",
         status: "closed",
         updated_at: "2026-04-14T00:00:00.000Z",
@@ -523,7 +533,13 @@ test("pollOnce runs final cleanup, removes worktrees, and prunes old task logs",
       await pollOnce(activePids);
       for (let attempt = 0; attempt < 20; attempt++) {
         const cleanupTask = readTasks().find((task) => task.id === "cleanup-task");
-        if (cleanupTask?.final_cleanup_state === "finished" && !cleanupTask.worktree_path) {
+        const staleCleanupTask = readTasks().find((task) => task.id === "stale-cleanup-task");
+        if (
+          cleanupTask?.final_cleanup_state === "finished" &&
+          !cleanupTask.worktree_path &&
+          staleCleanupTask?.final_cleanup_state === "finished" &&
+          !staleCleanupTask.worktree_path
+        ) {
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -539,11 +555,17 @@ test("pollOnce runs final cleanup, removes worktrees, and prunes old task logs",
   const cleanupTask = result.tasks.find((task: Task) => task.id === "cleanup-task");
   assert.equal(cleanupTask.final_cleanup_state, "finished");
   assert.equal(cleanupTask.worktree_path, undefined);
+  const staleCleanupTask = result.tasks.find(
+    (task: Task) => task.id === "stale-cleanup-task"
+  );
+  assert.equal(staleCleanupTask.final_cleanup_state, "finished");
+  assert.equal(staleCleanupTask.worktree_path, undefined);
   assert.equal(
     result.tasks.some((task: Task) => task.id === "prune-me"),
     false
   );
   assert.equal(existsSync(cleanupWorktreePath), false);
+  assert.equal(existsSync(staleCleanupWorktreePath), false);
   assert.equal(existsSync(path.join(logsDir, "task-prune-me-2026-04-10.log")), false);
   assert.equal(existsSync(path.join(logsDir, "task-prune-me-2026-04-10.jsonl")), false);
   assert.equal(existsSync(path.join(logsDir, "task-keep-me-2026-04-10.log")), true);
