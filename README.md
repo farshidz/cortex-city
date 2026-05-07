@@ -14,6 +14,8 @@ The core idea is simple:
 
 This project is meant to help you operate an agent workflow from one place instead of juggling prompts, branches, PRs, and session state by hand.
 
+<img width="1399" height="480" alt="Screenshot 2026-05-07 at 5 16 59 PM" src="https://github.com/user-attachments/assets/513ecb03-ad30-42b9-8ba7-605638cbbf70" />
+
 ## Prerequisites
 
 Before using Cortex City, make sure the host machine is set up with:
