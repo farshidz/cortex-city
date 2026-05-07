@@ -117,12 +117,10 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
       items: { type: "string" },
       description: "Recommended follow-up actions for the task owner",
     },
-  },
-  patternProperties: {
-    "^tool_calls$": {
-      type: "object",
+    tool_calls: {
+      type: ["object", "null"],
       description:
-        "Optional tool invocations to request operator actions (only specify tools actually used)",
+        "Optional tool invocations to request operator actions. Use null when no tool calls are needed.",
       properties: {
         create_task: {
           type: "array",
@@ -137,14 +135,13 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
                 type: "string",
                 description: "Agent ID (from settings) that should own this task",
               },
-            },
-            patternProperties: {
-              "^plan$": {
-                type: "string",
-                description: "Optional execution plan or checklist",
+              plan: {
+                type: ["string", "null"],
+                description:
+                  "Optional execution plan or checklist. Use null when no plan is needed.",
               },
             },
-            required: ["title", "description", "agent"],
+            required: ["title", "description", "agent", "plan"],
             additionalProperties: false,
           },
         },
@@ -161,7 +158,8 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
     "files_changed",
     "assumptions",
     "blockers",
-    "next_steps"
+    "next_steps",
+    "tool_calls",
   ],
   additionalProperties: false,
 });
@@ -1188,6 +1186,7 @@ async function handleRunComplete(
 }
 
 export const __testUtils = {
+  AGENT_REPORT_SCHEMA,
   appendToBoundedTextBuffer,
   buildUsageAccounting,
   buildModelArgs,

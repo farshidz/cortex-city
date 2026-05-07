@@ -197,6 +197,38 @@ function setupWorkspace(): string {
   return workspace;
 }
 
+test("agent report schema exposes optional follow-up task fields as normal properties", () => {
+  const workspace = createTempWorkspace();
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const schema = JSON.parse(__testUtils.AGENT_REPORT_SCHEMA);
+      const createTask = schema.properties.tool_calls.properties.create_task;
+      console.log(JSON.stringify({
+        rootRequired: schema.required,
+        rootPatternProperties: schema.patternProperties,
+        toolCalls: schema.properties.tool_calls,
+        createTask,
+        createTaskItem: createTask.items,
+      }));
+    `
+  );
+
+  assert.equal(result.rootRequired.includes("tool_calls"), true);
+  assert.equal(result.rootPatternProperties, undefined);
+  assert.deepEqual(result.toolCalls.type, ["object", "null"]);
+  assert.deepEqual(result.toolCalls.required, ["create_task"]);
+  assert.equal(result.createTask.type, "array");
+  assert.deepEqual(result.createTaskItem.required, [
+    "title",
+    "description",
+    "agent",
+    "plan",
+  ]);
+  assert.deepEqual(result.createTaskItem.properties.plan.type, ["string", "null"]);
+  assert.equal(result.createTaskItem.patternProperties, undefined);
+});
+
 test("spawnAgentSession prioritizes manual instructions on resumed runs and merges env files", () => {
   const workspace = setupWorkspace();
   const argsFile = path.join(workspace, "manual-args.json");
