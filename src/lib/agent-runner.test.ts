@@ -214,9 +214,9 @@ test("agent report schema exposes optional follow-up task fields as normal prope
     `
   );
 
-  assert.equal(result.rootRequired.includes("tool_calls"), false);
+  assert.equal(result.rootRequired.includes("tool_calls"), true);
   assert.equal(result.rootPatternProperties, undefined);
-  assert.equal(result.toolCalls.type, "object");
+  assert.deepEqual(result.toolCalls.type, ["object", "null"]);
   assert.deepEqual(result.toolCalls.required, ["create_task"]);
   assert.equal(result.createTask.type, "array");
   assert.deepEqual(result.createTaskItem.required, [

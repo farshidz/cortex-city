@@ -118,9 +118,9 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
       description: "Recommended follow-up actions for the task owner",
     },
     tool_calls: {
-      type: "object",
+      type: ["object", "null"],
       description:
-        "Optional tool invocations to request operator actions (only specify tools actually used)",
+        "Optional tool invocations to request operator actions. Use null when no tool calls are needed.",
       properties: {
         create_task: {
           type: "array",
@@ -158,7 +158,8 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
     "files_changed",
     "assumptions",
     "blockers",
-    "next_steps"
+    "next_steps",
+    "tool_calls",
   ],
   additionalProperties: false,
 });
