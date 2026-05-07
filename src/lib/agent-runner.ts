@@ -136,11 +136,12 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
                 description: "Agent ID (from settings) that should own this task",
               },
               plan: {
-                type: "string",
-                description: "Optional execution plan or checklist",
+                type: ["string", "null"],
+                description:
+                  "Optional execution plan or checklist. Use null when no plan is needed.",
               },
             },
-            required: ["title", "description", "agent"],
+            required: ["title", "description", "agent", "plan"],
             additionalProperties: false,
           },
         },
