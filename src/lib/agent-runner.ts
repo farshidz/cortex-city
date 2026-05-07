@@ -117,9 +117,7 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
       items: { type: "string" },
       description: "Recommended follow-up actions for the task owner",
     },
-  },
-  patternProperties: {
-    "^tool_calls$": {
+    tool_calls: {
       type: "object",
       description:
         "Optional tool invocations to request operator actions (only specify tools actually used)",
@@ -137,9 +135,7 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
                 type: "string",
                 description: "Agent ID (from settings) that should own this task",
               },
-            },
-            patternProperties: {
-              "^plan$": {
+              plan: {
                 type: "string",
                 description: "Optional execution plan or checklist",
               },
@@ -1188,6 +1184,7 @@ async function handleRunComplete(
 }
 
 export const __testUtils = {
+  AGENT_REPORT_SCHEMA,
   appendToBoundedTextBuffer,
   buildUsageAccounting,
   buildModelArgs,
