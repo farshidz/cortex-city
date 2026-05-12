@@ -12,7 +12,7 @@ import {
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
 import type { Task } from "./types";
 
-export const PRUNE_AGE_MS = 12 * 60 * 60 * 1000;
+export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 
 function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boolean {
   return Boolean(
