@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -94,4 +94,42 @@ test("getCortexGitStatus reports the configured remote when .cortex has one", ()
     remoteUrl: "https://github.com/farshidz/marqo-cortex-city.git",
     remoteSlug: "farshidz/marqo-cortex-city",
   });
+});
+
+test("recoverStaleCortexGitIndexLock removes an old git index lock", () => {
+  const workspace = createTempWorkspace();
+  const cortexDir = path.join(workspace, ".cortex");
+  mkdirSync(cortexDir, { recursive: true });
+  execFileSync("git", ["init"], { cwd: cortexDir });
+
+  const lockPath = path.join(cortexDir, ".git", "index.lock");
+  writeFileSync(lockPath, "");
+  const oldTime = new Date(Date.now() - 10 * 60 * 1000);
+  utimesSync(lockPath, oldTime, oldTime);
+
+  const result = runCortexGitScript(
+    workspace,
+    "console.log(JSON.stringify({ recovered: cortexGit.recoverStaleCortexGitIndexLock() }));"
+  );
+
+  assert.deepEqual(result, { recovered: true });
+  assert.equal(existsSync(lockPath), false);
+});
+
+test("recoverStaleCortexGitIndexLock leaves a fresh git index lock alone", () => {
+  const workspace = createTempWorkspace();
+  const cortexDir = path.join(workspace, ".cortex");
+  mkdirSync(cortexDir, { recursive: true });
+  execFileSync("git", ["init"], { cwd: cortexDir });
+
+  const lockPath = path.join(cortexDir, ".git", "index.lock");
+  writeFileSync(lockPath, "");
+
+  const result = runCortexGitScript(
+    workspace,
+    "console.log(JSON.stringify({ recovered: cortexGit.recoverStaleCortexGitIndexLock() }));"
+  );
+
+  assert.deepEqual(result, { recovered: false });
+  assert.equal(existsSync(lockPath), true);
 });

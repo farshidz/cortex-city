@@ -1,9 +1,11 @@
-import { existsSync } from "fs";
+import { existsSync, statSync, unlinkSync } from "fs";
 import { spawn, execFileSync } from "child_process";
 import path from "path";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const GIT_DIR = path.join(CORTEX_DIR, ".git");
+const INDEX_LOCK = path.join(GIT_DIR, "index.lock");
+const STALE_INDEX_LOCK_MS = 5 * 60 * 1000;
 
 export interface CortexGitStatus {
   enabled: boolean;
@@ -65,8 +67,25 @@ export function getCortexGitStatus(): CortexGitStatus {
   }
 }
 
+export function recoverStaleCortexGitIndexLock(now = Date.now()): boolean {
+  try {
+    const lock = statSync(INDEX_LOCK);
+    if (now - lock.mtimeMs < STALE_INDEX_LOCK_MS) {
+      return false;
+    }
+    unlinkSync(INDEX_LOCK);
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error) {
+      return false;
+    }
+    return false;
+  }
+}
+
 export function snapshotCortex(reason: string): void {
   if (!existsSync(GIT_DIR)) return;
+  recoverStaleCortexGitIndexLock();
   const sanitized = reason.replace(/\s+/g, " ").replace(/"/g, "' ").trim() || "update";
   const script = `cd "${CORTEX_DIR}" && ` +
     `if [ -z "$(git status --porcelain 2>/dev/null)" ]; then exit 0; fi; ` +
