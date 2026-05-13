@@ -529,6 +529,11 @@ test("pollOnce runs final cleanup, removes worktrees, and prunes old task logs",
         status: "closed",
         updated_at: "2026-04-14T00:00:00.000Z",
       }))});
+      await createTask(${JSON.stringify(sampleTask({
+        id: "keep-recent-final-task",
+        status: "closed",
+        updated_at: new Date(Date.now() - 13 * 60 * 60 * 1000).toISOString(),
+      }))});
 
       await pollOnce(activePids);
       for (let attempt = 0; attempt < 20; attempt++) {
@@ -563,6 +568,10 @@ test("pollOnce runs final cleanup, removes worktrees, and prunes old task logs",
   assert.equal(
     result.tasks.some((task: Task) => task.id === "prune-me"),
     false
+  );
+  assert.equal(
+    result.tasks.some((task: Task) => task.id === "keep-recent-final-task"),
+    true
   );
   assert.equal(existsSync(cleanupWorktreePath), false);
   assert.equal(existsSync(staleCleanupWorktreePath), false);
