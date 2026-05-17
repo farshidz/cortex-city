@@ -66,7 +66,8 @@ export interface Task {
 export interface AgentConfig {
   name: string;
   repo_slug: string; // e.g. "owner/repo" (for GitHub API / display)
-  repo_path: string; // absolute path to local repo clone
+  repo_path?: string; // legacy absolute path field; ignored by the runner
+  working_directory?: string; // relative path inside the repo; defaults to repo root
   prompt_file: string; // relative path to agent's prompt file
   review_prompt_file?: string; // optional relative path to review-specific prompt file
   cleanup_prompt_file?: string; // optional relative path to cleanup-specific prompt file

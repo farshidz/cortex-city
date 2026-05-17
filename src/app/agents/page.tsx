@@ -40,7 +40,7 @@ export default function AgentsPage() {
     key: "",
     name: "",
     repo_slug: "",
-    repo_path: "",
+    working_directory: ".",
     prompt_file: "",
     default_branch: "main",
     git_user_name: "",
@@ -59,9 +59,13 @@ export default function AgentsPage() {
   const [showPreview, setShowPreview] = useState(false);
 
   async function addAgent() {
-    if (!config || !newAgent.key || !newAgent.name || !newAgent.repo_path) return;
+    if (!config || !newAgent.key || !newAgent.name || !newAgent.repo_slug) return;
 
     const { key, ...agentConfig } = newAgent;
+    const normalizedAgentConfig = {
+      ...agentConfig,
+      working_directory: agentConfig.working_directory.trim() || ".",
+    };
     const promptFile = agentConfig.prompt_file || `.cortex/prompts/agents/${key}.md`;
     const reviewPromptFile = `.cortex/prompts/agents/${key}.review.md`;
     const cleanupPromptFile = `.cortex/prompts/agents/${key}.cleanup.md`;
@@ -71,7 +75,7 @@ export default function AgentsPage() {
       agents: {
         ...config.agents,
         [key]: {
-          ...agentConfig,
+          ...normalizedAgentConfig,
           prompt_file: promptFile,
           ...(promptContent.review.trim()
             ? { review_prompt_file: reviewPromptFile }
@@ -128,7 +132,7 @@ export default function AgentsPage() {
       key: "",
       name: "",
       repo_slug: "",
-      repo_path: "",
+      working_directory: ".",
       prompt_file: "",
       default_branch: "main",
       git_user_name: "",
@@ -261,13 +265,13 @@ export default function AgentsPage() {
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">Repo Local Path</Label>
+                <Label className="text-xs">Working Directory</Label>
                 <Input
-                  value={newAgent.repo_path}
+                  value={newAgent.working_directory}
                   onChange={(e) =>
-                    setNewAgent({ ...newAgent, repo_path: e.target.value })
+                    setNewAgent({ ...newAgent, working_directory: e.target.value })
                   }
-                  placeholder="/path/to/local/repo"
+                  placeholder="."
                 />
               </div>
               <div className="space-y-1">
@@ -450,7 +454,7 @@ export default function AgentsPage() {
 
             <Button
               onClick={addAgent}
-              disabled={!newAgent.key || !newAgent.name || !newAgent.repo_path}
+              disabled={!newAgent.key || !newAgent.name || !newAgent.repo_slug}
             >
               Create Agent
             </Button>
@@ -484,7 +488,8 @@ export default function AgentsPage() {
                     </Badge>
                   </div>
                   <div className="text-sm text-muted-foreground">
-                    {agent.repo_slug} &middot; {agent.repo_path}
+                    {agent.repo_slug} &middot; Workdir:{" "}
+                    {agent.working_directory || "."}
                   </div>
                   <div className="text-sm text-muted-foreground">
                     Prompt: {agent.prompt_file || "none"} &middot; Branch:{" "}

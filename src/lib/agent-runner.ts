@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync } from 
 import path from "path";
 import os from "os";
 import { nanoid } from "nanoid";
-import { readConfig, updateTask, createTask } from "./store";
+import { getCortexPath, readConfig, updateTask, createTask } from "./store";
 import {
   buildInitialPrompt,
   buildReviewPrompt,
@@ -26,6 +26,7 @@ import type {
   AgentRuntime,
   PermissionMode,
   FollowupTaskRequest,
+  AgentConfig,
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
 import { buildInterruptedTaskUpdates, shouldUseContinuePrompt } from "./orchestrator-runtime";
@@ -241,13 +242,17 @@ function getExecErrorMessage(error: unknown): string {
   return [stderr, message].filter(Boolean).join("\n");
 }
 
-function execGit(repoPath: string, args: string[]): Promise<string> {
+function execCommand(
+  cwd: string,
+  command: string,
+  args: string[]
+): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
-      "git",
+      command,
       args,
       {
-        cwd: repoPath,
+        cwd,
         encoding: "utf-8",
         maxBuffer: GIT_MAX_BUFFER_BYTES,
       },
@@ -264,6 +269,10 @@ function execGit(repoPath: string, args: string[]): Promise<string> {
       }
     );
   });
+}
+
+function execGit(repoPath: string, args: string[]): Promise<string> {
+  return execCommand(repoPath, "git", args);
 }
 
 async function branchExists(repoPath: string, branchName: string): Promise<boolean> {
@@ -295,6 +304,115 @@ async function findAvailableBranchName(
 interface GitIdentity {
   name?: string;
   email?: string;
+}
+
+function buildRepoRemoteUrl(repoSlug: string): string {
+  const trimmed = repoSlug.trim();
+  if (/^(?:[a-z][a-z0-9+.-]*:\/\/|git@|ssh:\/\/|\/|\.)/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `git@github.com:${trimmed.replace(/\.git$/i, "")}.git`;
+}
+
+function getGitHubRepoSlug(repoSlug: string): string | undefined {
+  const trimmed = repoSlug.trim().replace(/\.git$/i, "");
+  return /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(trimmed) ? trimmed : undefined;
+}
+
+function sanitizeManagedRepoName(repoSlug: string): string {
+  return (
+    repoSlug
+      .trim()
+      .replace(/\.git$/i, "")
+      .replace(/[^a-z0-9._-]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "repo"
+  );
+}
+
+async function cloneManagedRepo(repoSlug: string, repoPath: string): Promise<void> {
+  const githubSlug = getGitHubRepoSlug(repoSlug);
+  let ghError: unknown;
+  if (githubSlug) {
+    try {
+      await execCommand(process.cwd(), "gh", ["repo", "clone", githubSlug, repoPath]);
+      return;
+    } catch (err) {
+      ghError = err;
+    }
+  }
+
+  try {
+    await execGit(process.cwd(), ["clone", buildRepoRemoteUrl(repoSlug), repoPath]);
+  } catch (err) {
+    if (ghError) {
+      console.error(`[agent-runner] gh repo clone failed for ${githubSlug}:`, ghError);
+    }
+    throw err;
+  }
+}
+
+async function ensureManagedRepo(
+  agentId: string,
+  agentConfig: AgentConfig,
+  defaultBranch: string
+): Promise<string> {
+  const repoSlug = agentConfig.repo_slug?.trim();
+  if (!repoSlug) {
+    throw new Error(`Agent "${agentId}" must configure a repo slug before it can run`);
+  }
+
+  const repoPath = getCortexPath("repos", sanitizeManagedRepoName(repoSlug), "repo");
+  if (!existsSync(repoPath)) {
+    mkdirSync(path.dirname(repoPath), { recursive: true });
+    await cloneManagedRepo(repoSlug, repoPath);
+  } else if (!existsSync(path.join(repoPath, ".git"))) {
+    throw new Error(`Managed repo path exists but is not a git repository: ${repoPath}`);
+  }
+
+  try {
+    await execGit(repoPath, ["fetch", "origin", defaultBranch]);
+  } catch (err) {
+    console.error(`[agent-runner] git fetch failed for managed repo ${repoSlug}:`, err);
+  }
+
+  return repoPath;
+}
+
+async function resolveAgentRepoPath(
+  agentId: string,
+  agentConfig: AgentConfig | undefined,
+  defaultBranch: string
+): Promise<string> {
+  if (!agentConfig) return process.cwd();
+  return ensureManagedRepo(agentId, agentConfig, defaultBranch);
+}
+
+function resolveAgentWorkingDirectory(
+  worktreePath: string,
+  workingDirectory?: string
+): string {
+  const relative = workingDirectory?.trim() || ".";
+  if (path.isAbsolute(relative)) {
+    throw new Error("Agent working directory must be relative to the repo root");
+  }
+
+  const normalized = path.normalize(relative);
+  if (normalized === ".." || normalized.startsWith(`..${path.sep}`)) {
+    throw new Error("Agent working directory cannot escape the repo root");
+  }
+
+  const repoRoot = path.resolve(worktreePath);
+  const cwd = path.resolve(repoRoot, normalized);
+  const relativeToRoot = path.relative(repoRoot, cwd);
+  if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
+    throw new Error("Agent working directory cannot escape the repo root");
+  }
+  if (!existsSync(cwd)) {
+    throw new Error(`Agent working directory does not exist: ${relative}`);
+  }
+
+  return cwd;
 }
 
 async function configureWorktreeGitIdentity(
@@ -390,17 +508,28 @@ export async function spawnAgentSession(
     args.push("--resume", task.session_id);
   }
 
-  const repoPath = agentConfig?.repo_path || process.cwd();
-
-  // Create or reuse a git worktree for isolation
-  const cwd = await ensureWorktree(task, repoPath, agentConfig?.default_branch || "main", {
+  const defaultBranch = agentConfig?.default_branch || "main";
+  const gitIdentity = {
     name: agentConfig?.git_user_name,
     email: agentConfig?.git_user_email,
-  });
+  };
+  let worktreePath: string;
+  if (task.worktree_path && existsSync(task.worktree_path)) {
+    console.log(`[agent-runner] Reusing existing worktree at ${task.worktree_path}`);
+    await configureWorktreeGitIdentity(task.worktree_path, gitIdentity);
+    worktreePath = task.worktree_path;
+  } else {
+    const repoPath = await resolveAgentRepoPath(task.agent, agentConfig, defaultBranch);
+    worktreePath = await ensureWorktree(task, repoPath, defaultBranch, gitIdentity);
+  }
+  const cwd = resolveAgentWorkingDirectory(
+    worktreePath,
+    agentConfig?.working_directory
+  );
 
   const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
   console.log(
-    `[agent-runner] Spawning ${runtimeLabel} session for task "${task.title}" (${task.id}) in worktree ${cwd}`
+    `[agent-runner] Spawning ${runtimeLabel} session for task "${task.title}" (${task.id}) in ${cwd}`
   );
 
   // Capture submitted comment IDs before the run to detect mid-run additions
@@ -690,13 +819,10 @@ async function ensureWorktree(
 
 export async function removeWorktree(task: Task): Promise<void> {
   if (!task.worktree_path) return;
-
-  const agentConfig = readConfig().agents[task.agent];
-  const repoPath = agentConfig?.repo_path;
-  if (!repoPath) return;
+  if (!existsSync(task.worktree_path)) return;
 
   try {
-    await execGit(repoPath, ["worktree", "remove", task.worktree_path, "--force"]);
+    await execGit(task.worktree_path, ["worktree", "remove", task.worktree_path, "--force"]);
     console.log(`[agent-runner] Removed worktree at ${task.worktree_path}`);
   } catch (err) {
     console.error(`[agent-runner] Failed to remove worktree at ${task.worktree_path}:`, err);
@@ -1192,8 +1318,10 @@ export const __testUtils = {
   buildModelArgs,
   buildPermissionArgs,
   createFollowupTasks,
+  ensureManagedRepo,
   ensureWorktree,
   handleRunComplete,
   handleRunTimeout,
   parseCodexResult,
+  resolveAgentWorkingDirectory,
 };
