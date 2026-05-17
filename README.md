@@ -39,8 +39,8 @@ Each agent has:
 - A unique ID
 - A display name
 - A GitHub repo slug
-- A local path to the repo it should work on
 - A default branch
+- An optional working directory inside the repo
 - An optional Git author name and email for commits the agent creates
 - An optional custom prompt
 - Optional environment variables
@@ -104,9 +104,13 @@ You will usually fill in:
 - `Agent ID`: a stable machine-friendly key
 - `Display Name`: a readable name in the UI
 - `Repo Slug`: `owner/repo`
-- `Repo Local Path`: absolute path to the local clone
 - `Default Branch`: usually `main`
+- `Working Directory`: relative path inside the repo, or `.` for the repo root
 - `Prompt`: instructions that define how this agent should behave
+
+Cortex City clones and fetches the repository as needed under `.cortex/repos/`.
+The working directory lets agents start in a smaller subfolder of a large monorepo
+without asking you for an absolute local clone path.
 
 If the agent needs secrets or repo-specific credentials, add environment variables there as well.
 
@@ -293,7 +297,7 @@ Bootstrap defaults the service user's git identity to `Cortex City <farshid@marq
 ## Local State
 
 Cortex City keeps its local runtime state under `.cortex/`.
-It creates `.cortex/.gitignore` automatically for local-only runtime files such as `orchestrator-state.json`, `.env`, and `.env.*`.
+It creates `.cortex/.gitignore` automatically for local-only runtime files such as `orchestrator-state.json`, `.env`, `.env.*`, and managed repo clones in `repos/`.
 
 That includes things like:
 

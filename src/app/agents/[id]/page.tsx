@@ -70,7 +70,7 @@ export default function AgentDetailPage({
   const [configForm, setConfigForm] = useState({
     name: "",
     repo_slug: "",
-    repo_path: "",
+    working_directory: ".",
     default_branch: "",
     git_user_name: "",
     git_user_email: "",
@@ -162,7 +162,7 @@ export default function AgentDetailPage({
     setConfigForm({
       name: currentAgent.name,
       repo_slug: currentAgent.repo_slug,
-      repo_path: currentAgent.repo_path,
+      working_directory: currentAgent.working_directory || ".",
       default_branch: currentAgent.default_branch,
       git_user_name: currentAgent.git_user_name || "",
       git_user_email: currentAgent.git_user_email || "",
@@ -172,11 +172,15 @@ export default function AgentDetailPage({
   }
 
   async function saveConfig() {
+    const normalizedConfigForm = {
+      ...configForm,
+      working_directory: configForm.working_directory.trim() || ".",
+    };
     const updated = {
       ...currentConfig,
       agents: {
         ...currentConfig.agents,
-        [id]: { ...currentAgent, ...configForm },
+        [id]: { ...currentAgent, ...normalizedConfigForm },
       },
     };
     await fetch("/api/config", {
@@ -333,15 +337,16 @@ export default function AgentDetailPage({
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs">Repo Local Path</Label>
+                  <Label className="text-xs">Working Directory</Label>
                   <Input
-                    value={configForm.repo_path}
+                    value={configForm.working_directory}
                     onChange={(e) =>
                       setConfigForm({
                         ...configForm,
-                        repo_path: e.target.value,
+                        working_directory: e.target.value,
                       })
                     }
+                    placeholder="."
                   />
                 </div>
                 <div className="space-y-1">
@@ -417,8 +422,14 @@ export default function AgentDetailPage({
                 {currentAgent.repo_slug}
               </div>
               <div>
-                <span className="text-muted-foreground">Path: </span>
-                <span className="font-mono text-xs">{currentAgent.repo_path}</span>
+                <span className="text-muted-foreground">Workdir: </span>
+                <span className="font-mono text-xs">
+                  {currentAgent.working_directory || "."}
+                </span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Clone: </span>
+                Managed under .cortex/repos
               </div>
               <div>
                 <span className="text-muted-foreground">Branch: </span>

@@ -80,11 +80,11 @@ test("readConfig creates defaults when no config file exists", () => {
   assert.deepEqual(JSON.parse(readFileSync(configFile, "utf-8")), config);
   assert.equal(
     readFileSync(gitignoreFile, "utf-8"),
-    "orchestrator-state.json\n.env.*\n.env\n"
+    "orchestrator-state.json\n.env.*\n.env\nrepos/\n"
   );
 });
 
-test("readConfig preserves an existing cortex gitignore", () => {
+test("readConfig appends missing default cortex gitignore entries", () => {
   const workspace = createTempWorkspace();
   mkdirSync(path.join(workspace, ".cortex"), { recursive: true });
   const gitignoreFile = path.join(workspace, ".cortex", ".gitignore");
@@ -92,7 +92,10 @@ test("readConfig preserves an existing cortex gitignore", () => {
 
   runStoreScript(workspace, "console.log(JSON.stringify(store.readConfig()));");
 
-  assert.equal(readFileSync(gitignoreFile, "utf-8"), "custom-state.json\n");
+  assert.equal(
+    readFileSync(gitignoreFile, "utf-8"),
+    "custom-state.json\norchestrator-state.json\n.env.*\n.env\nrepos/\n"
+  );
 });
 
 test("readConfig migrates legacy runner and permission fields", () => {

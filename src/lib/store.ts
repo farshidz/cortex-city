@@ -8,15 +8,40 @@ const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
 const GITIGNORE_FILE = path.join(CORTEX_DIR, ".gitignore");
-const DEFAULT_CORTEX_GITIGNORE = "orchestrator-state.json\n.env.*\n.env\n";
+const DEFAULT_CORTEX_GITIGNORE_ENTRIES = [
+  "orchestrator-state.json",
+  ".env.*",
+  ".env",
+  "repos/",
+];
+const DEFAULT_CORTEX_GITIGNORE = `${DEFAULT_CORTEX_GITIGNORE_ENTRIES.join("\n")}\n`;
 
-function ensureCortexDir() {
+export function ensureCortexDir() {
   if (!existsSync(CORTEX_DIR)) {
     mkdirSync(CORTEX_DIR, { recursive: true });
   }
   if (!existsSync(GITIGNORE_FILE)) {
     writeFileSync(GITIGNORE_FILE, DEFAULT_CORTEX_GITIGNORE);
+    return;
   }
+
+  const existing = readFileSync(GITIGNORE_FILE, "utf-8");
+  const lines = new Set(
+    existing
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+  );
+  const missing = DEFAULT_CORTEX_GITIGNORE_ENTRIES.filter((entry) => !lines.has(entry));
+  if (missing.length === 0) return;
+
+  const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+  writeFileSync(GITIGNORE_FILE, `${existing}${prefix}${missing.join("\n")}\n`);
+}
+
+export function getCortexPath(...segments: string[]): string {
+  ensureCortexDir();
+  return path.join(CORTEX_DIR, ...segments);
 }
 
 // Simple promise-chain mutex for serializing writes

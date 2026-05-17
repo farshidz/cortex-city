@@ -417,7 +417,13 @@ test("pollOnce scans in-review tasks for merged, closed, pending, conflicts, unc
       }
 
       await pollOnce(activePids);
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      for (let i = 0; i < 20; i++) {
+        const current = readTasks();
+        const manualDone = current.find((task) => task.id === "review-manual")?.last_run_result;
+        const conflictDone = current.find((task) => task.id === "review-conflicts")?.last_run_result;
+        if (manualDone && conflictDone) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
       const calls = require("node:fs").existsSync(${JSON.stringify(callsFile)})
         ? require("node:fs")
             .readFileSync(${JSON.stringify(callsFile)}, "utf-8")

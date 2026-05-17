@@ -155,7 +155,10 @@ function formatAgentDescription(
   const name = agent.name || id;
   const description = agent.description?.trim() || "No description provided.";
   const repo = agent.repo_slug ? `Repo: ${agent.repo_slug}` : "";
+  const workdir = agent.working_directory?.trim();
+  const workingDirectory =
+    workdir && workdir !== "." ? `Workdir: ${workdir}` : "";
   const currentTag = isCurrent ? " (current)" : "";
-  const detail = [description, repo].filter(Boolean).join(" — ");
+  const detail = [description, repo, workingDirectory].filter(Boolean).join(" — ");
   return `- **${name}** (\`${id}\`)${currentTag}: ${detail}`;
 }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import type { OrchestratorConfig, Task } from "./types";
@@ -762,6 +762,118 @@ test("ensureWorktree reuses an existing worktree path", () => {
 
   assert.equal(result.ensured, worktreePath);
   assert.equal(result.tasks[0].worktree_path, worktreePath);
+});
+
+test("ensureManagedRepo clones repo state under .cortex/repos", () => {
+  const gitWorkspace = createTempWorkspace("agent-runner-managed-clone-");
+  const { remotePath } = initGitTestRepo(gitWorkspace);
+  const { workspace } = setupWorkspace();
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const { execFileSync } = require("node:child_process");
+      const { readFileSync } = require("node:fs");
+      const path = require("node:path");
+      const repoPath = await __testUtils.ensureManagedRepo(
+        "managed-agent",
+        {
+          name: "Managed Agent",
+          repo_slug: ${JSON.stringify(remotePath)},
+          prompt_file: "prompts/agents/cortex-city-swe.md",
+          default_branch: "main",
+        },
+        "main"
+      );
+      const remote = execFileSync("git", ["-C", repoPath, "remote", "get-url", "origin"], {
+        encoding: "utf-8",
+      }).trim();
+      const gitignore = readFileSync(path.join(${JSON.stringify(workspace)}, ".cortex", ".gitignore"), "utf-8");
+      console.log(JSON.stringify({ repoPath, remote, gitignore }));
+    `
+  );
+
+  assert.ok(
+    result.repoPath.startsWith(path.join(realpathSync(workspace), ".cortex", "repos"))
+  );
+  assert.equal(result.remote, remotePath);
+  assert.match(result.gitignore, /(^|\n)repos\/\n/);
+});
+
+test("spawnAgentSession ignores legacy repo_path, clones a managed repo, and uses the configured working directory", () => {
+  const gitWorkspace = createTempWorkspace("agent-runner-managed-workdir-");
+  const { remotePath, repoPath } = initGitTestRepo(gitWorkspace);
+  mkdirSync(path.join(repoPath, "packages", "api"), { recursive: true });
+  writeFileSync(path.join(repoPath, "packages", "api", "package.json"), "{}\n");
+  execFileSync("git", ["-C", repoPath, "add", "packages/api/package.json"]);
+  execFileSync("git", ["-C", repoPath, "commit", "-m", "Add package workspace"]);
+  execFileSync("git", ["-C", repoPath, "push", "origin", "main"]);
+
+  const { workspace } = setupWorkspace();
+  writeTestConfig(workspace, {}, {
+    "cortex-city-swe": {
+      repo_path: path.join(workspace, "legacy-repo-path-must-be-ignored"),
+      repo_slug: remotePath,
+      working_directory: "packages/api",
+      default_branch: "main",
+    },
+  });
+  const argsFile = path.join(workspace, "managed-workdir-args.json");
+  const report = {
+    status: "completed",
+    summary: "Ran from the package workspace",
+    pr_url: "",
+    branch_name: "agent/managed-workdir",
+    files_changed: [],
+    assumptions: [],
+    blockers: [],
+    next_steps: [],
+  };
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        title: "Managed repo workdir",
+      }))};
+      await createTask(task);
+      process.env.FAKE_AGENT_ARGS_FILE = ${JSON.stringify(argsFile)};
+      process.env.FAKE_AGENT_STDOUT = ${JSON.stringify(
+        [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-managed" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "agent_message",
+              text: JSON.stringify(report),
+            },
+          }),
+          JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+          }),
+        ].join("\n")
+      )};
+
+      await new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined))
+          .catch(reject);
+      });
+
+      console.log(
+        JSON.stringify({
+          tasks: readTasks(),
+          args: JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8")),
+        })
+      );
+    `
+  );
+
+  assert.ok(result.args.cwd.endsWith(path.join("packages", "api")));
+  const managedReposPath = path.join(realpathSync(workspace), ".cortex", "repos");
+  assert.ok(result.args.cwd.startsWith(managedReposPath));
+  assert.ok(result.tasks[0].worktree_path.startsWith(managedReposPath));
+  assert.equal(result.tasks[0].last_run_result, "success");
 });
 
 test("ensureWorktree creates a missing branch from origin/main", () => {
