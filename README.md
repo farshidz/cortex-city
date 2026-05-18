@@ -268,32 +268,6 @@ scripts/deploy-ssh.sh ubuntu@your-server /opt/cortex-city/app
 
 The script syncs the repo with `rsync`, runs `npm ci` and `npm run build` on the remote host, installs rendered `systemd` units, and restarts the web and worker services. By default it deploys as the `cortex` service user created by bootstrap; override `SYSTEMD_USER`, `SYSTEMD_GROUP`, `REMOTE_OWNER`, and `REMOTE_GROUP` if you want a different account.
 
-GitHub Actions can deploy with the same script through `.github/workflows/deploy-production.yml`. The workflow runs automatically after the `Test` workflow succeeds on `main`.
-
-Create a dedicated deploy SSH key instead of reusing a personal laptop key:
-
-```bash
-ssh-keygen -t ed25519 -C "github-actions cortex-city deploy" -f ./cortex-city-gha-deploy -N ""
-ssh-copy-id -i ./cortex-city-gha-deploy.pub ubuntu@your-server
-ssh-keyscan -H your-server
-```
-
-Create a GitHub `production` environment without required reviewers, then add these environment secrets:
-
-- `SSH_PRIVATE_KEY`: contents of `cortex-city-gha-deploy`
-- `SSH_KNOWN_HOSTS`: verified output from `ssh-keyscan -H your-server`
-- `SSH_REMOTE`: SSH target such as `ubuntu@your-server`
-
-Optional `production` environment variables:
-
-- `APP_DIR`: defaults to `/opt/cortex-city/app`
-- `SSH_PORT`: defaults to `22`
-- `SYSTEMD_USER`, `SYSTEMD_GROUP`, `REMOTE_OWNER`, and `REMOTE_GROUP`: default to the deploy script's `cortex` user model
-
-The generic names are intentional. If you add more deploy targets later, create additional GitHub environments with the same secret and variable names, then point separate deploy jobs at those environments.
-
-The remote login user must be able to run the deploy script's required `sudo` commands non-interactively, because GitHub Actions cannot answer a password prompt.
-
 For first-time host setup, run:
 
 ```bash
