@@ -1,0 +1,102 @@
+name: Deploy Production
+
+on:
+  workflow_run:
+    workflows:
+      - Test
+    branches:
+      - main
+    types:
+      - completed
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy over SSH
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Confirm commit is current main
+        id: current-main
+        run: |
+          set -euo pipefail
+
+          tested_sha="${{ github.event.workflow_run.head_sha }}"
+          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
+          current_main="$(git rev-parse refs/remotes/origin/main)"
+
+          if [ "$tested_sha" = "$current_main" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping deploy because $tested_sha is no longer current main ($current_main)."
+          fi
+
+      - name: Install deploy prerequisites
+        if: ${{ steps.current-main.outputs.deploy == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-client rsync
+
+      - name: Prepare SSH credentials
+        if: ${{ steps.current-main.outputs.deploy == 'true' }}
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "Missing required secret: SSH_PRIVATE_KEY" >&2
+            exit 1
+          fi
+
+          if [ -z "$SSH_KNOWN_HOSTS" ]; then
+            echo "Missing required secret: SSH_KNOWN_HOSTS" >&2
+            exit 1
+          fi
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/deploy_ssh_key"
+          chmod 600 "$RUNNER_TEMP/deploy_ssh_key"
+
+      - name: Deploy
+        if: ${{ steps.current-main.outputs.deploy == 'true' }}
+        env:
+          SSH_REMOTE: ${{ secrets.SSH_REMOTE }}
+          APP_DIR: ${{ vars.APP_DIR }}
+          SSH_KEY_PATH: ${{ runner.temp }}/deploy_ssh_key
+          SSH_PORT: ${{ vars.SSH_PORT }}
+          SSH_STRICT_HOST_KEY_CHECKING: "yes"
+          SYSTEMD_USER: ${{ vars.SYSTEMD_USER }}
+          SYSTEMD_GROUP: ${{ vars.SYSTEMD_GROUP }}
+          REMOTE_OWNER: ${{ vars.REMOTE_OWNER }}
+          REMOTE_GROUP: ${{ vars.REMOTE_GROUP }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SSH_REMOTE" ]; then
+            echo "Missing required secret: SSH_REMOTE" >&2
+            exit 1
+          fi
+
+          export SSH_PORT="${SSH_PORT:-22}"
+          app_dir="${APP_DIR:-/opt/cortex-city/app}"
+
+          scripts/deploy-ssh.sh "$SSH_REMOTE" "$app_dir"
