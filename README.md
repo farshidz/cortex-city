@@ -278,17 +278,19 @@ ssh-copy-id -i ./cortex-city-gha-deploy.pub ubuntu@your-server
 ssh-keyscan -H your-server
 ```
 
-Add these secrets to the repository or organization:
+Create a GitHub `production` environment without required reviewers, then add these environment secrets:
 
-- `PROD1_SSH_PRIVATE_KEY`: contents of `cortex-city-gha-deploy`
-- `PROD1_SSH_KNOWN_HOSTS`: verified output from `ssh-keyscan -H your-server`
-- `PROD1_SSH_REMOTE`: SSH target such as `ubuntu@your-server`
+- `SSH_PRIVATE_KEY`: contents of `cortex-city-gha-deploy`
+- `SSH_KNOWN_HOSTS`: verified output from `ssh-keyscan -H your-server`
+- `SSH_REMOTE`: SSH target such as `ubuntu@your-server`
 
-Optional repository or organization variables:
+Optional `production` environment variables:
 
-- `PROD1_APP_DIR`: defaults to `/opt/cortex-city/app`
-- `PROD1_SSH_PORT`: defaults to `22`
-- `PROD1_SYSTEMD_USER`, `PROD1_SYSTEMD_GROUP`, `PROD1_REMOTE_OWNER`, and `PROD1_REMOTE_GROUP`: default to the deploy script's `cortex` user model
+- `APP_DIR`: defaults to `/opt/cortex-city/app`
+- `SSH_PORT`: defaults to `22`
+- `SYSTEMD_USER`, `SYSTEMD_GROUP`, `REMOTE_OWNER`, and `REMOTE_GROUP`: default to the deploy script's `cortex` user model
+
+The generic names are intentional. If you add more deploy targets later, create additional GitHub environments with the same secret and variable names, then point separate deploy jobs at those environments.
 
 The remote login user must be able to run the deploy script's required `sudo` commands non-interactively, because GitHub Actions cannot answer a password prompt.
 
