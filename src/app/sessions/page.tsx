@@ -46,11 +46,11 @@ export default function SessionsPage() {
     void fetch("/api/orchestrator", { method: "POST" });
   }, [status]);
 
-  async function killSession(taskId: string) {
+  async function killSession(session: ActiveSession) {
     await fetch("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ task_id: taskId }),
+      body: JSON.stringify({ task_id: session.task_id, kind: session.kind }),
     });
     mutateSessions();
   }
@@ -161,16 +161,19 @@ export default function SessionsPage() {
       {sessions && sessions.length > 0 ? (
         <div className="grid gap-3">
           {sessions.map((session) => (
-            <Card key={session.task_id}>
+            <Card key={`${session.kind}:${session.task_id}`}>
               <CardHeader className="py-3">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-base">
-                    {session.task_title}
+                <div className="flex items-center justify-between gap-2">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Badge variant={session.kind === "review" ? "secondary" : "default"}>
+                      {session.kind === "review" ? "Review" : "Task"}
+                    </Badge>
+                    <span>{session.task_title}</span>
                   </CardTitle>
                   <Button
                     size="sm"
                     variant="destructive"
-                    onClick={() => killSession(session.task_id)}
+                    onClick={() => killSession(session)}
                   >
                     Kill
                   </Button>
@@ -179,7 +182,9 @@ export default function SessionsPage() {
               <CardContent className="py-2">
                 <div className="flex gap-6 text-sm">
                   <div>
-                    <span className="text-muted-foreground">Agent: </span>
+                    <span className="text-muted-foreground">
+                      {session.kind === "review" ? "Runtime: " : "Agent: "}
+                    </span>
                     <Badge variant="outline">{session.agent}</Badge>
                   </div>
                   <div>

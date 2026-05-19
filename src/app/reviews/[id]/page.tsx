@@ -28,29 +28,24 @@ import type {
   AgentRuntime,
   OrchestratorConfig,
   ReviewFollowup,
-  ReviewState,
   ReviewSummary,
   TaskEffort,
 } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-const STATUS_LABEL: Record<ReviewState, string> = {
-  needs_approval: "Needs approval",
-  approved: "Approved",
-  merged_closed: "Merged / closed",
-};
+function statusLabel(review: ReviewSummary): string {
+  if (!review.my_last_review_sha) return "Awaiting your review";
+  return review.my_last_review_sha === review.head_sha
+    ? "Up to date with your review"
+    : "New commits since your review";
+}
 
-function statusBadgeClass(state?: ReviewState): string {
-  switch (state) {
-    case "approved":
-      return "bg-green-100 text-green-800";
-    case "merged_closed":
-      return "bg-gray-200 text-gray-700";
-    case "needs_approval":
-    default:
-      return "bg-yellow-100 text-yellow-800";
+function statusBadgeClass(review: ReviewSummary): string {
+  if (review.my_last_review_sha && review.my_last_review_sha !== review.head_sha) {
+    return "bg-yellow-100 text-yellow-800";
   }
+  return "bg-blue-100 text-blue-800";
 }
 
 interface SubmitState {
@@ -187,10 +182,7 @@ export default function ReviewDetailPage({
     return <div className="text-muted-foreground">Loading…</div>;
   }
 
-  const isSummarizing =
-    review.review_state === "needs_approval" &&
-    Boolean(review.current_run_pid) &&
-    !review.summary;
+  const isSummarizing = !review.summary && Boolean(review.current_run_pid);
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -216,11 +208,9 @@ export default function ReviewDetailPage({
             {review.repo_slug} #{review.pr_number}
           </span>
           <span
-            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${statusBadgeClass(
-              review.review_state
-            )}`}
+            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${statusBadgeClass(review)}`}
           >
-            {STATUS_LABEL[review.review_state ?? "needs_approval"]}
+            {statusLabel(review)}
           </span>
           <Badge variant="outline">{review.author || "—"}</Badge>
         </div>

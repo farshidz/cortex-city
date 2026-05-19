@@ -1,7 +1,13 @@
 import { readFileSync, existsSync, mkdirSync } from "fs";
 import { spawn } from "child_process";
 import path from "path";
-import type { ActiveSession, OrchestratorStatus, Task } from "./types";
+import type {
+  ActiveSession,
+  OrchestratorStatus,
+  ReviewSummary,
+  Task,
+} from "./types";
+import { readReviewSummaries, patchReviewSummary } from "./review-store";
 import { readConfig, readTasks, updateTask } from "./store";
 
 // The orchestrator now runs as a separate process (orchestrator-worker.ts).
@@ -84,11 +90,21 @@ function hasActivePid(task: Task): task is Task & { current_run_pid: number } {
   return typeof task.current_run_pid === "number";
 }
 
-function getLiveActiveSessions(tasks: Task[]): ActiveSession[] {
-  return tasks
+function hasActiveReviewPid(
+  review: ReviewSummary
+): review is ReviewSummary & { current_run_pid: number } {
+  return typeof review.current_run_pid === "number";
+}
+
+function getLiveActiveSessions(
+  tasks: Task[],
+  reviews: ReviewSummary[]
+): ActiveSession[] {
+  const taskSessions: ActiveSession[] = tasks
     .filter(hasActivePid)
     .filter((task) => isPidAlive(task.current_run_pid))
     .map((t) => ({
+      kind: "task",
       task_id: t.id,
       task_title: t.title,
       agent: t.agent,
@@ -97,6 +113,24 @@ function getLiveActiveSessions(tasks: Task[]): ActiveSession[] {
       started_at: t.last_run_at || t.updated_at,
       status: "running" as const,
     }));
+
+  const reviewSessions: ActiveSession[] = reviews
+    .filter(hasActiveReviewPid)
+    .filter((r) => isPidAlive(r.current_run_pid))
+    .map((r) => ({
+      kind: "review",
+      task_id: r.pr_url,
+      task_title: r.title
+        ? `${r.repo_slug}#${r.pr_number} — ${r.title}`
+        : `${r.repo_slug}#${r.pr_number}`,
+      agent: r.runtime || "review",
+      session_id: r.session_id || "pending",
+      pid: r.current_run_pid,
+      started_at: r.generated_at || r.updated_at || new Date().toISOString(),
+      status: "running" as const,
+    }));
+
+  return [...taskSessions, ...reviewSessions];
 }
 
 export function getOrchestrator() {
@@ -104,7 +138,10 @@ export function getOrchestrator() {
     getStatus(): OrchestratorStatus {
       const config = readConfig();
       const state = readWorkerState();
-      const activeSessions = getLiveActiveSessions(readTasks());
+      const activeSessions = getLiveActiveSessions(
+        readTasks(),
+        readReviewSummaries()
+      );
       const workerHealthy = isPidAlive(state.pid);
       return {
         running: state.running && workerHealthy,
@@ -123,7 +160,7 @@ export function getOrchestrator() {
     },
 
     getActiveSessions(): ActiveSession[] {
-      return getLiveActiveSessions(readTasks());
+      return getLiveActiveSessions(readTasks(), readReviewSummaries());
     },
 
     killSession(taskId: string): boolean {
@@ -146,6 +183,24 @@ export function getOrchestrator() {
         return true;
       } catch {
         updateTask(taskId, updates);
+        return false;
+      }
+    },
+    killReviewSession(prUrl: string): boolean {
+      const review = readReviewSummaries().find((r) => r.pr_url === prUrl);
+      const pid = review?.current_run_pid;
+      if (!pid) return false;
+      try {
+        process.kill(pid, "SIGTERM");
+        setTimeout(() => {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }, 5000);
+        void patchReviewSummary(prUrl, { current_run_pid: undefined });
+        return true;
+      } catch {
+        void patchReviewSummary(prUrl, { current_run_pid: undefined });
         return false;
       }
     },

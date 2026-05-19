@@ -72,6 +72,14 @@ function writeTasks(workspace: string, tasks: Task[]) {
   );
 }
 
+function writeReviews(workspace: string, reviews: Record<string, unknown>) {
+  mkdirSync(path.join(workspace, ".cortex"), { recursive: true });
+  writeFileSync(
+    path.join(workspace, ".cortex", "reviews.json"),
+    JSON.stringify(reviews, null, 2)
+  );
+}
+
 function writeWorkerState(workspace: string, state: Record<string, unknown>) {
   mkdirSync(path.join(workspace, ".cortex"), { recursive: true });
   writeFileSync(
@@ -203,6 +211,141 @@ test("getStatus reports stopped when the worker pid is stale", () => {
   assert.equal(result.healthy, false);
   assert.equal(result.worker_healthy, false);
   assert.equal(result.autostart_enabled, false);
+});
+
+test("getActiveSessions includes in-flight review summaries tagged as review kind", () => {
+  const workspace = createTempWorkspace();
+  writeConfig(workspace);
+  writeTasks(workspace, [
+    sampleTask({
+      id: "live-task",
+      current_run_pid: process.pid,
+      session_id: "live-session",
+      last_run_at: "2026-04-15T00:02:00.000Z",
+    }),
+  ]);
+  const reviewPrUrl = "https://github.com/acme/widget/pull/42";
+  writeReviews(workspace, {
+    [reviewPrUrl]: {
+      pr_url: reviewPrUrl,
+      pr_number: 42,
+      repo_slug: "acme/widget",
+      title: "Fix the thing",
+      author: "octocat",
+      head_sha: "abc123",
+      created_at: "2026-05-01T00:00:00.000Z",
+      updated_at: "2026-05-01T00:00:00.000Z",
+      summary: "",
+      generated_at: "",
+      current_run_pid: process.pid,
+      runtime: "claude",
+      session_id: "review-session",
+    },
+  });
+  writeWorkerState(workspace, {
+    running: true,
+    active_sessions: 0,
+    last_poll_at: null,
+    last_heartbeat_at: null,
+    started_at: null,
+    poll_started_at: null,
+    poll_finished_at: null,
+    poll_in_progress: false,
+    pid: process.pid,
+  });
+
+  const result = runOrchestratorScript(
+    workspace,
+    `
+      const orchestrator = getOrchestrator();
+      console.log(JSON.stringify(orchestrator.getActiveSessions()));
+    `
+  );
+
+  assert.equal(result.length, 2);
+  const byKind = Object.fromEntries(
+    (result as Array<{ kind: string }>).map((s) => [s.kind, s])
+  );
+  assert.ok(byKind.task, "task session should be present");
+  assert.ok(byKind.review, "review session should be present");
+  assert.equal(byKind.review.task_id, reviewPrUrl);
+  assert.equal(byKind.review.agent, "claude");
+  assert.match(byKind.review.task_title, /acme\/widget#42/);
+});
+
+test("killReviewSession clears current_run_pid on the cached review", () => {
+  const workspace = createTempWorkspace();
+  writeConfig(workspace);
+  writeTasks(workspace, []);
+  const reviewPrUrl = "https://github.com/acme/widget/pull/42";
+  writeReviews(workspace, {
+    [reviewPrUrl]: {
+      pr_url: reviewPrUrl,
+      pr_number: 42,
+      repo_slug: "acme/widget",
+      title: "Fix the thing",
+      author: "octocat",
+      head_sha: "abc123",
+      created_at: "2026-05-01T00:00:00.000Z",
+      updated_at: "2026-05-01T00:00:00.000Z",
+      summary: "",
+      generated_at: "",
+      current_run_pid: 999999, // dead pid — kill should fail but still clear
+    },
+  });
+  writeWorkerState(workspace, {
+    running: true,
+    active_sessions: 0,
+    last_poll_at: null,
+    last_heartbeat_at: null,
+    started_at: null,
+    poll_started_at: null,
+    poll_finished_at: null,
+    poll_in_progress: false,
+    pid: process.pid,
+  });
+
+  const result = runOrchestratorScript(
+    workspace,
+    `
+      const orchestrator = getOrchestrator();
+      const killed = orchestrator.killReviewSession(${JSON.stringify(reviewPrUrl)});
+      // Give the patch enough time to fsync.
+      await new Promise((r) => setTimeout(r, 50));
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const cached = JSON.parse(fs.readFileSync(
+        path.join(process.cwd(), ".cortex", "reviews.json"),
+        "utf-8"
+      ));
+      console.log(JSON.stringify({
+        killed,
+        currentRunPid: cached[${JSON.stringify(reviewPrUrl)}].current_run_pid ?? null,
+      }));
+    `
+  );
+
+  // Dead pid — kill returns false but the entry is still cleared on disk.
+  assert.equal(result.killed, false);
+  assert.equal(result.currentRunPid, null);
+});
+
+test("killReviewSession returns false when no review has the given pr_url", () => {
+  const workspace = createTempWorkspace();
+  writeConfig(workspace);
+  writeTasks(workspace, []);
+  writeReviews(workspace, {});
+
+  const result = runOrchestratorScript(
+    workspace,
+    `
+      const orchestrator = getOrchestrator();
+      const killed = orchestrator.killReviewSession("https://github.com/missing/repo/pull/9");
+      console.log(JSON.stringify({ killed }));
+    `
+  );
+
+  assert.equal(result.killed, false);
 });
 
 test("getStatus reports autostart when explicitly enabled", () => {

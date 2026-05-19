@@ -10,7 +10,13 @@ export function ReviewsNavLink() {
   const { data } = useSWR<ReviewSummary[]>("/api/reviews", fetcher, {
     refreshInterval: 10000,
   });
-  const count = data?.filter((r) => r.review_state === "needs_approval").length;
+  // Count actionable reviews: still open (no final_at) and either never
+  // reviewed by me or with new commits since my last review.
+  const count = data?.filter((r) => {
+    if (r.final_at) return false;
+    if (!r.my_last_review_sha) return true; // not yet reviewed
+    return r.my_last_review_sha !== r.head_sha; // new commits since review
+  }).length;
 
   return (
     <Link

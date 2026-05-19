@@ -9,7 +9,6 @@ import {
 import type {
   OrchestratorConfig,
   ReviewRequest,
-  ReviewState,
   ReviewSummary,
 } from "./types";
 
@@ -19,7 +18,6 @@ interface HarnessOptions {
   openReviewRequests?: ReviewRequest[];
   isPidRunning?: (pid: number) => boolean;
   spawnPid?: () => number;
-  lifecycleState?: (prUrl: string) => Promise<ReviewState>;
 }
 
 interface Harness {
@@ -27,7 +25,6 @@ interface Harness {
   reviews: Record<string, ReviewSummary>;
   spawnCalls: ReviewRequest[];
   deletedPrUrls: string[];
-  lifecycleCalls: string[];
   activeReviewPids: Map<string, number>;
 }
 
@@ -75,7 +72,6 @@ function makeHarness(options: HarnessOptions = {}): Harness {
   const reviews: Record<string, ReviewSummary> = { ...(options.reviews || {}) };
   const spawnCalls: ReviewRequest[] = [];
   const deletedPrUrls: string[] = [];
-  const lifecycleCalls: string[] = [];
   let nextPid = 50_000;
   const spawnPid = options.spawnPid || (() => nextPid++);
 
@@ -83,12 +79,6 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     deleteTask: async () => {},
     getPRStateHash: async () => "",
     getPRStatus: async () => "unknown",
-    getReviewLifecycleState:
-      options.lifecycleState ??
-      (async (prUrl) => {
-        lifecycleCalls.push(prUrl);
-        return "merged_closed";
-      }),
     getReviewRequestedPRs: async () => options.openReviewRequests || [],
     getTask: async () => undefined,
     isPRMergedOrClosed: async () => null,
@@ -106,7 +96,6 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     spawnReviewSummary: async (request, _opts, onComplete) => {
       spawnCalls.push(request);
       const pid = spawnPid();
-      // Persist current_run_pid in the in-memory store, mirroring real impl.
       reviews[request.pr_url] = {
         ...(reviews[request.pr_url] || makeSummary(request)),
         ...request,
@@ -133,34 +122,24 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     },
   };
 
-  // Wrap lifecycleState so we always record calls.
-  if (options.lifecycleState) {
-    const original = deps.getReviewLifecycleState;
-    deps.getReviewLifecycleState = async (prUrl) => {
-      lifecycleCalls.push(prUrl);
-      return original(prUrl);
-    };
-  }
-
   return {
     deps,
     reviews,
     spawnCalls,
     deletedPrUrls,
-    lifecycleCalls,
     activeReviewPids: new Map(),
   };
 }
 
-test("pollOnce upserts a brand-new PR as needs_approval and spawns a summary", async () => {
-  const pr = makeRequest();
+test("pollOnce upserts a brand-new PR and spawns a summary", async () => {
+  const pr = makeRequest({ my_last_review_sha: undefined });
   const h = makeHarness({ openReviewRequests: [pr] });
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
   const stored = h.reviews[pr.pr_url];
   assert.ok(stored, "review should be persisted");
-  assert.equal(stored.review_state, "needs_approval");
   assert.equal(stored.head_sha, "abc123");
+  assert.equal(stored.my_last_review_sha, undefined);
   assert.equal(h.spawnCalls.length, 1);
   assert.equal(h.activeReviewPids.has(pr.pr_url), true);
 });
@@ -170,7 +149,6 @@ test("pollOnce skips spawn when cached entry has matching head SHA and a summary
   const cached = makeSummary(pr, {
     summary: "previous summary",
     generated_at: "2026-05-01T00:00:00.000Z",
-    review_state: "needs_approval",
     session_id: "sess-1",
   });
   const h = makeHarness({
@@ -190,7 +168,6 @@ test("pollOnce clears summary + session + followups when head SHA changes", asyn
   const cached = makeSummary(makeRequest({ head_sha: "oldSha" }), {
     summary: "stale",
     generated_at: "2026-05-01T00:00:00.000Z",
-    review_state: "needs_approval",
     session_id: "sess-1",
     followups: [
       {
@@ -209,13 +186,38 @@ test("pollOnce clears summary + session + followups when head SHA changes", asyn
 
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
-  // After the SHA-change upsert + spawn, the stored entry has the new SHA,
-  // session/followups cleared, and current_run_pid set by spawn.
   const stored = h.reviews[pr.pr_url];
   assert.equal(stored.head_sha, "newSha");
   assert.equal(stored.session_id, undefined);
   assert.deepEqual(stored.followups, []);
   assert.equal(h.spawnCalls.length, 1);
+});
+
+test("pollOnce refreshes my_last_review_sha when the cached value changes", async () => {
+  // PR was previously reviewed at one SHA; the same PR now records a newer
+  // review SHA (e.g. I just submitted a review). The worker should write
+  // through the new value without spawning a fresh summary because the head
+  // SHA is unchanged.
+  const pr = makeRequest({
+    head_sha: "abc123",
+    my_last_review_sha: "abc123",
+  });
+  const cached = makeSummary(
+    makeRequest({ head_sha: "abc123", my_last_review_sha: "old-review-sha" }),
+    {
+      summary: "previous summary",
+      generated_at: "2026-05-01T00:00:00.000Z",
+    }
+  );
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: cached },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.reviews[pr.pr_url].my_last_review_sha, "abc123");
+  assert.equal(h.spawnCalls.length, 0);
 });
 
 test("pollOnce respects max_parallel_reviews", async () => {
@@ -245,25 +247,21 @@ test("pollOnce respects max_parallel_reviews", async () => {
   assert.equal(h.activeReviewPids.size, 1);
 });
 
-test("pollOnce stamps final_at + review_state when a PR drops out of the live list", async () => {
+test("pollOnce stamps final_at when a PR drops out of the live list", async () => {
   const pr = makeRequest();
   const cached = makeSummary(pr, {
     summary: "old summary",
     generated_at: "2026-05-01T00:00:00.000Z",
-    review_state: "needs_approval",
   });
   const h = makeHarness({
     openReviewRequests: [],
     reviews: { [pr.pr_url]: cached },
-    lifecycleState: async () => "approved",
   });
 
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
   const stored = h.reviews[pr.pr_url];
   assert.ok(stored.final_at, "final_at should be stamped");
-  assert.equal(stored.review_state, "approved");
-  assert.deepEqual(h.lifecycleCalls, [pr.pr_url]);
   // Summary is preserved during the 24h grace period.
   assert.equal(stored.summary, "old summary");
   assert.equal(h.deletedPrUrls.length, 0);
@@ -275,7 +273,6 @@ test("pollOnce deletes review entries whose final_at is older than the prune age
   const cached = makeSummary(pr, {
     summary: "old",
     generated_at: "2026-05-01T00:00:00.000Z",
-    review_state: "merged_closed",
     final_at: aged,
   });
   const h = makeHarness({
@@ -294,7 +291,6 @@ test("pollOnce clears orphaned review pids during pid reconcile", async () => {
   const cached = makeSummary(pr, {
     summary: "previous",
     generated_at: "2026-05-01T00:00:00.000Z",
-    review_state: "needs_approval",
     current_run_pid: 9999,
   });
   const h = makeHarness({
@@ -306,28 +302,21 @@ test("pollOnce clears orphaned review pids during pid reconcile", async () => {
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
   assert.equal(h.reviews[pr.pr_url].current_run_pid, undefined);
-  // After clearing the stale pid the worker can spawn a new summary
-  // because the cached summary is preserved but the entry isn't "in flight".
-  // We don't assert on spawn count — what matters is the orphan was reset.
 });
 
-test("pollOnce surfaces lifecycle-lookup failures by defaulting to merged_closed", async () => {
+test("pollOnce clears final_at if a PR comes back into the live list", async () => {
   const pr = makeRequest();
   const cached = makeSummary(pr, {
-    summary: "old",
+    summary: "previous",
     generated_at: "2026-05-01T00:00:00.000Z",
-    review_state: "needs_approval",
+    final_at: "2026-05-01T00:00:00.000Z",
   });
   const h = makeHarness({
-    openReviewRequests: [],
+    openReviewRequests: [pr],
     reviews: { [pr.pr_url]: cached },
-    lifecycleState: async () => {
-      throw new Error("network down");
-    },
   });
 
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
-  assert.equal(h.reviews[pr.pr_url].review_state, "merged_closed");
-  assert.ok(h.reviews[pr.pr_url].final_at);
+  assert.equal(h.reviews[pr.pr_url].final_at, undefined);
 });

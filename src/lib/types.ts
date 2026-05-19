@@ -130,9 +130,10 @@ export interface ReviewRequest {
   head_sha: string;
   created_at: string;
   updated_at: string;
+  // SHA of the most recent review the signed-in user submitted on this PR.
+  // Undefined if the user has never reviewed.
+  my_last_review_sha?: string;
 }
-
-export type ReviewState = "needs_approval" | "approved" | "merged_closed";
 
 export interface ReviewSummary extends ReviewRequest {
   summary: string;
@@ -148,7 +149,6 @@ export interface ReviewSummary extends ReviewRequest {
   followups?: ReviewFollowup[];
   final_at?: string;
   current_run_pid?: number;
-  review_state?: ReviewState;
 }
 
 export interface ReviewFollowup {
@@ -176,6 +176,9 @@ export interface ChildTaskSummary {
 }
 
 export interface ActiveSession {
+  kind: "task" | "review";
+  // For tasks this is the task id; for reviews it's the PR URL (used as the
+  // stable key in .cortex/reviews.json).
   task_id: string;
   task_title: string;
   agent: string;

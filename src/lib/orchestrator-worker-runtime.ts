@@ -6,7 +6,6 @@ import { shouldStartFinalCleanup } from "./final-task-cleanup";
 import {
   getPRStateHash,
   getPRStatus,
-  getReviewLifecycleState,
   getReviewRequestedPRs,
   isPRMergedOrClosed,
 } from "./github";
@@ -54,7 +53,6 @@ export interface WorkerRuntimeDeps {
   deleteTask: typeof deleteTask;
   getPRStateHash: typeof getPRStateHash;
   getPRStatus: typeof getPRStatus;
-  getReviewLifecycleState: typeof getReviewLifecycleState;
   getReviewRequestedPRs: typeof getReviewRequestedPRs;
   getTask: typeof getTask;
   isPRMergedOrClosed: typeof isPRMergedOrClosed;
@@ -76,7 +74,6 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   deleteTask,
   getPRStateHash,
   getPRStatus,
-  getReviewLifecycleState,
   getReviewRequestedPRs,
   getTask,
   isPRMergedOrClosed,
@@ -386,6 +383,7 @@ function prFieldsFromRequest(request: ReviewRequest) {
     head_sha: request.head_sha,
     created_at: request.created_at,
     updated_at: request.updated_at,
+    my_last_review_sha: request.my_last_review_sha,
   };
 }
 
@@ -438,7 +436,6 @@ async function runReviewPhases(
         ...prFieldsFromRequest(pr),
         summary: "",
         generated_at: "",
-        review_state: "needs_approval",
       });
       continue;
     }
@@ -452,18 +449,17 @@ async function runReviewPhases(
         followups: [],
         error: undefined,
         final_at: undefined,
-        review_state: "needs_approval",
       });
       continue;
     }
     const wasFinal = Boolean(cached.final_at);
-    const stateChanged = cached.review_state !== "needs_approval";
-    if (wasFinal || stateChanged) {
+    const reviewShaChanged =
+      cached.my_last_review_sha !== pr.my_last_review_sha;
+    if (wasFinal || reviewShaChanged) {
       await deps.upsertReviewSummary({
         ...cached,
         ...prFieldsFromRequest(pr),
         final_at: undefined,
-        review_state: "needs_approval",
       });
     }
   }
@@ -502,19 +498,9 @@ async function runReviewPhases(
   for (const review of reviewsForGC) {
     if (activeReviewPids.has(review.pr_url)) continue;
     if (!review.final_at && !openSet.has(review.pr_url)) {
-      let finalState: ReviewSummary["review_state"] = "merged_closed";
-      try {
-        finalState = await deps.getReviewLifecycleState(review.pr_url);
-      } catch (error) {
-        deps.logger.error(
-          `[worker] Failed to read final review state for ${review.pr_url}:`,
-          error
-        );
-      }
       await deps.upsertReviewSummary({
         ...review,
         final_at: new Date().toISOString(),
-        review_state: finalState,
       });
       continue;
     }

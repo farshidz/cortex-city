@@ -353,6 +353,33 @@ interface PRViewResult {
   headRefOid?: string;
 }
 
+interface PRReviewItem {
+  user?: { login?: string };
+  commit_id?: string;
+  state?: string;
+  submitted_at?: string;
+}
+
+export async function getMyLastReviewSha(
+  prUrl: string,
+  login: string
+): Promise<string | undefined> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr || !login) return undefined;
+  const reviews = await execPaginatedArrayStrict<PRReviewItem>(
+    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
+  );
+  if (!reviews) return undefined;
+  const mine = reviews.filter(
+    (r) => r.user?.login === login && r.state !== "PENDING" && r.commit_id
+  );
+  if (mine.length === 0) return undefined;
+  mine.sort((a, b) =>
+    (b.submitted_at || "").localeCompare(a.submitted_at || "")
+  );
+  return mine[0].commit_id || undefined;
+}
+
 export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
   // `review-requested:@me` matches both direct user requests and PRs where
   // a team you belong to is requested. `user-review-requested:@me` returns
@@ -361,6 +388,13 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
     `gh search prs user-review-requested:@me draft:false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
   );
   if (!Array.isArray(results) || results.length === 0) return [];
+
+  let myLogin = "";
+  try {
+    myLogin = await getAuthenticatedUserLogin();
+  } catch {
+    myLogin = "";
+  }
 
   const enriched = await Promise.all(
     results.map(async (pr): Promise<ReviewRequest | null> => {
@@ -371,9 +405,12 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
         return null;
       }
 
-      const headData = await execJsonStrict<PRViewResult>(
-        `gh pr view ${url} --json headRefOid`
-      );
+      const [headData, myLastReviewSha] = await Promise.all([
+        execJsonStrict<PRViewResult>(`gh pr view ${url} --json headRefOid`),
+        myLogin
+          ? getMyLastReviewSha(url, myLogin).catch(() => undefined)
+          : Promise.resolve(undefined),
+      ]);
 
       const headSha = headData?.headRefOid?.trim() || "";
       if (!headSha) return null;
@@ -387,6 +424,7 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
         head_sha: headSha,
         created_at: pr.createdAt || "",
         updated_at: pr.updatedAt || "",
+        my_last_review_sha: myLastReviewSha,
       };
     })
   );
