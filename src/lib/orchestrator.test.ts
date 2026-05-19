@@ -263,9 +263,13 @@ test("getActiveSessions includes in-flight review summaries tagged as review kin
   );
 
   assert.equal(result.length, 2);
-  const byKind = Object.fromEntries(
-    (result as Array<{ kind: string }>).map((s) => [s.kind, s])
-  );
+  const sessions = result as Array<{
+    kind: string;
+    task_id: string;
+    task_title: string;
+    agent: string;
+  }>;
+  const byKind = Object.fromEntries(sessions.map((s) => [s.kind, s]));
   assert.ok(byKind.task, "task session should be present");
   assert.ok(byKind.review, "review session should be present");
   assert.equal(byKind.review.task_id, reviewPrUrl);

@@ -26,7 +26,7 @@ import type { ReviewRequest, ReviewSummary, Task } from "./types";
 
 export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 
-function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boolean {
+export function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boolean {
   return Boolean(
     (task.status === "merged" || task.status === "closed") &&
       task.final_cleanup_state === "finished" &&
@@ -35,7 +35,7 @@ function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boole
   );
 }
 
-function shouldResetStaleFinalCleanup(task: Task, hasActivePid: boolean): boolean {
+export function shouldResetStaleFinalCleanup(task: Task, hasActivePid: boolean): boolean {
   return Boolean(
     (task.status === "merged" || task.status === "closed") &&
       task.final_cleanup_state === "running" &&

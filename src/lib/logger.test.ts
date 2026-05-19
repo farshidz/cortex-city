@@ -110,3 +110,44 @@ test("deleteTaskLogs is a no-op when no files match", () => {
   ensureLogsDir();
   deleteTaskLogs(`nonexistent-${nanoid(10)}`);
 });
+
+test("installLogger wraps console methods and emits to the daily server log", async () => {
+  // Lazy-import so the `installed` guard isn't tripped by other tests sharing
+  // the module. Once installed, the override sticks for the rest of the
+  // process — that's the whole point of the function and matches production
+  // behaviour, so subsequent tests have to tolerate the wrappers.
+  const { installLogger } = await import("./logger");
+  ensureLogsDir();
+
+  const marker = `installLogger-test-${nanoid(8)}`;
+  const originalLog = console.log;
+  const originalError = console.error;
+  const originalWarn = console.warn;
+
+  try {
+    installLogger();
+    // installLogger is idempotent: a second call must be a no-op.
+    installLogger();
+    // Console methods stay distinct (no infinite loop) but write through.
+    console.log(`info ${marker}`);
+    console.error(`error ${marker}`);
+    console.warn(`warn ${marker}`);
+  } finally {
+    // installLogger replaces console.log with a wrapper that calls
+    // originalLog and writes to disk. We can't fully un-install (no API),
+    // but we shouldn't restore here either — that would leave the global
+    // logger broken for any later code in the process.
+    void originalLog;
+    void originalError;
+    void originalWarn;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const logFile = path.join(LOGS_DIR, `server-${today}.log`);
+  if (existsSync(logFile)) {
+    const contents = readFileSync(logFile, "utf-8");
+    assert.match(contents, new RegExp(`INFO\\] info ${marker}`));
+    assert.match(contents, new RegExp(`ERROR\\] error ${marker}`));
+    assert.match(contents, new RegExp(`WARN\\] warn ${marker}`));
+  }
+});

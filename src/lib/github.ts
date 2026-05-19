@@ -501,6 +501,13 @@ function execFileResult(
   });
 }
 
+export const __testUtils = {
+  parsePRUrl,
+  isNoChecksError,
+  serializeCheckStates,
+  isCommentFromSubmittedReview,
+};
+
 export async function submitPRReview(
   prUrl: string,
   decision: "approve" | "request-changes" | "comment",

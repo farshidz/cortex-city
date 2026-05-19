@@ -162,3 +162,11 @@ function formatAgentDescription(
   const detail = [description, repo, workingDirectory].filter(Boolean).join(" — ");
   return `- **${name}** (\`${id}\`)${currentTag}: ${detail}`;
 }
+
+export const __testUtils = {
+  buildPromptContextSection,
+  describeMergeStatus,
+  formatAgentDescription,
+  buildAgentDirectory,
+  loadPromptFile,
+};
