@@ -250,6 +250,23 @@ test("agent env route reads, validates, and writes env files", () => {
   );
 });
 
+test("agent env route returns empty vars when env file is absent", () => {
+  runRouteAssertions(
+    withCortexState(`
+      fs.rmSync(path.join(agentPromptDir, ".env.cortex-city-swe"));
+      const agentEnvRoute = await loadRoute("./src/app/api/agents/[id]/env/route.ts");
+      const response = await json(
+        await agentEnvRoute.GET(
+          request("http://localhost/api/agents/cortex-city-swe/env"),
+          { params: Promise.resolve({ id: "cortex-city-swe" }) }
+        )
+      );
+      assert.deepEqual(response.body.vars, {});
+      assert.match(response.body.path, /\\.env\\.cortex-city-swe$/);
+    `)
+  );
+});
+
 test("agent prompt route reads configured modes and writes cleanup prompts", () => {
   runRouteAssertions(
     withCortexState(`
@@ -288,6 +305,33 @@ test("agent prompt route reads configured modes and writes cleanup prompts", () 
         fs.readFileSync(path.join(agentPromptDir, "cortex-city-swe.cleanup.md"), "utf-8"),
         "Cleanup prompt"
       );
+    `)
+  );
+});
+
+test("agent prompt route defaults to initial mode and returns empty missing files", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const agentPromptRoute = await loadRoute(
+        "./src/app/api/agents/[id]/prompt/route.ts"
+      );
+      const initialPrompt = await json(
+        await agentPromptRoute.GET(
+          request("http://localhost/api/agents/cortex-city-swe/prompt"),
+          { params: Promise.resolve({ id: "cortex-city-swe" }) }
+        )
+      );
+      assert.equal(initialPrompt.body.mode, "initial");
+      assert.equal(initialPrompt.body.content, "Initial prompt");
+
+      const missingCleanupPrompt = await json(
+        await agentPromptRoute.GET(
+          request("http://localhost/api/agents/cortex-city-swe/prompt?mode=cleanup"),
+          { params: Promise.resolve({ id: "cortex-city-swe" }) }
+        )
+      );
+      assert.equal(missingCleanupPrompt.body.mode, "cleanup");
+      assert.equal(missingCleanupPrompt.body.content, "");
     `)
   );
 });
@@ -352,6 +396,11 @@ test("tasks route filters and creates tasks with normalized defaults", () => {
   runRouteAssertions(
     withCortexState(`
       const tasksRoute = await loadRoute("./src/app/api/tasks/route.ts");
+      const allTasks = await json(
+        await tasksRoute.GET(request("http://localhost/api/tasks"))
+      );
+      assert.equal(allTasks.body.length, 4);
+
       const openTasks = await json(
         await tasksRoute.GET(request("http://localhost/api/tasks?status=open"))
       );
@@ -445,6 +494,36 @@ test("task detail route updates task metadata with normalized permissions", () =
   );
 });
 
+test("task detail route clears worktree paths when finalizing tasks", () => {
+  runRouteAssertions(
+    withCortexState(`
+      writeJson(path.join(cortexDir, "tasks.json"), [
+        baseTask,
+        {
+          ...baseTask,
+          id: "worktree-task",
+          title: "Worktree task",
+          worktree_path: path.join(workspace, "missing-worktree"),
+        },
+      ]);
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
+      const updatedTask = await json(
+        await taskRoute.PUT(
+          request("http://localhost/api/tasks/worktree-task", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status: "merged" }),
+          }),
+          { params: Promise.resolve({ id: "worktree-task" }) }
+        )
+      );
+      assert.equal(updatedTask.status, 200);
+      assert.equal(updatedTask.body.status, "merged");
+      assert.equal("worktree_path" in updatedTask.body, false);
+    `)
+  );
+});
+
 test("task detail route guards running tasks and deletes removable tasks", () => {
   runRouteAssertions(
     withCortexState(`
@@ -470,6 +549,31 @@ test("task detail route guards running tasks and deletes removable tasks", () =>
         ))).status,
         404
       );
+    `)
+  );
+});
+
+test("task detail route deletes tasks with stale worktree paths", () => {
+  runRouteAssertions(
+    withCortexState(`
+      writeJson(path.join(cortexDir, "tasks.json"), [
+        {
+          ...baseTask,
+          id: "stale-worktree-task",
+          title: "Stale worktree task",
+          worktree_path: path.join(workspace, "missing-worktree"),
+        },
+      ]);
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
+      const deleted = await json(
+        await taskRoute.DELETE(
+          request("http://localhost/api/tasks/stale-worktree-task", {
+            method: "DELETE",
+          }),
+          { params: Promise.resolve({ id: "stale-worktree-task" }) }
+        )
+      );
+      assert.deepEqual(deleted.body, { ok: true });
     `)
   );
 });
@@ -728,6 +832,92 @@ test("session route loads Claude session files", () => {
   );
 });
 
+test("session route finds Claude sessions without a worktree path", () => {
+  runRouteAssertions(
+    withSessionState(`
+      const fallbackProjectDir = path.join(claudeProjectsDir, "fallback-project");
+      fs.mkdirSync(fallbackProjectDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(fallbackProjectDir, "fallback-session.jsonl"),
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-05-01T00:04:00.000Z",
+          message: { content: [{ type: "text", text: "Fallback found" }] },
+        }) + "\\n"
+      );
+      const tasks = readJson(path.join(cortexDir, "tasks.json"));
+      writeJson(path.join(cortexDir, "tasks.json"), [
+        ...tasks,
+        {
+          ...baseTask,
+          id: "task-claude-fallback",
+          title: "Fallback Claude task",
+          agent_runner: "claude",
+          session_id: "fallback-session",
+        },
+      ]);
+
+      const sessionRoute = await loadRoute(
+        "./src/app/api/tasks/[id]/session/route.ts"
+      );
+      const response = await json(
+        await sessionRoute.GET(
+          request("http://localhost/api/tasks/task-claude-fallback/session"),
+          { params: Promise.resolve({ id: "task-claude-fallback" }) }
+        )
+      );
+      assert.equal(response.status, 200);
+      assert.equal(response.body.messages[0].content, "Fallback found");
+    `)
+  );
+});
+
+test("session route adds task context when Codex logs omit user messages", () => {
+  runRouteAssertions(
+    withSessionState(`
+      const tasks = readJson(path.join(cortexDir, "tasks.json"));
+      writeJson(path.join(cortexDir, "tasks.json"), [
+        ...tasks,
+        {
+          ...baseTask,
+          id: "task-codex-fallback",
+          title: "Codex fallback task",
+          description: "",
+          agent_runner: "codex",
+          session_id: "saved-session",
+          last_run_at: "2026-05-01T00:10:00.000Z",
+        },
+      ]);
+      fs.writeFileSync(
+        path.join(logsDir, "task-task-codex-fallback-001.jsonl"),
+        [
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: "Only assistant output" },
+          }),
+        ].join("\\n")
+      );
+
+      const sessionRoute = await loadRoute(
+        "./src/app/api/tasks/[id]/session/route.ts"
+      );
+      const response = await json(
+        await sessionRoute.GET(
+          request("http://localhost/api/tasks/task-codex-fallback/session"),
+          { params: Promise.resolve({ id: "task-codex-fallback" }) }
+        )
+      );
+      assert.equal(response.status, 200);
+      assert.equal(response.body.session_id, "saved-session");
+      assert.equal(response.body.messages[0].role, "user");
+      assert.equal(
+        response.body.messages[0].content,
+        "Task description unavailable. See task page for details."
+      );
+    `)
+  );
+});
+
 test("session route returns not found for missing session data", () => {
   runRouteAssertions(
     withSessionState(`
@@ -826,6 +1016,18 @@ function withReviewState(body: string) {
           "#!/usr/bin/env node",
           "const { appendFileSync } = require('node:fs');",
           "if (process.env.FAKE_GH_CALLS_FILE) appendFileSync(process.env.FAKE_GH_CALLS_FILE, process.argv.slice(2).join(' ') + '\\\\n');",
+          "process.exit(0);",
+          "",
+        ].join("\\n"),
+        { mode: 0o755 }
+      );
+      fs.writeFileSync(
+        path.join(binDir, "codex"),
+        [
+          "#!/usr/bin/env node",
+          "process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'review-session' }) + '\\\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Fresh summary' } }) + '\\\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 11, output_tokens: 7 } }) + '\\\\n');",
           "process.exit(0);",
           "",
         ].join("\\n"),
@@ -1014,6 +1216,34 @@ test("review summarize route validates cached review state", () => {
         ))).status,
         409
       );
+    `)
+  );
+});
+
+test("review summarize route launches Codex summaries with overrides", () => {
+  runRouteAssertions(
+    withReviewState(`
+      const summarizeRoute = await loadRoute("./src/app/api/reviews/summarize/route.ts");
+      const summarized = await json(
+        await summarizeRoute.POST(
+          request("http://localhost/api/reviews/summarize", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pr_url: prUrl,
+              runtime: "codex",
+              effort: "high",
+              model: "gpt-test",
+            }),
+          })
+        )
+      );
+      assert.equal(summarized.status, 200);
+      assert.equal(summarized.body.summary, "Fresh summary");
+      assert.equal(summarized.body.runtime, "codex");
+      assert.equal(summarized.body.effort, "high");
+      assert.equal(summarized.body.model, "gpt-test");
+      assert.equal(summarized.body.session_id, "review-session");
     `)
   );
 });

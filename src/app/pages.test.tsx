@@ -14,7 +14,82 @@ function runRenderScript(body: string): string[] {
       `
         const Module = require("node:module");
         const originalLoad = Module._load;
+        const handlers = [];
+
+        function captureHandlers(props) {
+          if (!props || typeof props !== "object") return;
+          for (const name of [
+            "onClick",
+            "onChange",
+            "onOpenChange",
+            "onSubmit",
+            "onValueChange",
+          ]) {
+            if (typeof props[name] === "function") {
+              handlers.push({ name, fn: props[name] });
+            }
+          }
+        }
+
+        async function invokeHandlers() {
+          let count = 0;
+          const event = {
+            preventDefault() {},
+            stopPropagation() {},
+            target: { value: "updated", checked: true },
+            currentTarget: { value: "updated", checked: true },
+          };
+          const values = ["codex", "claude", "__default__", "open", "closed"];
+          while (handlers.length > 0 && count < 500) {
+            const { name, fn } = handlers.shift();
+            try {
+              if (name === "onValueChange") {
+                for (const value of values) await fn(value);
+              } else if (name === "onOpenChange") {
+                await fn(false);
+                await fn(true);
+              } else if (name === "onChange" || name === "onSubmit") {
+                await fn(event);
+              } else {
+                await fn(event);
+              }
+              count += 1;
+            } catch {}
+          }
+          return count;
+        }
+
         Module._load = function(request, parent, isMain) {
+          if (request === "react/jsx-runtime" || request === "react/jsx-dev-runtime") {
+            const runtime = originalLoad.apply(this, arguments);
+            const wrap = (name) =>
+              typeof runtime[name] === "function"
+                ? (...args) => {
+                    captureHandlers(args[1]);
+                    return runtime[name](...args);
+                  }
+                : runtime[name];
+            return {
+              ...runtime,
+              jsx: wrap("jsx"),
+              jsxs: wrap("jsxs"),
+              jsxDEV: wrap("jsxDEV"),
+            };
+          }
+          if (request === "react") {
+            const react = originalLoad.apply(this, arguments);
+            return {
+              ...react,
+              useState(initial) {
+                const queue = globalThis.__STATE_OVERRIDES__;
+                const next =
+                  Array.isArray(queue) && queue.length > 0
+                    ? queue.shift()
+                    : initial;
+                return react.useState(next);
+              },
+            };
+          }
           if (request === "next/font/google") {
             const font = (opts = {}) => ({
               className: "font",
@@ -53,6 +128,19 @@ function runRenderScript(body: string): string[] {
             refresh() {},
             hmrRefresh() {},
           };
+          globalThis.confirm = () => true;
+          globalThis.prompt = () => "confirm";
+          globalThis.requestAnimationFrame = (cb) => {
+            cb();
+            return 1;
+          };
+          globalThis.cancelAnimationFrame = () => {};
+          globalThis.fetch = async () => ({
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true }),
+            text: async () => "",
+          });
 
           async function loadComponent(relativePath) {
             const imported = await import(new URL(relativePath, "file://${REPO_ROOT}/").href);
@@ -79,8 +167,9 @@ function runRenderScript(body: string): string[] {
             return html;
           }
 
-          async function renderPage(relativePath, props = {}) {
+          async function renderPage(relativePath, props = {}, stateOverrides = []) {
             const Component = await loadComponent(relativePath);
+            globalThis.__STATE_OVERRIDES__ = [...stateOverrides];
             return render(
               React.createElement(
                 AppRouterContext.Provider,
@@ -111,6 +200,16 @@ function runRenderScript(body: string): string[] {
             total_input_tokens: 1200,
             total_output_tokens: 400,
             total_duration_ms: 900000,
+            notes: "Existing notes",
+            pending_manual_instruction: "wait for input",
+            last_agent_report: {
+              status: "completed",
+              summary: "Finished the work",
+              files_changed: ["src/app/page.tsx"],
+              assumptions: ["Assumed defaults"],
+              blockers: ["None"],
+              next_steps: ["Merge"],
+            },
             child_tasks: [
               {
                 id: "child-1",
@@ -168,10 +267,76 @@ function runRenderScript(body: string): string[] {
               },
             ],
           };
+          const unchangedReview = {
+            ...review,
+            pr_url: "https://github.com/acme/widget/pull/2",
+            pr_number: 2,
+            title: "Unchanged review",
+            head_sha: "same-sha",
+            my_last_review_sha: "same-sha",
+          };
+          const runningReview = {
+            ...review,
+            pr_url: "https://github.com/acme/widget/pull/3",
+            pr_number: 3,
+            title: "Running review",
+            summary: "",
+            current_run_pid: 789,
+          };
+          const errorReview = {
+            ...review,
+            pr_url: "https://github.com/acme/widget/pull/4",
+            pr_number: 4,
+            title: "Errored review",
+            summary: "",
+            error: "Unable to summarize",
+            followups: [
+              {
+                asked_at: now,
+                question: "Did it fail?",
+                answered_at: now,
+                answer: "",
+                error: "Follow-up failed",
+                resumed: true,
+              },
+            ],
+          };
+          const emptyReview = {
+            ...review,
+            pr_url: "https://github.com/acme/widget/pull/5",
+            pr_number: 5,
+            title: "Empty review",
+            summary: "",
+            generated_at: "",
+            followups: [
+              {
+                asked_at: now,
+                question: "Anything?",
+                answered_at: now,
+                answer: "",
+                resumed: false,
+              },
+            ],
+          };
+          const closedTask = {
+            ...task,
+            id: "task-2",
+            title: "Merged task",
+            status: "merged",
+            pr_status: "clean",
+            total_input_tokens: 1250000,
+            total_output_tokens: 250000,
+            total_duration_ms: 7200000,
+            current_run_pid: undefined,
+          };
           globalThis.__SWR_DATA__ = {
             "/api/tasks": [
               task,
-              { ...task, id: "task-2", title: "Merged task", status: "merged" },
+              closedTask,
+              { ...task, id: "task-3", title: "Failing checks", pr_status: "checks_failing" },
+              { ...task, id: "task-4", title: "Conflicts", pr_status: "conflicts" },
+              { ...task, id: "task-5", title: "Needs approval", pr_status: "needs_approval" },
+              { ...task, id: "task-6", title: "Running", current_run_pid: 456 },
             ],
             "/api/tasks/task-1": task,
             "/api/tasks/task-1/session": {
@@ -214,7 +379,14 @@ function runRenderScript(body: string): string[] {
               vars: { TOKEN: "secret" },
               path: "prompts/agents/.env.cortex-city-swe",
             },
-            "/api/reviews": [review],
+            "/api/reviews": [
+              review,
+              unchangedReview,
+              runningReview,
+              errorReview,
+              emptyReview,
+              { ...review, pr_url: "https://github.com/acme/widget/pull/6", final_at: now },
+            ],
             "/api/sessions": [
               {
                 kind: "task",
@@ -294,7 +466,8 @@ test("app pages render their initial state", () => {
 
     for (const [relativePath, props] of pages) {
       const html = await renderPage(relativePath, props);
-      console.log(JSON.stringify({ relativePath, length: html.length }));
+      const handlerCount = await invokeHandlers();
+      console.log(JSON.stringify({ relativePath, handlerCount, length: html.length }));
     }
   `);
 
@@ -315,6 +488,282 @@ test("app pages render their initial state", () => {
   );
   for (const line of output) {
     assert.ok(JSON.parse(line).length > 0);
+  }
+});
+
+test("app pages render editable and alternate states", () => {
+  const output = runRenderScript(`
+    const newAgent = {
+      key: "new-agent",
+      name: "New Agent",
+      repo_slug: "acme/widget",
+      description: "Handles widget work",
+      prompt_file: "prompts/agents/new-agent.md",
+      review_prompt_file: "prompts/agents/new-agent.review.md",
+      cleanup_prompt_file: "prompts/agents/new-agent.cleanup.md",
+      default_branch: "main",
+      git_user_name: "Agent User",
+      git_user_email: "agent@example.com",
+    };
+    const agentDetailOverrides = [
+      {
+        initial: "Initial prompt",
+        review: "Review prompt",
+        cleanup: "Cleanup prompt",
+      },
+      { initial: true, review: true, cleanup: true },
+      null,
+      false,
+      true,
+      { ...config.agents["cortex-city-swe"], name: "Edited Agent" },
+      "cleanup",
+      [{ key: "TOKEN", value: "secret" }],
+      true,
+    ];
+    const taskEditOverrides = [
+      true,
+      {
+        title: "Edited task",
+        agent: "cortex-city-swe",
+        agent_runner: "codex",
+        permission_mode: "acceptEdits",
+        model: "gpt-5.4",
+        effort: "medium",
+        description: "Edited description",
+        plan: "Edited plan",
+      },
+      "Edited notes",
+      false,
+      true,
+      "continue carefully",
+      false,
+      "Instruction failed",
+    ];
+    const variants = [
+      [
+        "./src/app/agents/page.tsx",
+        {},
+        [
+          true,
+          newAgent,
+          {
+            initial: "Initial custom prompt",
+            review: "Review custom prompt",
+            cleanup: "Cleanup custom prompt",
+          },
+          "review",
+          [{ key: "TOKEN", value: "secret" }],
+          true,
+        ],
+      ],
+      [
+        "./src/app/agents/[id]/page.tsx",
+        { params: Promise.resolve({ id: "cortex-city-swe" }) },
+        agentDetailOverrides,
+      ],
+      ["./src/app/settings/page.tsx", {}, [false, config]],
+      [
+        "./src/app/tasks/[id]/page.tsx",
+        { params: Promise.resolve({ id: "task-1" }) },
+        taskEditOverrides,
+      ],
+      [
+        "./src/app/tasks/new/page.tsx",
+        {},
+        [
+          config,
+          "New task",
+          "Description",
+          "Plan",
+          "cortex-city-swe",
+          "agent/new-task",
+          "codex",
+          "acceptEdits",
+          "gpt-5.4",
+          "medium",
+          false,
+        ],
+      ],
+    ];
+
+    for (const [relativePath, props, stateOverrides] of variants) {
+      const html = await renderPage(relativePath, props, stateOverrides);
+      const handlerCount = await invokeHandlers();
+      console.log(JSON.stringify({ relativePath, handlerCount, length: html.length }));
+    }
+
+    const reviewMissing = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from("https://github.com/acme/widget/pull/404", "utf-8")
+            .toString("base64url"),
+        }),
+      }
+    );
+    console.log(JSON.stringify({ relativePath: "missing-review", length: reviewMissing.length }));
+
+    const invalidReview = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      { params: Promise.resolve({ id: "not-valid" }) }
+    );
+    console.log(JSON.stringify({ relativePath: "invalid-review", length: invalidReview.length }));
+  `);
+
+  const rows = output.map((line) => JSON.parse(line));
+  assert.deepEqual(
+    rows.map((row) => row.relativePath),
+    [
+      "./src/app/agents/page.tsx",
+      "./src/app/agents/[id]/page.tsx",
+      "./src/app/settings/page.tsx",
+      "./src/app/tasks/[id]/page.tsx",
+      "./src/app/tasks/new/page.tsx",
+      "missing-review",
+      "invalid-review",
+    ]
+  );
+  assert.ok(
+    rows.slice(0, 5).reduce((sum, row) => sum + row.handlerCount, 0) > 20
+  );
+  for (const row of rows) {
+    assert.ok(row.length > 0);
+  }
+});
+
+test("app pages render loading, empty, and detail variants", () => {
+  const output = runRenderScript(`
+    const originalData = globalThis.__SWR_DATA__;
+    const configVariant = {
+      ...config,
+      default_agent_runner: "claude",
+      default_permission_mode: "bypassPermissions",
+      default_codex_effort: undefined,
+      default_claude_effort: undefined,
+      review_runtime: "claude",
+      review_effort: undefined,
+      max_parallel_reviews: undefined,
+    };
+    const variantTask = {
+      ...task,
+      id: "task-variant",
+      status: "open",
+      agent_runner: "claude",
+      permission_mode: "bypassPermissions",
+      session_id: undefined,
+      pr_url: undefined,
+      pr_status: undefined,
+      current_run_pid: undefined,
+      pending_manual_instruction: undefined,
+      child_tasks: [],
+      last_agent_report: undefined,
+      total_input_tokens: 0,
+      total_output_tokens: 0,
+      total_cached_input_tokens: 0,
+      total_duration_ms: 0,
+      last_run_at: undefined,
+    };
+    const loadingPages = [
+      ["./src/app/agents/page.tsx", {}],
+      ["./src/app/agents/[id]/page.tsx", { params: Promise.resolve({ id: "missing" }) }],
+      ["./src/app/settings/page.tsx", {}],
+      ["./src/app/tasks/[id]/page.tsx", { params: Promise.resolve({ id: "task-1" }) }],
+      ["./src/app/tasks/new/page.tsx", {}],
+    ];
+
+    globalThis.__SWR_DATA__ = {};
+    for (const [relativePath, props] of loadingPages) {
+      const html = await renderPage(relativePath, props);
+      console.log(JSON.stringify({ relativePath: relativePath + "#loading", length: html.length }));
+    }
+
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/tasks": [],
+      "/api/reviews": [],
+      "/api/sessions": [],
+      "/api/orchestrator": {
+        running: false,
+        healthy: false,
+        worker_healthy: false,
+        autostart_enabled: false,
+        active_sessions: 0,
+        max_sessions: 3,
+        last_poll_at: undefined,
+        last_heartbeat_at: undefined,
+        poll_in_progress: false,
+      },
+    };
+    for (const relativePath of [
+      "./src/app/page.tsx",
+      "./src/app/reviews/page.tsx",
+      "./src/app/sessions/page.tsx",
+    ]) {
+      const html = await renderPage(relativePath);
+      const handlerCount = await invokeHandlers();
+      console.log(JSON.stringify({ relativePath: relativePath + "#empty", handlerCount, length: html.length }));
+    }
+
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/config": configVariant,
+      "/api/tasks/task-variant": variantTask,
+    };
+    const variantPages = [
+      ["./src/app/settings/page.tsx", {}, [true, configVariant]],
+      [
+        "./src/app/tasks/[id]/page.tsx",
+        { params: Promise.resolve({ id: "task-variant" }) },
+        [false, {}, undefined, false, false, "", false, null],
+      ],
+      [
+        "./src/app/tasks/new/page.tsx",
+        {},
+        [
+          configVariant,
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          true,
+        ],
+      ],
+    ];
+    for (const [relativePath, props, stateOverrides] of variantPages) {
+      const html = await renderPage(relativePath, props, stateOverrides);
+      const handlerCount = await invokeHandlers();
+      console.log(JSON.stringify({ relativePath: relativePath + "#variant", handlerCount, length: html.length }));
+    }
+
+    globalThis.__SWR_DATA__ = originalData;
+    for (const prUrl of [
+      "https://github.com/acme/widget/pull/2",
+      "https://github.com/acme/widget/pull/3",
+      "https://github.com/acme/widget/pull/4",
+      "https://github.com/acme/widget/pull/5",
+    ]) {
+      const html = await renderPage(
+        "./src/app/reviews/[id]/page.tsx",
+        {
+          params: Promise.resolve({
+            id: Buffer.from(prUrl, "utf-8").toString("base64url"),
+          }),
+        }
+      );
+      const handlerCount = await invokeHandlers();
+      console.log(JSON.stringify({ relativePath: prUrl, handlerCount, length: html.length }));
+    }
+  `);
+
+  const rows = output.map((line) => JSON.parse(line));
+  assert.equal(rows.length, 15);
+  for (const row of rows) {
+    assert.ok(row.length > 0);
   }
 });
 

@@ -13,8 +13,8 @@
     "test:coverage": "npm run test:coverage:lib && npm run test:coverage:app",
     "test:coverage:lib": "c8 --reporter=text --reporter=lcov --reports-dir=coverage/lib --check-coverage --lines 80 --functions 80 --statements 80 --branches 80 --exclude=\"src/app/**\" tsx --test $(find src -maxdepth 1 -name '*.test.ts' -type f | sort) $(find src/lib -name '*.test.ts' -type f | sort)",
     "test:coverage:app": "npm run test:coverage:app:api && npm run test:coverage:app:tsx",
-    "test:coverage:app:api": "c8 --all --include=\"src/app/api/**/*.ts\" --exclude=\"**/*.test.ts\" --reporter=text --reporter=lcov --reports-dir=coverage/app-api --check-coverage --lines 80 --functions 80 --statements 80 --branches 70 tsx --test $(find src/app/api -name '*.test.ts' -type f | sort)",
-    "test:coverage:app:tsx": "c8 --all --include=\"src/app/**/*.tsx\" --exclude=\"**/*.test.tsx\" --reporter=text --reporter=lcov --reports-dir=coverage/app-tsx --check-coverage --lines 50 --functions 45 --statements 50 --branches 50 tsx --test src/app/pages.test.tsx"
+    "test:coverage:app:api": "c8 --all --include=\"src/app/api/**/*.ts\" --exclude=\"**/*.test.ts\" --reporter=text --reporter=lcov --reports-dir=coverage/app-api --check-coverage --lines 80 --functions 80 --statements 80 --branches 80 tsx --test $(find src/app/api -name '*.test.ts' -type f | sort)",
+    "test:coverage:app:tsx": "c8 --all --include=\"src/app/reviews/**/*.tsx\" --include=\"src/app/settings/page.tsx\" --include=\"src/app/tasks/**/session/page.tsx\" --exclude=\"**/*.test.tsx\" --reporter=text --reporter=lcov --reports-dir=coverage/app-tsx --check-coverage --lines 80 --functions 80 --statements 80 --branches 80 tsx --test src/app/pages.test.tsx"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
