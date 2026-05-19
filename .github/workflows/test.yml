@@ -27,11 +27,14 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Run coverage
-        run: npm run test:coverage
+      - name: Run lib coverage
+        run: npm run test:coverage:lib
+
+      - name: Run app coverage
+        run: npm run test:coverage:app
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-lcov
-          path: coverage/lcov.info
+          path: coverage/**/lcov.info
