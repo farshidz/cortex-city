@@ -1,13 +1,7 @@
 name: Deploy Production
 
 on:
-  workflow_run:
-    workflows:
-      - Test
-    branches:
-      - main
-    types:
-      - completed
+  workflow_call:
 
 concurrency:
   group: deploy-production
@@ -19,22 +13,20 @@ permissions:
 jobs:
   deploy:
     name: Deploy over SSH
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     environment: production
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Confirm commit is current main
         id: current-main
         run: |
           set -euo pipefail
 
-          tested_sha="${{ github.event.workflow_run.head_sha }}"
+          tested_sha="${{ github.sha }}"
           git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
           current_main="$(git rev-parse refs/remotes/origin/main)"
 
