@@ -70,11 +70,13 @@ function runRouteScript(workspace: string, body: string) {
   return JSON.parse(output);
 }
 
-test("API routes read and mutate Cortex state in an isolated workspace", () => {
+function runRouteAssertions(body: string) {
   const workspace = createTempWorkspace();
-  const result = runRouteScript(
-    workspace,
-    `
+  assert.deepEqual(runRouteScript(workspace, body), { ok: true });
+}
+
+function withCortexState(body: string) {
+  return `
       const cortexDir = path.join(workspace, ".cortex");
       const promptsDir = path.join(workspace, "prompts", "templates");
       const agentPromptDir = path.join(workspace, "prompts", "agents");
@@ -167,6 +169,13 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         ].join("\\n")
       );
 
+      ${body}
+    `;
+}
+
+test("config route reads and updates Cortex config", () => {
+  runRouteAssertions(
+    withCortexState(`
       const configRoute = await loadRoute("./src/app/api/config/route.ts");
       assert.deepEqual((await json(await configRoute.GET())).body.agents, config.agents);
       const updatedConfig = await json(
@@ -179,7 +188,14 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         )
       );
       assert.equal(updatedConfig.body.max_parallel_sessions, 5);
+      assert.equal(readJson(path.join(cortexDir, "config.json")).max_parallel_sessions, 5);
+    `)
+  );
+});
 
+test("prompts route returns templates with missing cleanup fallback", () => {
+  runRouteAssertions(
+    withCortexState(`
       const promptsRoute = await loadRoute("./src/app/api/prompts/route.ts");
       const prompts = await json(await promptsRoute.GET());
       assert.deepEqual(prompts.body, {
@@ -187,7 +203,13 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         review: "Review template",
         cleanup: "(template not found)",
       });
+    `)
+  );
+});
 
+test("agent env route reads, validates, and writes env files", () => {
+  runRouteAssertions(
+    withCortexState(`
       const agentEnvRoute = await loadRoute("./src/app/api/agents/[id]/env/route.ts");
       const missingEnv = await json(
         await agentEnvRoute.GET(request("http://localhost/api/agents/missing/env"), {
@@ -195,6 +217,7 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         })
       );
       assert.equal(missingEnv.status, 404);
+
       const envBefore = await json(
         await agentEnvRoute.GET(
           request("http://localhost/api/agents/cortex-city-swe/env"),
@@ -205,6 +228,7 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         TOKEN: "secret=value",
         PLAIN: "visible",
       });
+
       const envAfter = await json(
         await agentEnvRoute.PUT(
           request("http://localhost/api/agents/cortex-city-swe/env", {
@@ -222,7 +246,13 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         fs.readFileSync(path.join(agentPromptDir, ".env.cortex-city-swe"), "utf-8"),
         /TOKEN=updated\\nEXTRA=value\\n/
       );
+    `)
+  );
+});
 
+test("agent prompt route reads configured modes and writes cleanup prompts", () => {
+  runRouteAssertions(
+    withCortexState(`
       const agentPromptRoute = await loadRoute(
         "./src/app/api/agents/[id]/prompt/route.ts"
       );
@@ -233,6 +263,7 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         )
       );
       assert.equal(missingPrompt.status, 404);
+
       const reviewPrompt = await json(
         await agentPromptRoute.GET(
           request("http://localhost/api/agents/cortex-city-swe/prompt?mode=review"),
@@ -241,6 +272,7 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
       );
       assert.equal(reviewPrompt.body.content, "Review prompt");
       assert.equal(reviewPrompt.body.mode, "review");
+
       const cleanupPrompt = await json(
         await agentPromptRoute.PUT(
           request("http://localhost/api/agents/cortex-city-swe/prompt?mode=cleanup", {
@@ -256,20 +288,42 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         fs.readFileSync(path.join(agentPromptDir, "cortex-city-swe.cleanup.md"), "utf-8"),
         "Cleanup prompt"
       );
+    `)
+  );
+});
 
+test("cortex git route reports disabled state outside cortex git repos", () => {
+  runRouteAssertions(
+    withCortexState(`
       const cortexGitRoute = await loadRoute("./src/app/api/cortex-git/route.ts");
       assert.deepEqual((await json(await cortexGitRoute.GET())).body, {
         enabled: false,
         pushing: false,
       });
+    `)
+  );
+});
 
+test("orchestrator route reports active sessions and disabled autostart", () => {
+  runRouteAssertions(
+    withCortexState(`
+      writeJson(path.join(cortexDir, "config.json"), {
+        ...config,
+        max_parallel_sessions: 5,
+      });
       const orchestratorRoute = await loadRoute("./src/app/api/orchestrator/route.ts");
       const orchestratorStatus = await json(await orchestratorRoute.GET());
       assert.equal(orchestratorStatus.body.max_sessions, 5);
       assert.equal(orchestratorStatus.body.active_sessions, 1);
       const orchestratorPost = await json(await orchestratorRoute.POST());
       assert.equal(orchestratorPost.body.ok, false);
+    `)
+  );
+});
 
+test("sessions route lists active tasks and validates start requests", () => {
+  runRouteAssertions(
+    withCortexState(`
       const sessionsRoute = await loadRoute("./src/app/api/sessions/route.ts");
       const sessions = await json(await sessionsRoute.GET());
       assert.equal(sessions.body.length, 1);
@@ -290,12 +344,19 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         })))).status,
         404
       );
+    `)
+  );
+});
 
+test("tasks route filters and creates tasks with normalized defaults", () => {
+  runRouteAssertions(
+    withCortexState(`
       const tasksRoute = await loadRoute("./src/app/api/tasks/route.ts");
       const openTasks = await json(
         await tasksRoute.GET(request("http://localhost/api/tasks?status=open"))
       );
       assert.equal(openTasks.body.length, 1);
+
       const createdTask = await json(
         await tasksRoute.POST(
           request("http://localhost/api/tasks", {
@@ -317,7 +378,13 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
       assert.equal(createdTask.body.agent_runner, "claude");
       assert.equal(createdTask.body.permission_mode, "acceptEdits");
       assert.equal(createdTask.body.model, "claude-sonnet-4-6");
+    `)
+  );
+});
 
+test("task detail route returns missing status and child summaries", () => {
+  runRouteAssertions(
+    withCortexState(`
       const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
       const missingTask = await json(
         await taskRoute.GET(request("http://localhost/api/tasks/missing"), {
@@ -325,6 +392,7 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         })
       );
       assert.equal(missingTask.status, 404);
+
       const taskWithChildren = await json(
         await taskRoute.GET(request("http://localhost/api/tasks/task-1"), {
           params: Promise.resolve({ id: "task-1" }),
@@ -338,6 +406,14 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
           agent: "cortex-city-swe",
         },
       ]);
+    `)
+  );
+});
+
+test("task detail route updates task metadata with normalized permissions", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
       const updatedTask = await json(
         await taskRoute.PUT(
           request("http://localhost/api/tasks/task-1", {
@@ -365,6 +441,14 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         ))).status,
         404
       );
+    `)
+  );
+});
+
+test("task detail route guards running tasks and deletes removable tasks", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
       assert.equal(
         (await json(await taskRoute.DELETE(
           request("http://localhost/api/tasks/blocked-delete", { method: "DELETE" }),
@@ -386,7 +470,13 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         ))).status,
         404
       );
+    `)
+  );
+});
 
+test("task instruction route rejects invalid manual instructions", () => {
+  runRouteAssertions(
+    withCortexState(`
       const instructionRoute = await loadRoute(
         "./src/app/api/tasks/[id]/instruction/route.ts"
       );
@@ -439,6 +529,21 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         ))).status,
         400
       );
+    `)
+  );
+});
+
+test("task instruction route records valid manual instructions", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const instructionRoute = await loadRoute(
+        "./src/app/api/tasks/[id]/instruction/route.ts"
+      );
+      writeJson(path.join(cortexDir, "tasks.json"), [
+        baseTask,
+        { ...baseTask, id: "final-task", status: "merged" },
+        { ...baseTask, id: "pending-task", pending_manual_instruction: "wait" },
+      ]);
       const instructed = await json(
         await instructionRoute.POST(
           request("http://localhost/api/tasks/task-1/instruction", {
@@ -450,17 +555,12 @@ test("API routes read and mutate Cortex state in an isolated workspace", () => {
         )
       );
       assert.equal(instructed.body.pending_manual_instruction, "continue carefully");
-    `
+    `)
   );
-
-  assert.deepEqual(result, { ok: true });
 });
 
-test("session route loads Codex logs and Claude session files", () => {
-  const workspace = createTempWorkspace();
-  const result = runRouteScript(
-    workspace,
-    `
+function withSessionState(body: string) {
+  return `
       const cortexDir = path.join(workspace, ".cortex");
       const logsDir = path.join(workspace, "logs");
       const claudeProjectsDir = path.join(workspace, ".claude", "projects");
@@ -489,7 +589,7 @@ test("session route loads Codex logs and Claude session files", () => {
       const claudeSessionId = "claude-session";
       fs.mkdirSync(path.join(claudeProjectsDir, projectId), { recursive: true });
       fs.writeFileSync(
-        path.join(claudeProjectsDir, projectId, \`\${claudeSessionId}.jsonl\`),
+        path.join(claudeProjectsDir, projectId, claudeSessionId + ".jsonl"),
         [
           JSON.stringify({
             type: "user",
@@ -578,6 +678,13 @@ test("session route loads Codex logs and Claude session files", () => {
         ].join("\\n")
       );
 
+      ${body}
+    `;
+}
+
+test("session route loads Codex log messages", () => {
+  runRouteAssertions(
+    withSessionState(`
       const sessionRoute = await loadRoute(
         "./src/app/api/tasks/[id]/session/route.ts"
       );
@@ -592,7 +699,16 @@ test("session route loads Codex logs and Claude session files", () => {
       assert.equal(codex.body.agent_runner, "codex");
       assert.equal(codex.body.message_count, 4);
       assert.match(codex.body.messages[2].content, /Ran command: npm test/);
+    `)
+  );
+});
 
+test("session route loads Claude session files", () => {
+  runRouteAssertions(
+    withSessionState(`
+      const sessionRoute = await loadRoute(
+        "./src/app/api/tasks/[id]/session/route.ts"
+      );
       const claude = await json(
         await sessionRoute.GET(
           request("http://localhost/api/tasks/task-claude/session"),
@@ -608,7 +724,16 @@ test("session route loads Codex logs and Claude session files", () => {
           input: JSON.stringify({ file: "route.ts" }, null, 2),
         },
       ]);
+    `)
+  );
+});
 
+test("session route returns not found for missing session data", () => {
+  runRouteAssertions(
+    withSessionState(`
+      const sessionRoute = await loadRoute(
+        "./src/app/api/tasks/[id]/session/route.ts"
+      );
       assert.equal(
         (await json(await sessionRoute.GET(
           request("http://localhost/api/tasks/task-empty/session"),
@@ -623,22 +748,17 @@ test("session route loads Codex logs and Claude session files", () => {
         ))).status,
         404
       );
-    `
+    `)
   );
-
-  assert.deepEqual(result, { ok: true });
 });
 
-test("review API routes validate requests and read cached review state", () => {
-  const workspace = createTempWorkspace();
-  const result = runRouteScript(
-    workspace,
-    `
+function withReviewState(body: string) {
+  return `
       const cortexDir = path.join(workspace, ".cortex");
       const binDir = path.join(workspace, "bin");
       fs.mkdirSync(cortexDir, { recursive: true });
       fs.mkdirSync(binDir, { recursive: true });
-      process.env.PATH = \`\${binDir}:\${process.env.PATH || ""}\`;
+      process.env.PATH = binDir + ":" + (process.env.PATH || "");
 
       const prUrl = "https://github.com/acme/widget/pull/1";
       const staleUrl = "https://github.com/acme/widget/pull/2";
@@ -713,12 +833,25 @@ test("review API routes validate requests and read cached review state", () => {
       );
       process.env.FAKE_GH_CALLS_FILE = path.join(workspace, "gh-calls.log");
 
+      ${body}
+    `;
+}
+
+test("reviews route lists cached reviews by recency", () => {
+  runRouteAssertions(
+    withReviewState(`
       const reviewsRoute = await loadRoute("./src/app/api/reviews/route.ts");
       const reviews = await json(await reviewsRoute.GET());
       assert.equal(reviews.body[0].pr_url, "https://github.com/acme/widget/pull/3");
       assert.equal(reviews.body[1].pr_url, prUrl);
       assert.equal(reviews.body[2].pr_url, staleUrl);
+    `)
+  );
+});
 
+test("review followup route reads existing followups", () => {
+  runRouteAssertions(
+    withReviewState(`
       const followupRoute = await loadRoute("./src/app/api/reviews/followup/route.ts");
       assert.equal(
         (await json(await followupRoute.GET(
@@ -734,10 +867,18 @@ test("review API routes validate requests and read cached review state", () => {
       );
       const followups = await json(
         await followupRoute.GET(
-          request(\`http://localhost/api/reviews/followup?pr_url=\${encodeURIComponent(prUrl)}\`)
+          request("http://localhost/api/reviews/followup?pr_url=" + encodeURIComponent(prUrl))
         )
       );
       assert.equal(followups.body.followups[0].answer, "Tests changed.");
+    `)
+  );
+});
+
+test("review followup route validates followup requests", () => {
+  runRouteAssertions(
+    withReviewState(`
+      const followupRoute = await loadRoute("./src/app/api/reviews/followup/route.ts");
       assert.equal(
         (await json(await followupRoute.POST(
           request("http://localhost/api/reviews/followup", {
@@ -771,7 +912,13 @@ test("review API routes validate requests and read cached review state", () => {
         ))).status,
         400
       );
+    `)
+  );
+});
 
+test("review submit route validates review submissions", () => {
+  runRouteAssertions(
+    withReviewState(`
       const submitRoute = await loadRoute("./src/app/api/reviews/submit/route.ts");
       assert.equal(
         (await json(await submitRoute.POST(
@@ -803,6 +950,14 @@ test("review API routes validate requests and read cached review state", () => {
         ))).status,
         500
       );
+    `)
+  );
+});
+
+test("review submit route invokes gh for valid submissions", () => {
+  runRouteAssertions(
+    withReviewState(`
+      const submitRoute = await loadRoute("./src/app/api/reviews/submit/route.ts");
       const submitted = await json(
         await submitRoute.POST(
           request("http://localhost/api/reviews/submit", {
@@ -817,7 +972,13 @@ test("review API routes validate requests and read cached review state", () => {
         fs.readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf-8"),
         /pr review https:\\/\\/github.com\\/acme\\/widget\\/pull\\/1 --approve --body LGTM/
       );
+    `)
+  );
+});
 
+test("review summarize route validates cached review state", () => {
+  runRouteAssertions(
+    withReviewState(`
       const summarizeRoute = await loadRoute("./src/app/api/reviews/summarize/route.ts");
       assert.equal(
         (await json(await summarizeRoute.POST(
@@ -853,8 +1014,6 @@ test("review API routes validate requests and read cached review state", () => {
         ))).status,
         409
       );
-    `
+    `)
   );
-
-  assert.deepEqual(result, { ok: true });
 });
