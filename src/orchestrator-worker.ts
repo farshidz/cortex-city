@@ -27,6 +27,7 @@ installLogger();
 
 // Track active sessions
 const activePids = new Map<string, number>();
+const activeReviewPids = new Map<string, number>();
 const STATE_FILE = path.join(CORTEX_DIR, "orchestrator-state.json");
 let pollInFlight: Promise<void> | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
@@ -60,7 +61,7 @@ async function runPollCycle() {
     writeState();
     console.log(`[worker] Poll started at ${pollTime}`);
     try {
-      await pollOnce(activePids);
+      await pollOnce(activePids, undefined, activeReviewPids);
     } catch (err) {
       console.error("[worker] Poll error:", err);
     }
@@ -102,6 +103,11 @@ function shutdown(signal: NodeJS.Signals, exitCode = 0) {
   console.log(`[worker] Shutting down on ${signal}...`);
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   for (const [, pid] of activePids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+  }
+  for (const [, pid] of activeReviewPids) {
     try {
       process.kill(pid, "SIGTERM");
     } catch {}

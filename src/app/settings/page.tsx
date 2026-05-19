@@ -19,11 +19,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
 import type {
+  AgentRuntime,
   ClaudeEffort,
   CodexEffort,
   OrchestratorConfig,
   PermissionMode,
+  TaskEffort,
 } from "@/lib/types";
 import { getEffortOptions, getPermissionOptions } from "@/lib/runtime-config";
 
@@ -249,6 +252,92 @@ export default function SettingsPage() {
                 ))}
               </SelectContent>
             </Select>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Reviews</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Review Prompt</Label>
+            <Textarea
+              rows={8}
+              value={form.review_prompt ?? ""}
+              placeholder="Default review prompt will be used if left blank."
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  review_prompt: e.target.value || undefined,
+                })
+              }
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Default Review Runtime</Label>
+            <Select
+              value={form.review_runtime || form.default_agent_runner}
+              onValueChange={(v) =>
+                v &&
+                setForm({
+                  ...form,
+                  review_runtime: v as AgentRuntime,
+                  review_effort: undefined,
+                })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="claude">Claude Code</SelectItem>
+                <SelectItem value="codex">Codex</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label>Default Review Effort</Label>
+            <Select
+              value={form.review_effort || UNSET_VALUE}
+              onValueChange={(v) =>
+                setForm({
+                  ...form,
+                  review_effort:
+                    v === UNSET_VALUE ? undefined : (v as TaskEffort),
+                })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={UNSET_VALUE}>CLI default</SelectItem>
+                {getEffortOptions(
+                  form.review_runtime || form.default_agent_runner
+                ).map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label>Max Parallel Review Runs</Label>
+            <Input
+              type="number"
+              min={1}
+              max={10}
+              value={form.max_parallel_reviews ?? 2}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  max_parallel_reviews: parseInt(e.target.value) || 1,
+                })
+              }
+            />
           </div>
         </CardContent>
       </Card>

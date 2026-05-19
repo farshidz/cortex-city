@@ -4,6 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { ThemeProvider } from "next-themes";
 import { CortexGitStatusIndicator } from "@/components/cortex-git-status";
+import { ReviewsNavLink } from "@/components/reviews-nav-link";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import "./globals.css";
 
@@ -59,7 +60,7 @@ export default async function RootLayout({
             </Link>
             <div className="flex flex-col gap-1 flex-1">
               <NavLink href="/">Tasks</NavLink>
-              <NavLink href="/tasks/new">New Task</NavLink>
+              <ReviewsNavLink />
               <NavLink href="/agents">Agents</NavLink>
               <NavLink href="/sessions">Sessions</NavLink>
               <NavLink href="/settings">Settings</NavLink>

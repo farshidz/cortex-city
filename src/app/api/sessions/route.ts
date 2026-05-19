@@ -13,7 +13,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "task_id required" }, { status: 400 });
   }
   const orch = getOrchestrator();
-  const killed = orch.killSession(body.task_id);
+  const killed =
+    body.kind === "review"
+      ? orch.killReviewSession(body.task_id)
+      : orch.killSession(body.task_id);
   if (!killed) {
     return NextResponse.json(
       { error: "No active session for this task" },

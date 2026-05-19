@@ -3,18 +3,30 @@
 // poll without touching process lifecycle behavior.
 import { spawnAgentSession, removeWorktree } from "./agent-runner";
 import { shouldStartFinalCleanup } from "./final-task-cleanup";
-import { getPRStateHash, getPRStatus, isPRMergedOrClosed } from "./github";
+import {
+  getPRStateHash,
+  getPRStatus,
+  getReviewRequestedPRs,
+  isPRMergedOrClosed,
+} from "./github";
 import {
   buildInterruptedTaskUpdates,
   getTaskRunMode,
   shouldResumeTask,
 } from "./orchestrator-runtime";
+import {
+  deleteReviewSummary,
+  readReviewSummaries,
+  readReviewSummaryMap,
+  upsertReviewSummary,
+} from "./review-store";
+import { spawnReviewSummary } from "./review-runner";
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
-import type { Task } from "./types";
+import type { ReviewRequest, ReviewSummary, Task } from "./types";
 
 export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 
-function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boolean {
+export function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boolean {
   return Boolean(
     (task.status === "merged" || task.status === "closed") &&
       task.final_cleanup_state === "finished" &&
@@ -23,7 +35,7 @@ function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boole
   );
 }
 
-function shouldResetStaleFinalCleanup(task: Task, hasActivePid: boolean): boolean {
+export function shouldResetStaleFinalCleanup(task: Task, hasActivePid: boolean): boolean {
   return Boolean(
     (task.status === "merged" || task.status === "closed") &&
       task.final_cleanup_state === "running" &&
@@ -41,21 +53,28 @@ export interface WorkerRuntimeDeps {
   deleteTask: typeof deleteTask;
   getPRStateHash: typeof getPRStateHash;
   getPRStatus: typeof getPRStatus;
+  getReviewRequestedPRs: typeof getReviewRequestedPRs;
   getTask: typeof getTask;
   isPRMergedOrClosed: typeof isPRMergedOrClosed;
   isPidRunning: (pid: number) => boolean;
   logger: WorkerLogger;
   readConfig: typeof readConfig;
+  readReviewSummaries: typeof readReviewSummaries;
+  readReviewSummaryMap: typeof readReviewSummaryMap;
   readTasks: typeof readTasks;
   removeWorktree: typeof removeWorktree;
   spawnAgentSession: typeof spawnAgentSession;
+  spawnReviewSummary: typeof spawnReviewSummary;
   updateTask: typeof updateTask;
+  upsertReviewSummary: typeof upsertReviewSummary;
+  deleteReviewSummary: typeof deleteReviewSummary;
 }
 
 export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   deleteTask,
   getPRStateHash,
   getPRStatus,
+  getReviewRequestedPRs,
   getTask,
   isPRMergedOrClosed,
   isPidRunning: (pid) => {
@@ -64,10 +83,15 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   },
   logger: console,
   readConfig,
+  readReviewSummaries,
+  readReviewSummaryMap,
   readTasks,
   removeWorktree,
   spawnAgentSession,
+  spawnReviewSummary,
   updateTask,
+  upsertReviewSummary,
+  deleteReviewSummary,
 };
 
 interface LaunchOptions {
@@ -115,7 +139,8 @@ async function launchTaskRun(
 
 export async function pollOnce(
   activePids = new Map<string, number>(),
-  deps: WorkerRuntimeDeps = defaultWorkerRuntimeDeps
+  deps: WorkerRuntimeDeps = defaultWorkerRuntimeDeps,
+  activeReviewPids: Map<string, number> = new Map()
 ): Promise<void> {
   deps.logger.log("[worker] Poll phase: load state");
   let tasks = deps.readTasks();
@@ -343,5 +368,147 @@ export async function pollOnce(
       },
     });
     if (didLaunch) availableSlots--;
+  }
+
+  await runReviewPhases(activeReviewPids, deps, config);
+}
+
+function prFieldsFromRequest(request: ReviewRequest) {
+  return {
+    pr_url: request.pr_url,
+    pr_number: request.pr_number,
+    repo_slug: request.repo_slug,
+    title: request.title,
+    author: request.author,
+    head_sha: request.head_sha,
+    created_at: request.created_at,
+    updated_at: request.updated_at,
+    my_last_review_sha: request.my_last_review_sha,
+  };
+}
+
+async function runReviewPhases(
+  activeReviewPids: Map<string, number>,
+  deps: WorkerRuntimeDeps,
+  config: ReturnType<typeof readConfig>
+): Promise<void> {
+  deps.logger.log("[worker] Poll phase: reconcile review pids");
+  const reviewMap = deps.readReviewSummaryMap();
+  const liveReviewKeys = new Set<string>();
+  for (const review of Object.values(reviewMap)) {
+    if (!review.current_run_pid) {
+      activeReviewPids.delete(review.pr_url);
+      continue;
+    }
+    try {
+      if (!deps.isPidRunning(review.current_run_pid)) {
+        throw new Error("process not running");
+      }
+      activeReviewPids.set(review.pr_url, review.current_run_pid);
+      liveReviewKeys.add(review.pr_url);
+    } catch {
+      deps.logger.log(
+        `[worker] Clearing orphaned review PID ${review.current_run_pid} for ${review.pr_url}`
+      );
+      activeReviewPids.delete(review.pr_url);
+      await deps.upsertReviewSummary({ ...review, current_run_pid: undefined });
+    }
+  }
+  for (const prUrl of [...activeReviewPids.keys()]) {
+    if (!liveReviewKeys.has(prUrl)) {
+      activeReviewPids.delete(prUrl);
+    }
+  }
+
+  deps.logger.log("[worker] Poll phase: scan review requests");
+  let openReviewRequests: ReviewRequest[] = [];
+  try {
+    openReviewRequests = await deps.getReviewRequestedPRs();
+  } catch (error) {
+    deps.logger.error("[worker] Failed to fetch review-requested PRs:", error);
+    return;
+  }
+
+  for (const pr of openReviewRequests) {
+    const cached = deps.readReviewSummaryMap()[pr.pr_url];
+    if (!cached) {
+      await deps.upsertReviewSummary({
+        ...prFieldsFromRequest(pr),
+        summary: "",
+        generated_at: "",
+      });
+      continue;
+    }
+    if (cached.head_sha !== pr.head_sha) {
+      await deps.upsertReviewSummary({
+        ...cached,
+        ...prFieldsFromRequest(pr),
+        summary: "",
+        generated_at: "",
+        session_id: undefined,
+        followups: [],
+        error: undefined,
+        final_at: undefined,
+      });
+      continue;
+    }
+    const wasFinal = Boolean(cached.final_at);
+    const reviewShaChanged =
+      cached.my_last_review_sha !== pr.my_last_review_sha;
+    if (wasFinal || reviewShaChanged) {
+      await deps.upsertReviewSummary({
+        ...cached,
+        ...prFieldsFromRequest(pr),
+        final_at: undefined,
+      });
+    }
+  }
+
+  const maxParallelReviews = Math.max(1, config.max_parallel_reviews ?? 2);
+  let reviewSlots = maxParallelReviews - activeReviewPids.size;
+  if (reviewSlots > 0) {
+    const refreshed = deps.readReviewSummaryMap();
+    for (const pr of openReviewRequests) {
+      if (reviewSlots <= 0) break;
+      if (activeReviewPids.has(pr.pr_url)) continue;
+      const cached = refreshed[pr.pr_url];
+      const needsSummary =
+        !cached?.summary || cached.head_sha !== pr.head_sha;
+      if (!needsSummary) continue;
+      try {
+        const { pid } = await deps.spawnReviewSummary(pr, {}, async () => {
+          activeReviewPids.delete(pr.pr_url);
+        });
+        activeReviewPids.set(pr.pr_url, pid);
+        reviewSlots--;
+        deps.logger.log(`[worker] Spawned review summary for ${pr.pr_url}`);
+      } catch (error) {
+        deps.logger.error(
+          `[worker] Failed to spawn review summary for ${pr.pr_url}:`,
+          error
+        );
+      }
+    }
+  }
+
+  deps.logger.log("[worker] Poll phase: prune old reviews");
+  const openSet = new Set(openReviewRequests.map((r) => r.pr_url));
+  const now = Date.now();
+  const reviewsForGC: ReviewSummary[] = Object.values(deps.readReviewSummaryMap());
+  for (const review of reviewsForGC) {
+    if (activeReviewPids.has(review.pr_url)) continue;
+    if (!review.final_at && !openSet.has(review.pr_url)) {
+      await deps.upsertReviewSummary({
+        ...review,
+        final_at: new Date().toISOString(),
+      });
+      continue;
+    }
+    if (
+      review.final_at &&
+      now - new Date(review.final_at).getTime() > PRUNE_AGE_MS
+    ) {
+      await deps.deleteReviewSummary(review.pr_url);
+    }
   }
 }
