@@ -628,3 +628,233 @@ test("session route loads Codex logs and Claude session files", () => {
 
   assert.deepEqual(result, { ok: true });
 });
+
+test("review API routes validate requests and read cached review state", () => {
+  const workspace = createTempWorkspace();
+  const result = runRouteScript(
+    workspace,
+    `
+      const cortexDir = path.join(workspace, ".cortex");
+      const binDir = path.join(workspace, "bin");
+      fs.mkdirSync(cortexDir, { recursive: true });
+      fs.mkdirSync(binDir, { recursive: true });
+      process.env.PATH = \`\${binDir}:\${process.env.PATH || ""}\`;
+
+      const prUrl = "https://github.com/acme/widget/pull/1";
+      const staleUrl = "https://github.com/acme/widget/pull/2";
+      writeJson(path.join(cortexDir, "config.json"), {
+        max_parallel_sessions: 2,
+        poll_interval_seconds: 30,
+        default_permission_mode: "bypassPermissions",
+        default_agent_runner: "codex",
+        agents: {},
+      });
+      writeJson(path.join(cortexDir, "reviews.json"), {
+        [staleUrl]: {
+          pr_url: staleUrl,
+          pr_number: 2,
+          repo_slug: "acme/widget",
+          title: "Older review",
+          author: "octocat",
+          head_sha: "def456",
+          created_at: "2026-05-01T00:00:00.000Z",
+          updated_at: "2026-05-01T00:00:00.000Z",
+          summary: "older",
+          generated_at: "2026-05-01T00:00:00.000Z",
+          review_state: "needs_approval",
+        },
+        [prUrl]: {
+          pr_url: prUrl,
+          pr_number: 1,
+          repo_slug: "acme/widget",
+          title: "Newer review",
+          author: "octocat",
+          head_sha: "abc123",
+          created_at: "2026-05-01T00:00:00.000Z",
+          updated_at: "2026-05-02T00:00:00.000Z",
+          summary: "current summary",
+          generated_at: "2026-05-02T00:00:00.000Z",
+          review_state: "needs_approval",
+          followups: [
+            {
+              asked_at: "2026-05-02T00:01:00.000Z",
+              question: "What changed?",
+              answered_at: "2026-05-02T00:02:00.000Z",
+              answer: "Tests changed.",
+              resumed: false,
+            },
+          ],
+        },
+        "https://github.com/acme/widget/pull/3": {
+          pr_url: "https://github.com/acme/widget/pull/3",
+          pr_number: 3,
+          repo_slug: "acme/widget",
+          title: "Running review",
+          author: "octocat",
+          head_sha: "ghi789",
+          created_at: "2026-05-03T00:00:00.000Z",
+          updated_at: "2026-05-03T00:00:00.000Z",
+          summary: "",
+          generated_at: "",
+          review_state: "needs_approval",
+          current_run_pid: 12345,
+        },
+      });
+      fs.writeFileSync(
+        path.join(binDir, "gh"),
+        [
+          "#!/usr/bin/env node",
+          "const { appendFileSync } = require('node:fs');",
+          "if (process.env.FAKE_GH_CALLS_FILE) appendFileSync(process.env.FAKE_GH_CALLS_FILE, process.argv.slice(2).join(' ') + '\\\\n');",
+          "process.exit(0);",
+          "",
+        ].join("\\n"),
+        { mode: 0o755 }
+      );
+      process.env.FAKE_GH_CALLS_FILE = path.join(workspace, "gh-calls.log");
+
+      const reviewsRoute = await loadRoute("./src/app/api/reviews/route.ts");
+      const reviews = await json(await reviewsRoute.GET());
+      assert.equal(reviews.body[0].pr_url, "https://github.com/acme/widget/pull/3");
+      assert.equal(reviews.body[1].pr_url, prUrl);
+      assert.equal(reviews.body[2].pr_url, staleUrl);
+
+      const followupRoute = await loadRoute("./src/app/api/reviews/followup/route.ts");
+      assert.equal(
+        (await json(await followupRoute.GET(
+          request("http://localhost/api/reviews/followup")
+        ))).status,
+        400
+      );
+      assert.deepEqual(
+        (await json(await followupRoute.GET(
+          request("http://localhost/api/reviews/followup?pr_url=https%3A%2F%2Fgithub.com%2Facme%2Fwidget%2Fpull%2F99")
+        ))).body,
+        { followups: [] }
+      );
+      const followups = await json(
+        await followupRoute.GET(
+          request(\`http://localhost/api/reviews/followup?pr_url=\${encodeURIComponent(prUrl)}\`)
+        )
+      );
+      assert.equal(followups.body.followups[0].answer, "Tests changed.");
+      assert.equal(
+        (await json(await followupRoute.POST(
+          request("http://localhost/api/reviews/followup", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ question: "Missing URL" }),
+          })
+        ))).status,
+        400
+      );
+      assert.equal(
+        (await json(await followupRoute.POST(
+          request("http://localhost/api/reviews/followup", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ pr_url: prUrl, question: "   " }),
+          })
+        ))).status,
+        400
+      );
+      assert.equal(
+        (await json(await followupRoute.POST(
+          request("http://localhost/api/reviews/followup", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pr_url: "https://github.com/acme/widget/pull/99",
+              question: "Anything else?",
+            }),
+          })
+        ))).status,
+        400
+      );
+
+      const submitRoute = await loadRoute("./src/app/api/reviews/submit/route.ts");
+      assert.equal(
+        (await json(await submitRoute.POST(
+          request("http://localhost/api/reviews/submit", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ decision: "approve" }),
+          })
+        ))).status,
+        400
+      );
+      assert.equal(
+        (await json(await submitRoute.POST(
+          request("http://localhost/api/reviews/submit", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ pr_url: prUrl, decision: "invalid" }),
+          })
+        ))).status,
+        400
+      );
+      assert.equal(
+        (await json(await submitRoute.POST(
+          request("http://localhost/api/reviews/submit", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ pr_url: prUrl, decision: "comment", body: "   " }),
+          })
+        ))).status,
+        500
+      );
+      const submitted = await json(
+        await submitRoute.POST(
+          request("http://localhost/api/reviews/submit", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ pr_url: prUrl, decision: "approve", body: "LGTM" }),
+          })
+        )
+      );
+      assert.deepEqual(submitted.body, { ok: true });
+      assert.match(
+        fs.readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf-8"),
+        /pr review https:\\/\\/github.com\\/acme\\/widget\\/pull\\/1 --approve --body LGTM/
+      );
+
+      const summarizeRoute = await loadRoute("./src/app/api/reviews/summarize/route.ts");
+      assert.equal(
+        (await json(await summarizeRoute.POST(
+          request("http://localhost/api/reviews/summarize", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({}),
+          })
+        ))).status,
+        400
+      );
+      assert.equal(
+        (await json(await summarizeRoute.POST(
+          request("http://localhost/api/reviews/summarize", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pr_url: "https://github.com/acme/widget/pull/99",
+            }),
+          })
+        ))).status,
+        404
+      );
+      assert.equal(
+        (await json(await summarizeRoute.POST(
+          request("http://localhost/api/reviews/summarize", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pr_url: "https://github.com/acme/widget/pull/3",
+            }),
+          })
+        ))).status,
+        409
+      );
+    `
+  );
+
+  assert.deepEqual(result, { ok: true });
+});

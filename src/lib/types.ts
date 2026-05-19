@@ -105,6 +105,60 @@ export interface OrchestratorConfig {
   default_codex_model?: string;
   default_codex_effort?: CodexEffort;
   agents: Record<string, AgentConfig>;
+  review_prompt?: string;
+  review_runtime?: AgentRuntime;
+  review_effort?: TaskEffort;
+  review_model?: string;
+  max_parallel_reviews?: number;
+}
+
+export type PRStatus =
+  | "clean"
+  | "checks_failing"
+  | "checks_pending"
+  | "needs_approval"
+  | "conflicts"
+  | "unstable"
+  | "unknown";
+
+export interface ReviewRequest {
+  pr_url: string;
+  pr_number: number;
+  repo_slug: string;
+  title: string;
+  author: string;
+  head_sha: string;
+  created_at: string;
+  updated_at: string;
+  // SHA of the most recent review the signed-in user submitted on this PR.
+  // Undefined if the user has never reviewed.
+  my_last_review_sha?: string;
+}
+
+export interface ReviewSummary extends ReviewRequest {
+  summary: string;
+  generated_at: string;
+  runtime?: AgentRuntime;
+  effort?: TaskEffort;
+  model?: string;
+  session_id?: string;
+  duration_ms?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  error?: string;
+  followups?: ReviewFollowup[];
+  final_at?: string;
+  current_run_pid?: number;
+}
+
+export interface ReviewFollowup {
+  asked_at: string;
+  question: string;
+  answered_at: string;
+  answer: string;
+  session_id?: string;
+  resumed: boolean;
+  error?: string;
 }
 
 export interface FollowupTaskRequest {
@@ -122,6 +176,9 @@ export interface ChildTaskSummary {
 }
 
 export interface ActiveSession {
+  kind: "task" | "review";
+  // For tasks this is the task id; for reviews it's the PR URL (used as the
+  // stable key in .cortex/reviews.json).
   task_id: string;
   task_title: string;
   agent: string;
