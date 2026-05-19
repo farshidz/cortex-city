@@ -1,0 +1,19 @@
+name: Main
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Test
+    uses: ./.github/workflows/test.yml
+
+  deploy-production:
+    name: Deploy Production
+    needs: test
+    permissions:
+      contents: read
+    uses: ./.github/workflows/deploy-production.yml
+    secrets: inherit
