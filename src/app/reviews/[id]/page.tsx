@@ -3,6 +3,7 @@
 import { use, useMemo, useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
+import ReactMarkdown from "react-markdown";
 import { ArrowLeft, ExternalLink, RefreshCcw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -277,13 +278,15 @@ export default function ReviewDetailPage({
             </Button>
           </div>
         </div>
-        <div className="px-4 py-4 text-sm whitespace-pre-wrap min-h-[6rem]">
+        <div className="px-4 py-4 text-sm min-h-[6rem]">
           {isSummarizing ? (
             <span className="text-muted-foreground italic">Summarizing…</span>
           ) : review.error ? (
             <span className="text-destructive">{review.error}</span>
           ) : review.summary ? (
-            review.summary
+            <div className="prose prose-sm dark:prose-invert max-w-none">
+              <ReactMarkdown>{review.summary}</ReactMarkdown>
+            </div>
           ) : (
             <span className="text-muted-foreground italic">
               No summary yet.
@@ -432,15 +435,15 @@ function FollowupBlock({ followup }: { followup: ReviewFollowup }) {
           ({followup.resumed ? "resumed session" : "fresh session"})
         </span>
       </div>
-      <div className="whitespace-pre-wrap">
-        {followup.error ? (
-          <span className="text-destructive">{followup.error}</span>
-        ) : (
-          followup.answer || (
-            <span className="text-muted-foreground italic">No answer.</span>
-          )
-        )}
-      </div>
+      {followup.error ? (
+        <div className="text-destructive">{followup.error}</div>
+      ) : followup.answer ? (
+        <div className="prose prose-sm dark:prose-invert max-w-none">
+          <ReactMarkdown>{followup.answer}</ReactMarkdown>
+        </div>
+      ) : (
+        <div className="text-muted-foreground italic">No answer.</div>
+      )}
     </div>
   );
 }
