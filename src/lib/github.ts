@@ -354,8 +354,11 @@ interface PRViewResult {
 }
 
 export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
+  // `review-requested:@me` matches both direct user requests and PRs where
+  // a team you belong to is requested. `user-review-requested:@me` returns
+  // only direct user-level requests, which is what we want here.
   const results = await execJson<SearchResultPR[]>(
-    `gh search prs --review-requested=@me --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
+    `gh search prs user-review-requested:@me --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
   );
   if (!Array.isArray(results) || results.length === 0) return [];
 
