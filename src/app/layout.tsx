@@ -60,9 +60,9 @@ export default async function RootLayout({
             <div className="flex flex-col gap-1 flex-1">
               <NavLink href="/">Tasks</NavLink>
               <NavLink href="/tasks/new">New Task</NavLink>
+              <NavLink href="/reviews">Reviews</NavLink>
               <NavLink href="/agents">Agents</NavLink>
               <NavLink href="/sessions">Sessions</NavLink>
-              <NavLink href="/reviews">Reviews</NavLink>
               <NavLink href="/settings">Settings</NavLink>
             </div>
             <CortexGitStatusIndicator />

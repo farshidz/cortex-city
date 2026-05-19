@@ -356,9 +356,9 @@ interface PRViewResult {
 export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
   // `review-requested:@me` matches both direct user requests and PRs where
   // a team you belong to is requested. `user-review-requested:@me` returns
-  // only direct user-level requests, which is what we want here.
+  // only direct user-level requests. `draft:false` excludes drafts.
   const results = await execJson<SearchResultPR[]>(
-    `gh search prs user-review-requested:@me --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
+    `gh search prs user-review-requested:@me draft:false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
   );
   if (!Array.isArray(results) || results.length === 0) return [];
 
@@ -371,10 +371,9 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
         return null;
       }
 
-      const [headData, prStatus] = await Promise.all([
-        execJsonStrict<PRViewResult>(`gh pr view ${url} --json headRefOid`),
-        getPRStatus(url).catch(() => "unknown" as PRStatus),
-      ]);
+      const headData = await execJsonStrict<PRViewResult>(
+        `gh pr view ${url} --json headRefOid`
+      );
 
       const headSha = headData?.headRefOid?.trim() || "";
       if (!headSha) return null;
@@ -388,12 +387,60 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
         head_sha: headSha,
         created_at: pr.createdAt || "",
         updated_at: pr.updatedAt || "",
-        pr_status: prStatus,
       };
     })
   );
 
   return enriched.filter((entry): entry is ReviewRequest => entry !== null);
+}
+
+let cachedViewerLogin: string | null = null;
+
+export async function getAuthenticatedUserLogin(): Promise<string> {
+  if (cachedViewerLogin) return cachedViewerLogin;
+  const login = await exec(`gh api user --jq .login`);
+  cachedViewerLogin = login.trim();
+  return cachedViewerLogin;
+}
+
+interface PRStateView {
+  state?: string;
+  merged?: boolean;
+  latestReviews?: Array<{
+    state?: string;
+    author?: { login?: string };
+  }>;
+}
+
+export async function getReviewLifecycleState(
+  prUrl: string
+): Promise<"approved" | "merged_closed" | "needs_approval"> {
+  const data = await execJsonStrict<PRStateView>(
+    `gh pr view ${prUrl} --json state,merged,latestReviews`
+  );
+  if (!data) return "needs_approval";
+
+  if (data.merged === true) return "merged_closed";
+  const state = (data.state || "").toUpperCase();
+  if (state === "MERGED") return "merged_closed";
+  if (state === "CLOSED") return "merged_closed";
+
+  let myLogin = "";
+  try {
+    myLogin = await getAuthenticatedUserLogin();
+  } catch {
+    myLogin = "";
+  }
+  if (myLogin && Array.isArray(data.latestReviews)) {
+    const approved = data.latestReviews.some(
+      (review) =>
+        review.author?.login === myLogin &&
+        (review.state || "").toUpperCase() === "APPROVED"
+    );
+    if (approved) return "approved";
+  }
+
+  return "needs_approval";
 }
 
 function execFileResult(

@@ -130,8 +130,9 @@ export interface ReviewRequest {
   head_sha: string;
   created_at: string;
   updated_at: string;
-  pr_status?: PRStatus;
 }
+
+export type ReviewState = "needs_approval" | "approved" | "merged_closed";
 
 export interface ReviewSummary extends ReviewRequest {
   summary: string;
@@ -147,6 +148,7 @@ export interface ReviewSummary extends ReviewRequest {
   followups?: ReviewFollowup[];
   final_at?: string;
   current_run_pid?: number;
+  review_state?: ReviewState;
 }
 
 export interface ReviewFollowup {

@@ -46,7 +46,6 @@ export async function POST(request: NextRequest) {
       head_sha: cached.head_sha,
       created_at: cached.created_at,
       updated_at: cached.updated_at,
-      pr_status: cached.pr_status,
     },
     overrides
   );
