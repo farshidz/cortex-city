@@ -13,6 +13,7 @@ permissions:
 jobs:
   deploy:
     name: Deploy over SSH
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     environment: production
 

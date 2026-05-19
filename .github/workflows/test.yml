@@ -1,10 +1,8 @@
 name: Test
 
 on:
+  workflow_call:
   pull_request:
-  push:
-    branches:
-      - main
 
 jobs:
   test:
@@ -37,12 +35,3 @@ jobs:
         with:
           name: coverage-lcov
           path: coverage/lcov.info
-
-  deploy-production:
-    name: Deploy Production
-    needs: test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    permissions:
-      contents: read
-    uses: ./.github/workflows/deploy-production.yml
-    secrets: inherit
