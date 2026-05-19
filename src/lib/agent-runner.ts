@@ -1,5 +1,5 @@
 import { spawn, execFile, type ChildProcess } from "child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
+import { writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
 import path from "path";
 import os from "os";
 import { nanoid } from "nanoid";
@@ -19,6 +19,7 @@ import {
   normalizeEffort,
   normalizeModel,
 } from "./runtime-config";
+import { buildEnv, buildModelArgs, buildPermissionArgs } from "./runtime-args";
 import type {
   Task,
   AgentReport,
@@ -31,52 +32,11 @@ import type {
 import { resolveEnvPath } from "./agent-files";
 import { buildInterruptedTaskUpdates, shouldUseContinuePrompt } from "./orchestrator-runtime";
 
-const GLOBAL_ENV_FILE = path.join(/* turbopackIgnore: true */ process.cwd(), ".env");
 const FORCE_KILL_GRACE_MS = 5_000;
 const DEFAULT_TASK_RUN_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const MAX_RUNTIME_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_STDERR_BYTES = 1 * 1024 * 1024;
-
-function loadEnvFile(filePath: string): Record<string, string> {
-  const vars: Record<string, string> = {};
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIndex = trimmed.indexOf("=");
-      if (eqIndex === -1) continue;
-      const key = trimmed.slice(0, eqIndex).trim();
-      let value = trimmed.slice(eqIndex + 1).trim();
-      // Strip surrounding quotes
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
-      }
-      vars[key] = value;
-    }
-  } catch {
-    // File doesn't exist or can't be read — that's fine
-  }
-  return vars;
-}
-
-function buildEnv(agentEnvFile?: string): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  // Load global .env first
-  Object.assign(env, loadEnvFile(GLOBAL_ENV_FILE));
-  // Then agent-specific .env (overrides global)
-  if (agentEnvFile) {
-    const envPath = path.isAbsolute(agentEnvFile)
-      ? agentEnvFile
-      : path.join(/* turbopackIgnore: true */ process.cwd(), agentEnvFile);
-    Object.assign(env, loadEnvFile(envPath));
-  }
-  return env;
-}
 
 const AGENT_REPORT_SCHEMA = JSON.stringify({
   type: "object",
@@ -164,41 +124,6 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
   ],
   additionalProperties: false,
 });
-
-function buildPermissionArgs(runtime: AgentRuntime, mode: PermissionMode): string[] {
-  if (runtime === "codex") {
-    if (mode === "yolo" || mode === "bypassPermissions") {
-      return ["--dangerously-bypass-approvals-and-sandbox"];
-    }
-    return ["--full-auto"];
-  }
-  if (mode === "yolo") {
-    return ["--permission-mode", "bypassPermissions"];
-  }
-  return ["--permission-mode", mode];
-}
-
-function buildModelArgs(
-  runtime: AgentRuntime,
-  task: Pick<Task, "model" | "effort">,
-  config: ReturnType<typeof readConfig>
-): string[] {
-  const args: string[] = [];
-  const model = normalizeModel(task.model, getDefaultModelForRuntime(config, runtime));
-  if (model) {
-    args.push("--model", model);
-  }
-
-  const effort = normalizeEffort(runtime, task.effort, config);
-  if (runtime === "codex" && effort) {
-    args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
-  }
-  if (runtime === "claude" && effort) {
-    args.push("--effort", effort);
-  }
-
-  return args;
-}
 
 function writeSchemaFile(schema: string): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "codex-schema-"));

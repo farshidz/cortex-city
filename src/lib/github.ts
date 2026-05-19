@@ -1,5 +1,6 @@
-import { exec as execCb } from "child_process";
+import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
+import type { PRStatus, ReviewRequest } from "./types";
 
 interface PRInfo {
   owner: string;
@@ -177,9 +178,7 @@ export async function updatePRBranch(prUrl: string): Promise<void> {
   );
 }
 
-export async function getPRStatus(
-  prUrl: string
-): Promise<"clean" | "checks_failing" | "checks_pending" | "needs_approval" | "conflicts" | "unstable" | "unknown"> {
+export async function getPRStatus(prUrl: string): Promise<PRStatus> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return "unknown";
 
@@ -338,4 +337,107 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
   );
   const combined = `${headSha}|${filteredCommentIds}|${issueCommentIds}|${reviewIds}|${ciStatus}`;
   return createHash("sha256").update(combined).digest("hex").slice(0, 16);
+}
+
+interface SearchResultPR {
+  url?: string;
+  number?: number;
+  title?: string;
+  repository?: { nameWithOwner?: string };
+  author?: { login?: string };
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+interface PRViewResult {
+  headRefOid?: string;
+}
+
+export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
+  const results = await execJson<SearchResultPR[]>(
+    `gh search prs --review-requested=@me --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
+  );
+  if (!Array.isArray(results) || results.length === 0) return [];
+
+  const enriched = await Promise.all(
+    results.map(async (pr): Promise<ReviewRequest | null> => {
+      const url = (pr.url || "").trim();
+      const repoSlug = pr.repository?.nameWithOwner?.trim() || "";
+      const parsed = parsePRUrl(url);
+      if (!url || !parsed || typeof pr.number !== "number" || !repoSlug) {
+        return null;
+      }
+
+      const [headData, prStatus] = await Promise.all([
+        execJsonStrict<PRViewResult>(`gh pr view ${url} --json headRefOid`),
+        getPRStatus(url).catch(() => "unknown" as PRStatus),
+      ]);
+
+      const headSha = headData?.headRefOid?.trim() || "";
+      if (!headSha) return null;
+
+      return {
+        pr_url: url,
+        pr_number: pr.number,
+        repo_slug: repoSlug,
+        title: (pr.title || "").trim(),
+        author: pr.author?.login?.trim() || "",
+        head_sha: headSha,
+        created_at: pr.createdAt || "",
+        updated_at: pr.updatedAt || "",
+        pr_status: prStatus,
+      };
+    })
+  );
+
+  return enriched.filter((entry): entry is ReviewRequest => entry !== null);
+}
+
+function execFileResult(
+  command: string,
+  args: string[]
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFileCb(
+      command,
+      args,
+      { encoding: "utf-8", timeout: 30000 },
+      (err, stdout, stderr) => {
+        resolve({
+          ok: !err,
+          stdout: (stdout || "").toString(),
+          stderr: (stderr || (err?.message ?? "")).toString(),
+        });
+      }
+    );
+  });
+}
+
+export async function submitPRReview(
+  prUrl: string,
+  decision: "approve" | "request-changes" | "comment",
+  body: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!parsePRUrl(prUrl)) {
+    return { ok: false, error: "Invalid PR URL" };
+  }
+  const trimmedBody = (body || "").trim();
+  const flag =
+    decision === "approve"
+      ? "--approve"
+      : decision === "request-changes"
+        ? "--request-changes"
+        : "--comment";
+  const args = ["pr", "review", prUrl, flag];
+  if (trimmedBody) {
+    args.push("--body", trimmedBody);
+  } else if (decision !== "approve") {
+    return { ok: false, error: "A review body is required for this decision." };
+  }
+  const result = await execFileResult("gh", args);
+  if (!result.ok) {
+    const msg = (result.stderr || result.stdout || "Unknown error").trim();
+    return { ok: false, error: msg };
+  }
+  return { ok: true };
 }

@@ -62,6 +62,7 @@ export default async function RootLayout({
               <NavLink href="/tasks/new">New Task</NavLink>
               <NavLink href="/agents">Agents</NavLink>
               <NavLink href="/sessions">Sessions</NavLink>
+              <NavLink href="/reviews">Reviews</NavLink>
               <NavLink href="/settings">Settings</NavLink>
             </div>
             <CortexGitStatusIndicator />
