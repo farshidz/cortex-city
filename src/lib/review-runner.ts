@@ -267,14 +267,17 @@ function spawnRuntime(
               : undefined,
         });
       } catch (err) {
+        const fallbackError = timedOut
+          ? `Run timed out after ${RUN_TIMEOUT_MS}ms`
+          : code !== 0
+            ? stderr.trim() || `claude exited with code ${code}`
+            : `Failed to parse claude output: ${(err as Error).message}`;
         resolve({
           result_text: stdout,
           exit_code: code,
           stderr,
           duration_ms: duration,
-          error: timedOut
-            ? `Run timed out after ${RUN_TIMEOUT_MS}ms`
-            : `Failed to parse claude output: ${(err as Error).message}`,
+          error: fallbackError,
         });
       }
     });

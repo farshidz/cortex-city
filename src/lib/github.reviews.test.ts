@@ -383,6 +383,259 @@ test("getReviewLifecycleState recognises my own approval as approved", () => {
   assert.equal(result, "approved");
 });
 
+test("getCIStatus shells out to gh pr checks and returns the raw output", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  // `2>&1` is consumed by the shell, so the fake binary only sees the args.
+  const responses: Record<string, FakeGhResponse> = {
+    [`pr checks ${prUrl}`]: {
+      stdout: "build\tpass\n",
+    },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { getCIStatus } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const status = await getCIStatus(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(status));
+    `
+  );
+  assert.equal(result, "build\tpass");
+});
+
+test("getCIStatus rejects URLs it can't parse", () => {
+  const workspace = setupWorkspace();
+  const { result } = runGhScript(
+    workspace,
+    `import { getCIStatus } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    {},
+    `
+      const status = await getCIStatus("not-a-url");
+      console.log(JSON.stringify(status));
+    `
+  );
+  assert.equal(result, "Could not parse PR URL.");
+});
+
+test("hasPendingChecks counts states that aren't terminal", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    [`pr checks ${prUrl} --json state --jq [.[] | select(.state != "SUCCESS" and .state != "FAILURE" and .state != "CANCELLED" and .state != "SKIPPED" and .state != "STALE" and .state != "ERROR" and .state != "NEUTRAL" and .state != "STARTUP_FAILURE")] | length`]: {
+      stdout: "2",
+    },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { hasPendingChecks } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const pending = await hasPendingChecks(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(pending));
+    `
+  );
+  assert.equal(result, true);
+});
+
+test("isPRMergedOrClosed maps the merged/closed signal", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    [`api repos/acme/widget/pulls/1 --jq .state + "|" + (.merged | tostring)`]:
+      { stdout: "open|true" },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { isPRMergedOrClosed } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const state = await isPRMergedOrClosed(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(state));
+    `
+  );
+  assert.equal(result, "merged");
+});
+
+test("isPRMergedOrClosed returns closed when the PR is closed without merge", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    [`api repos/acme/widget/pulls/1 --jq .state + "|" + (.merged | tostring)`]:
+      { stdout: "closed|false" },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { isPRMergedOrClosed } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const state = await isPRMergedOrClosed(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(state));
+    `
+  );
+  assert.equal(result, "closed");
+});
+
+test("isPRMergedOrClosed returns null for open PRs", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    [`api repos/acme/widget/pulls/1 --jq .state + "|" + (.merged | tostring)`]:
+      { stdout: "open|false" },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { isPRMergedOrClosed } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const state = await isPRMergedOrClosed(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(state));
+    `
+  );
+  assert.equal(result, null);
+});
+
+test("getPRStatus reports clean / conflicts / unstable", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    [`pr checks ${prUrl} --json state --jq [.[] | select(.state != "SUCCESS" and .state != "FAILURE" and .state != "CANCELLED" and .state != "SKIPPED" and .state != "STALE" and .state != "ERROR" and .state != "NEUTRAL" and .state != "STARTUP_FAILURE")] | length`]:
+      { stdout: "0" },
+    [`api repos/acme/widget/pulls/1 --jq {mergeable_state, mergeable}`]: {
+      stdout: JSON.stringify({ mergeable_state: "clean", mergeable: true }),
+    },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { getPRStatus } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const status = await getPRStatus(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(status));
+    `
+  );
+  assert.equal(result, "clean");
+});
+
+test("getPRStatus reports needs_approval when blocked but mergeable", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    [`pr checks ${prUrl} --json state --jq [.[] | select(.state != "SUCCESS" and .state != "FAILURE" and .state != "CANCELLED" and .state != "SKIPPED" and .state != "STALE" and .state != "ERROR" and .state != "NEUTRAL" and .state != "STARTUP_FAILURE")] | length`]:
+      { stdout: "0" },
+    [`api repos/acme/widget/pulls/1 --jq {mergeable_state, mergeable}`]: {
+      stdout: JSON.stringify({ mergeable_state: "blocked", mergeable: true }),
+    },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { getPRStatus } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const status = await getPRStatus(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(status));
+    `
+  );
+  assert.equal(result, "needs_approval");
+});
+
+test("prNeedsAttention returns true when CHANGES_REQUESTED is on the PR", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    "api --paginate --slurp repos/acme/widget/pulls/1/reviews": {
+      stdout: JSON.stringify([[{ state: "CHANGES_REQUESTED" }]]),
+    },
+    "api --paginate --slurp repos/acme/widget/pulls/1/comments": {
+      stdout: JSON.stringify([[]]),
+    },
+    [`pr checks ${prUrl}`]: { stdout: "" },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { prNeedsAttention } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const needs = await prNeedsAttention(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(needs));
+    `
+  );
+  assert.equal(result, true);
+});
+
+test("prNeedsAttention returns false when nothing requires action", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    "api --paginate --slurp repos/acme/widget/pulls/1/reviews": {
+      stdout: JSON.stringify([[]]),
+    },
+    "api --paginate --slurp repos/acme/widget/pulls/1/comments": {
+      stdout: JSON.stringify([[]]),
+    },
+    [`pr checks ${prUrl}`]: { stdout: "ok" },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { prNeedsAttention } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const needs = await prNeedsAttention(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(needs));
+    `
+  );
+  assert.equal(result, false);
+});
+
+test("isPRBehindBase calls compare endpoint and reports behind > 0", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    [`api repos/acme/widget/pulls/1 --jq .head.ref + "..." + .base.ref`]: {
+      stdout: "feature...main",
+    },
+    [`api repos/acme/widget/compare/feature...main --jq .behind_by`]: {
+      stdout: "3",
+    },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { isPRBehindBase } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const behind = await isPRBehindBase(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(behind));
+    `
+  );
+  assert.equal(result, true);
+});
+
+test("updatePRBranch issues a PUT to the GitHub update-branch endpoint", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    "api repos/acme/widget/pulls/1/update-branch -X PUT 2>&1": {
+      stdout: "{}",
+    },
+  };
+  const { result, calls } = runGhScript(
+    workspace,
+    `import { updatePRBranch } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      await updatePRBranch(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(null));
+    `,
+    { recordCalls: true }
+  );
+  assert.equal(result, null);
+  // 2>&1 is interpreted by the shell; the binary only sees the args.
+  assert.equal(
+    calls.includes("api repos/acme/widget/pulls/1/update-branch -X PUT"),
+    true
+  );
+});
+
 test("getReviewLifecycleState ignores other reviewers' approvals", () => {
   const workspace = setupWorkspace();
   const prUrl = "https://github.com/acme/widget/pull/1";
