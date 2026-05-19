@@ -17,24 +17,7 @@ import type {
 
 export const DEFAULT_REVIEW_PROMPT = `You are reviewing an open pull request that the signed-in user has been asked to review.
 
-Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused summary as **GitHub-flavored Markdown** using these sections (use \`##\` headings, bullet lists, and inline \`code\` / fenced blocks where useful):
-
-## What changed
-- Files touched and the overall shape of the change.
-
-## Why
-- Your best read of the motivation. Cite the PR body / linked issues when present.
-
-## Risk areas
-- Places the reviewer should look hardest (correctness, edge cases, perf, security).
-
-## Recommendation
-**Approve / Request changes / Comment** — one-line rationale.
-
-Constraints:
-- Output only the Markdown body — no preamble, no closing remarks, no surrounding code fence.
-- Keep the whole thing 250–400 words.
-- Prefer bullets over prose. Use bold sparingly for emphasis.`;
+Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused summary as **GitHub-flavored Markdown**.`;
 
 const RUN_TIMEOUT_MS = 5 * 60 * 1000;
 
