@@ -113,9 +113,9 @@ function setupWorkspace(): string {
 }
 
 const SEARCH_KEY =
-  "search prs user-review-requested:@me draft:false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200";
+  "search prs user-review-requested:@me draft:false --archived=false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200";
 const REVIEWED_SEARCH_KEY =
-  "search prs reviewed-by:me draft:false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200";
+  "search prs reviewed-by:me draft:false --archived=false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200";
 
 test("getReviewRequestedPRs unions requested and reviewed PRs, then enriches with head SHA + my_last_review_sha", () => {
   const workspace = setupWorkspace();
