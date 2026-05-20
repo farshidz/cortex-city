@@ -767,6 +767,61 @@ test("app pages render loading, empty, and detail variants", () => {
   }
 });
 
+test("task detail collapses large plans by default and can expand them", () => {
+  const output = runRenderScript(`
+    const originalData = globalThis.__SWR_DATA__;
+    const largePlan = Array.from(
+      { length: 14 },
+      (_, i) => "Step " + (i + 1) + ": do focused work"
+    ).join("\\n");
+
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/tasks/task-large-plan": {
+        ...task,
+        id: "task-large-plan",
+        plan: largePlan,
+        pending_manual_instruction: undefined,
+      },
+    };
+
+    const collapsedHtml = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-large-plan" }) }
+    );
+    const expandedHtml = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-large-plan" }) },
+      [
+        false,
+        {},
+        undefined,
+        false,
+        false,
+        "",
+        false,
+        null,
+        { taskId: "task-large-plan", plan: largePlan, expanded: true },
+      ]
+    );
+    globalThis.__SWR_DATA__ = originalData;
+
+    console.log(JSON.stringify({
+      collapsedHasPlanBody: collapsedHtml.includes("Step 14: do focused work"),
+      collapsedHasShow: collapsedHtml.includes("Show plan"),
+      expandedHasPlanBody: expandedHtml.includes("Step 14: do focused work"),
+      expandedHasHide: expandedHtml.includes("Hide plan"),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    collapsedHasPlanBody: false,
+    collapsedHasShow: true,
+    expandedHasPlanBody: true,
+    expandedHasHide: true,
+  });
+});
+
 test("root layout renders navigation around page content", () => {
   const output = runRenderScript(`
     const Layout = await loadComponent("./src/app/layout.tsx");

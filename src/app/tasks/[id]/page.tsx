@@ -5,6 +5,7 @@ import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MdEditor } from "@/components/md-editor";
@@ -58,6 +59,17 @@ const ALL_STATUSES: TaskStatus[] = [
   "merged",
   "closed",
 ];
+const LARGE_PLAN_LINE_THRESHOLD = 12;
+const LARGE_PLAN_CHARACTER_THRESHOLD = 1000;
+
+function isLargeTaskPlan(plan: string): boolean {
+  const trimmed = plan.trim();
+  if (!trimmed) return false;
+  return (
+    trimmed.length >= LARGE_PLAN_CHARACTER_THRESHOLD ||
+    trimmed.split(/\r?\n/).length >= LARGE_PLAN_LINE_THRESHOLD
+  );
+}
 
 export default function TaskDetailPage({
   params,
@@ -78,6 +90,11 @@ export default function TaskDetailPage({
   const [manualInstruction, setManualInstruction] = useState("");
   const [sendingInstruction, setSendingInstruction] = useState(false);
   const [instructionError, setInstructionError] = useState<string | null>(null);
+  const [planExpansion, setPlanExpansion] = useState<{
+    taskId: string;
+    plan: string;
+    expanded: boolean;
+  } | null>(null);
 
   function startEdit() {
     if (!config) return;
@@ -192,6 +209,11 @@ export default function TaskDetailPage({
   const resolvedRuntime = task.agent_runner || config.default_agent_runner || "claude";
   const resolvedModel = resolveTaskModel(task, config);
   const resolvedEffort = resolveTaskEffort(task, config);
+  const taskPlan = task.plan || "";
+  const planExpanded =
+    planExpansion?.taskId === task.id && planExpansion.plan === taskPlan
+      ? planExpansion.expanded
+      : !isLargeTaskPlan(taskPlan);
 
   return (
     <div className="max-w-3xl space-y-4">
@@ -482,10 +504,34 @@ export default function TaskDetailPage({
               </div>
               {task.plan && (
                 <div>
-                  <span className="text-sm text-muted-foreground">Plan:</span>
-                  <div className="mt-1 prose prose-sm dark:prose-invert max-w-none bg-muted p-3 rounded-md">
-                    <ReactMarkdown>{task.plan}</ReactMarkdown>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm text-muted-foreground">Plan:</span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      aria-expanded={planExpanded}
+                      aria-controls="task-plan-content"
+                      onClick={() =>
+                        setPlanExpansion({
+                          taskId: task.id,
+                          plan: taskPlan,
+                          expanded: !planExpanded,
+                        })
+                      }
+                    >
+                      {planExpanded ? <ChevronUpIcon /> : <ChevronDownIcon />}
+                      {planExpanded ? "Hide plan" : "Show plan"}
+                    </Button>
                   </div>
+                  {planExpanded && (
+                    <div
+                      id="task-plan-content"
+                      className="mt-1 prose prose-sm dark:prose-invert max-w-none bg-muted p-3 rounded-md"
+                    >
+                      <ReactMarkdown>{task.plan}</ReactMarkdown>
+                    </div>
+                  )}
                 </div>
               )}
               {task.parent_task_id && (
