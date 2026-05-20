@@ -3,6 +3,7 @@ import path from "path";
 import type { Task, OrchestratorConfig } from "./types";
 import { snapshotCortex } from "./cortex-git";
 import { deleteTaskLogs } from "./logger";
+import { DEFAULT_TASK_RUN_TIMEOUT_MS } from "./run-timeout";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
@@ -147,7 +148,7 @@ function getDefaultConfig(): OrchestratorConfig {
   return {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
-    task_run_timeout_ms: 2 * 60 * 60 * 1000,
+    task_run_timeout_ms: DEFAULT_TASK_RUN_TIMEOUT_MS,
     default_permission_mode: "bypassPermissions",
     default_agent_runner: "claude",
     agents: {},

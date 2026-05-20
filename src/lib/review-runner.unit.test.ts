@@ -13,6 +13,7 @@ test("review-runner exports are reachable via module namespace", () => {
   assert.equal(typeof runner.appendFollowup, "function");
   assert.equal(typeof runner.resolveReviewOpts, "function");
   assert.equal(typeof runner.resolveReviewPrompt, "function");
+  assert.equal(typeof runner.resolveReviewRunTimeoutMs, "function");
   assert.equal(typeof runner.DEFAULT_REVIEW_PROMPT, "string");
   assert.ok(runner.DEFAULT_REVIEW_PROMPT.length > 0);
 });
@@ -43,5 +44,22 @@ test("resolveReviewOpts and resolveReviewPrompt cover their fallback branches", 
   assert.equal(
     runner.resolveReviewPrompt({ ...baseConfig, review_prompt: " hi " }),
     "hi"
+  );
+
+  // Review runs use the same timeout setting and fallback as task runs.
+  assert.equal(runner.resolveReviewRunTimeoutMs(baseConfig), 2 * 60 * 60 * 1000);
+  assert.equal(
+    runner.resolveReviewRunTimeoutMs({
+      ...baseConfig,
+      task_run_timeout_ms: 1234,
+    }),
+    1234
+  );
+  assert.equal(
+    runner.resolveReviewRunTimeoutMs({
+      ...baseConfig,
+      task_run_timeout_ms: 0,
+    }),
+    0
   );
 });

@@ -275,6 +275,52 @@ test("summarizePR records error and preserves previous summary on non-zero exit"
   assert.equal(result.persisted.summary, "old text");
 });
 
+test("summarizePR applies the configured task run timeout", () => {
+  const workspace = setupRunnerWorkspace("review-runner-timeout-", {
+    task_run_timeout_ms: 25,
+  });
+  const scenarioFile = path.join(workspace, "scenario.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-session-slow",
+        result: "too late",
+        is_error: false,
+      }),
+      sleepMs: 200,
+    },
+  });
+
+  const request = sampleRequest({
+    pr_url: "https://github.com/acme/widget/pull/3",
+    pr_number: 3,
+    head_sha: "slow123",
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  assert.match(result.summary.error, /Run timed out after 25ms/);
+  assert.equal(result.summary.summary, "");
+  assert.equal(result.summary.current_run_pid, undefined);
+  assert.match(result.persisted.error, /Run timed out after 25ms/);
+});
+
 test("askFollowup throws when the cached entry has no summary yet", () => {
   const workspace = setupRunnerWorkspace("review-runner-followup-empty-");
   const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
