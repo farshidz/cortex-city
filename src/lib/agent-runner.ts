@@ -31,9 +31,9 @@ import type {
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
 import { buildInterruptedTaskUpdates, shouldUseContinuePrompt } from "./orchestrator-runtime";
+import { resolveTaskRunTimeoutMs } from "./run-timeout";
 
 const FORCE_KILL_GRACE_MS = 5_000;
-const DEFAULT_TASK_RUN_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const MAX_RUNTIME_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_STDERR_BYTES = 1 * 1024 * 1024;
@@ -481,10 +481,7 @@ export async function spawnAgentSession(
   }
 
   const spawnedAt = Date.now();
-  const runTimeoutMs =
-    typeof config.task_run_timeout_ms === "number"
-      ? config.task_run_timeout_ms
-      : DEFAULT_TASK_RUN_TIMEOUT_MS;
+  const runTimeoutMs = resolveTaskRunTimeoutMs(config);
 
   const envFile = resolveEnvPath(agentConfig, task.agent);
   const child = spawn(runtime === "codex" ? "codex" : "claude", args, {
