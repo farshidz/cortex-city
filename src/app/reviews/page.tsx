@@ -54,7 +54,7 @@ export default function ReviewsPage() {
     refreshInterval: 5000,
   });
 
-  // Hide entries that have dropped from the open review-requested list
+  // Hide entries that have dropped from the open review live set
   // (still in the 24h GC window).
   const visible = reviews?.filter((r) => !r.final_at);
   const sorted = visible
@@ -77,7 +77,7 @@ export default function ReviewsPage() {
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">Reviews</h1>
         <span className="text-sm text-muted-foreground">
-          PRs where you are personally a requested reviewer
+          PRs requesting your review or already reviewed by you
         </span>
       </div>
 

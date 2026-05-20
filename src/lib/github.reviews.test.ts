@@ -114,8 +114,10 @@ function setupWorkspace(): string {
 
 const SEARCH_KEY =
   "search prs user-review-requested:@me draft:false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200";
+const REVIEWED_SEARCH_KEY =
+  "search prs reviewed-by:me draft:false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200";
 
-test("getReviewRequestedPRs uses user-review-requested + draft:false and enriches with head SHA + my_last_review_sha", () => {
+test("getReviewRequestedPRs unions requested and reviewed PRs, then enriches with head SHA + my_last_review_sha", () => {
   const workspace = setupWorkspace();
   const searchResults = [
     {
@@ -137,14 +139,30 @@ test("getReviewRequestedPRs uses user-review-requested + draft:false and enriche
       updatedAt: "2026-05-02T00:00:00Z",
     },
   ];
+  const reviewedResults = [
+    searchResults[0],
+    {
+      url: "https://github.com/acme/widget/pull/3",
+      number: 3,
+      title: "Keep reviewed PR visible",
+      repository: { nameWithOwner: "acme/widget" },
+      author: { login: "hubot" },
+      createdAt: "2026-05-03T00:00:00Z",
+      updatedAt: "2026-05-03T00:00:00Z",
+    },
+  ];
   const responses: Record<string, FakeGhResponse> = {
     [SEARCH_KEY]: { stdout: JSON.stringify(searchResults) },
+    [REVIEWED_SEARCH_KEY]: { stdout: JSON.stringify(reviewedResults) },
     "api user --jq .login": { stdout: "me" },
     "pr view https://github.com/acme/widget/pull/1 --json headRefOid": {
       stdout: JSON.stringify({ headRefOid: "abc123" }),
     },
     "pr view https://github.com/acme/widget/pull/2 --json headRefOid": {
       stdout: JSON.stringify({ headRefOid: "def456" }),
+    },
+    "pr view https://github.com/acme/widget/pull/3 --json headRefOid": {
+      stdout: JSON.stringify({ headRefOid: "ghi789" }),
     },
     "api --paginate --slurp repos/acme/widget/pulls/1/reviews": {
       stdout: JSON.stringify([
@@ -173,6 +191,18 @@ test("getReviewRequestedPRs uses user-review-requested + draft:false and enriche
     "api --paginate --slurp repos/acme/widget/pulls/2/reviews": {
       stdout: JSON.stringify([[]]),
     },
+    "api --paginate --slurp repos/acme/widget/pulls/3/reviews": {
+      stdout: JSON.stringify([
+        [
+          {
+            user: { login: "me" },
+            commit_id: "ghi789",
+            state: "COMMENTED",
+            submitted_at: "2026-05-03T00:00:00Z",
+          },
+        ],
+      ]),
+    },
   };
 
   const { result, calls } = runGhScript(
@@ -191,14 +221,18 @@ test("getReviewRequestedPRs uses user-review-requested + draft:false and enriche
     head_sha: string;
     my_last_review_sha?: string;
   }>;
-  assert.equal(prs.length, 2);
+  assert.equal(prs.length, 3);
   assert.equal(prs[0].pr_url, "https://github.com/acme/widget/pull/1");
   assert.equal(prs[0].head_sha, "abc123");
   // PR #1: my latest non-pending review is at abc123 (matches head — "up to date").
   assert.equal(prs[0].my_last_review_sha, "abc123");
   // PR #2: I have never reviewed.
   assert.equal(prs[1].my_last_review_sha, undefined);
+  // PR #3: I already reviewed it, so it stays visible after GitHub clears the request.
+  assert.equal(prs[2].pr_url, "https://github.com/acme/widget/pull/3");
+  assert.equal(prs[2].my_last_review_sha, "ghi789");
   assert.equal(calls.includes(SEARCH_KEY), true);
+  assert.equal(calls.includes(REVIEWED_SEARCH_KEY), true);
 });
 
 test("getMyLastReviewSha returns undefined when login is empty or no reviews match", () => {
@@ -247,8 +281,13 @@ test("getReviewRequestedPRs drops entries missing a head SHA", () => {
   ];
   const responses: Record<string, FakeGhResponse> = {
     [SEARCH_KEY]: { stdout: JSON.stringify(searchResults) },
+    [REVIEWED_SEARCH_KEY]: { stdout: JSON.stringify([]) },
+    "api user --jq .login": { stdout: "me" },
     "pr view https://github.com/acme/widget/pull/1 --json headRefOid": {
       stdout: JSON.stringify({}),
+    },
+    "api --paginate --slurp repos/acme/widget/pulls/1/reviews": {
+      stdout: JSON.stringify([[]]),
     },
   };
 
@@ -268,6 +307,8 @@ test("getReviewRequestedPRs returns [] when the search response is empty", () =>
   const workspace = setupWorkspace();
   const responses: Record<string, FakeGhResponse> = {
     [SEARCH_KEY]: { stdout: "" },
+    [REVIEWED_SEARCH_KEY]: { stdout: JSON.stringify([]) },
+    "api user --jq .login": { stdout: "me" },
   };
 
   const { result } = runGhScript(
@@ -680,7 +721,7 @@ test("updatePRBranch issues a PUT to the GitHub update-branch endpoint", () => {
   const workspace = setupWorkspace();
   const prUrl = "https://github.com/acme/widget/pull/1";
   const responses: Record<string, FakeGhResponse> = {
-    "api repos/acme/widget/pulls/1/update-branch -X PUT 2>&1": {
+    "api repos/acme/widget/pulls/1/update-branch -X PUT": {
       stdout: "{}",
     },
   };
