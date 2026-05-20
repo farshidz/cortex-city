@@ -362,7 +362,7 @@ interface PRReviewItem {
 
 async function searchOpenReviewPRs(query: string): Promise<SearchResultPR[]> {
   const results = await execJson<SearchResultPR[]>(
-    `gh search prs ${query} draft:false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
+    `gh search prs ${query} draft:false --archived=false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
   );
   return Array.isArray(results) ? results : [];
 }
