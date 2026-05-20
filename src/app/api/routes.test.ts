@@ -980,6 +980,7 @@ function withReviewState(body: string) {
           title: "Newer review",
           author: "octocat",
           head_sha: "abc123",
+          my_last_review_sha: "abc123",
           created_at: "2026-05-01T00:00:00.000Z",
           updated_at: "2026-05-02T00:00:00.000Z",
           summary: "current summary",
@@ -1244,6 +1245,7 @@ test("review summarize route launches Codex summaries with overrides", () => {
       assert.equal(summarized.body.effort, "high");
       assert.equal(summarized.body.model, "gpt-test");
       assert.equal(summarized.body.session_id, "review-session");
+      assert.equal(summarized.body.my_last_review_sha, "abc123");
     `)
   );
 });

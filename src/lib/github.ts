@@ -360,6 +360,13 @@ interface PRReviewItem {
   submitted_at?: string;
 }
 
+async function searchOpenReviewPRs(query: string): Promise<SearchResultPR[]> {
+  const results = await execJson<SearchResultPR[]>(
+    `gh search prs ${query} draft:false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
+  );
+  return Array.isArray(results) ? results : [];
+}
+
 export async function getMyLastReviewSha(
   prUrl: string,
   login: string
@@ -381,20 +388,32 @@ export async function getMyLastReviewSha(
 }
 
 export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
-  // `review-requested:@me` matches both direct user requests and PRs where
-  // a team you belong to is requested. `user-review-requested:@me` returns
-  // only direct user-level requests. `draft:false` excludes drafts.
-  const results = await execJson<SearchResultPR[]>(
-    `gh search prs user-review-requested:@me draft:false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
-  );
-  if (!Array.isArray(results) || results.length === 0) return [];
-
   let myLogin = "";
+  const requestedSearch = searchOpenReviewPRs("user-review-requested:@me");
   try {
     myLogin = await getAuthenticatedUserLogin();
   } catch {
     myLogin = "";
   }
+  const reviewedSearch = myLogin
+    ? searchOpenReviewPRs(`reviewed-by:${myLogin}`)
+    : Promise.resolve([]);
+
+  // GitHub clears a direct review request once the user submits a review.
+  // Keep those open PRs live by also including PRs the user has reviewed.
+  const [requested, reviewed] = await Promise.all([
+    requestedSearch,
+    reviewedSearch,
+  ]);
+  const resultsByUrl = new Map<string, SearchResultPR>();
+  for (const pr of [...requested, ...reviewed]) {
+    const url = (pr.url || "").trim();
+    if (url && !resultsByUrl.has(url)) {
+      resultsByUrl.set(url, pr);
+    }
+  }
+  const results = [...resultsByUrl.values()];
+  if (results.length === 0) return [];
 
   const enriched = await Promise.all(
     results.map(async (pr): Promise<ReviewRequest | null> => {

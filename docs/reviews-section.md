@@ -6,17 +6,17 @@ Cortex City currently manages tasks, agents, and sessions for outgoing PR work, 
 
 Goal: add a **Reviews** section that
 
-- lists every open PR on GitHub where the signed-in user is an individually requested reviewer (across all repos, not just cortex-managed ones),
+- lists every open PR on GitHub where the signed-in user is an individually requested reviewer or has already submitted a review (across all repos, not just cortex-managed ones),
 - shows an agent-generated summary of each PR so triage is fast,
 - lets the user open, regenerate, approve, or request changes from inside Cortex City.
 
 Per user input:
-- Scope: **all** review requests for the authenticated `gh` user (no repo filter).
+- Scope: **all** direct review requests and already-reviewed open PRs for the authenticated `gh` user (no repo filter).
 - Summary: **auto on first view**, cached keyed on PR head SHA, with manual **regenerate** button.
 - Runtime: a single, user-editable **review prompt** lives in Cortex City config (not per-agent). The wrapper prefixes a fixed line `Review this PR: <pr_url>`. User picks **runtime (claude | codex)** and **effort level** in settings (with per-run override on the page).
 - Row actions: Open PR · Regenerate summary · Approve / Request changes (inline GH review) · **Ask follow-up** (chat with the agent about its summary).
 - **Session reuse rule**: the *only* place we resume an existing agent session is the follow-up flow. Initial summary = fresh session. Force-regenerate = fresh session. Follow-up question = resume the session that produced the current cached summary; if that session can no longer be resumed (or no `session_id` was captured), start a new session and seed it with the prior summary as context.
-- **Garbage collection**: cached review data is pruned 24 hours after the PR is observed merged/closed (or 24 hours after it disappears from the "review-requested:@me" list, treating that as closure). This matches the existing 24h retention for final tasks (`PRUNE_AGE_MS` in `src/lib/orchestrator-worker-runtime.ts:15`).
+- **Garbage collection**: cached review data is pruned 24 hours after the PR is observed merged/closed (or 24 hours after it disappears from the open review live set, treating that as closure). This matches the existing 24h retention for final tasks (`PRUNE_AGE_MS` in `src/lib/orchestrator-worker-runtime.ts:15`).
 
 ## Architecture
 
@@ -24,14 +24,14 @@ A new lightweight, **task-free** runner — review summarization does not spawn 
 
 **Polling lives in the existing orchestrator worker, not on the client.** Mirrors the existing pattern at `src/lib/orchestrator-worker-runtime.ts:293-346` ("scan in_review tasks") where the worker polls GitHub for outgoing-PR state. Concretely:
 
-- Every worker tick (`config.poll_interval_seconds`, default 30s) `pollOnce` calls `getReviewRequestedPRs()` and reconciles `.cortex/reviews.json`: adds new PRs, updates `head_sha` / `pr_status`, drops entries that have left the open-review-requested list (handled by the GC phase below).
+- Every worker tick (`config.poll_interval_seconds`, default 30s) `pollOnce` calls `getReviewRequestedPRs()` and reconciles `.cortex/reviews.json`: adds new PRs, updates `head_sha` / `pr_status`, drops entries that have left the open review live set (handled by the GC phase below).
 - For any entry that has no summary yet, or whose cached `head_sha` differs from the live one, the worker spawns a **review run** via a dedicated `spawnReviewSummary()` (analogous to `spawnAgentSession` but with no worktree, no session-resume, no `Task` row). It tracks an in-memory `activeReviewPids` map so the next tick doesn't re-fire a run that's still in flight.
 - Review-run concurrency is capped separately from `max_parallel_sessions` so heavy task agents don't starve quick review summaries (and vice versa). Default cap: `max_parallel_reviews = 2`, new field on `OrchestratorConfig`. Same pid-reconcile pattern as `pollOnce` uses for tasks (`orchestrator-worker-runtime.ts:124-151`).
 - `GET /api/reviews` becomes a pure read of `.cortex/reviews.json`. It does **not** shell out to `gh`. The frontend SWR-polls this cheap endpoint at 5s, just like `/api/tasks`.
 - Manual **force-regenerate** is still synchronous (`POST /api/reviews/summarize`) — the user is in front of the page waiting; bypassing the worker keeps the latency tight. The endpoint reuses the same `spawnReviewSummary` and adds its pid to `activeReviewPids` so a worker tick fired mid-run won't double-spawn.
 - Follow-up Q&A (`POST /api/reviews/followup`) also runs synchronously — user-initiated, short-lived, no worker involvement.
 
-GitHub data: `gh search prs --review-requested=@me --state=open --json …` plus per-PR `gh pr view` calls to enrich with head SHA + mergeable state, parallelized.
+GitHub data: `gh search prs user-review-requested:@me --state=open --json …` plus `gh search prs reviewed-by:<login> --state=open --json …`, de-duplicated, then per-PR `gh pr view` calls to enrich with head SHA + mergeable state, parallelized.
 
 **Session lifecycle:**
 - Each summary run captures the session id (`session_id` on Claude's JSON result, `thread.started.thread_id` on Codex — same fields the existing runner reads in `agent-runner.ts:614,1221`) and stores it on the cached `ReviewSummary`.
@@ -72,7 +72,7 @@ export interface ReviewSummary {
   error?: string;                   // set if last attempt failed
   followups?: ReviewFollowup[];     // chronological Q&A on the summary
   final_at?: string;                // set when PR is observed merged/closed or
-                                    // disappears from review-requested list; used for 24h GC
+                                    // disappears from open review live set; used for 24h GC
 }
 
 export interface ReviewFollowup {
@@ -298,7 +298,7 @@ Notes:
 - The manual `POST /api/reviews/summarize` endpoint should import the same `activeReviewPids` map (export it from the worker module) to coordinate with the worker.
 
 ## Out of scope (explicitly)
-- Team review requests (only individual `review-requested:@me`).
+- Team review requests (only individual `user-review-requested:@me`).
 - Showing closed/merged PRs in the list (they're held only for 24h after going final, then GC'd).
 - "Deep review" with cortex agent worktrees — single shared review prompt only, per user's choice.
 - Creating a cortex task from a Review row (the user did not select this).

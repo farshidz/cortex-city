@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
   const cached = getReviewSummary(prUrl);
   if (!cached) {
     return NextResponse.json(
-      { error: "PR is not in the review-requested list yet" },
+      { error: "PR is not cached for review yet" },
       { status: 404 }
     );
   }
@@ -46,6 +46,7 @@ export async function POST(request: NextRequest) {
       head_sha: cached.head_sha,
       created_at: cached.created_at,
       updated_at: cached.updated_at,
+      my_last_review_sha: cached.my_last_review_sha,
     },
     overrides
   );
