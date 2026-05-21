@@ -150,6 +150,15 @@ test("getReviewRequestedPRs unions requested and reviewed PRs, then enriches wit
       createdAt: "2026-05-03T00:00:00Z",
       updatedAt: "2026-05-03T00:00:00Z",
     },
+    {
+      url: "https://github.com/acme/widget/pull/4",
+      number: 4,
+      title: "Do not list my own PR",
+      repository: { nameWithOwner: "acme/widget" },
+      author: { login: "me" },
+      createdAt: "2026-05-04T00:00:00Z",
+      updatedAt: "2026-05-04T00:00:00Z",
+    },
   ];
   const responses: Record<string, FakeGhResponse> = {
     [SEARCH_KEY]: { stdout: JSON.stringify(searchResults) },
@@ -231,8 +240,16 @@ test("getReviewRequestedPRs unions requested and reviewed PRs, then enriches wit
   // PR #3: I already reviewed it, so it stays visible after GitHub clears the request.
   assert.equal(prs[2].pr_url, "https://github.com/acme/widget/pull/3");
   assert.equal(prs[2].my_last_review_sha, "ghi789");
+  assert.equal(
+    prs.some((pr) => pr.pr_url === "https://github.com/acme/widget/pull/4"),
+    false
+  );
   assert.equal(calls.includes(SEARCH_KEY), true);
   assert.equal(calls.includes(REVIEWED_SEARCH_KEY), true);
+  assert.equal(
+    calls.includes("pr view https://github.com/acme/widget/pull/4 --json headRefOid"),
+    false
+  );
 });
 
 test("getMyLastReviewSha returns undefined when login is empty or no reviews match", () => {
