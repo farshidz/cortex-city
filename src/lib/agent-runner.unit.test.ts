@@ -30,6 +30,7 @@ const {
   parseCodexResult,
   resolveAgentWorkingDirectory,
   sanitizeManagedRepoName,
+  shouldClearCompletedRunPid,
   slugify,
   updateCodexResultAccumulator,
   withCodexReceivedAt,
@@ -209,6 +210,45 @@ test("buildUsageAccounting subtracts Codex cumulative usage for same-session run
   assert.equal(accounting.updates.codex_cumulative_input_tokens, 200);
 });
 
+test("buildUsageAccounting treats lower same-session Codex usage as stale", () => {
+  const result: ClaudeRunResult = {
+    type: "codex",
+    subtype: "exec",
+    is_error: false,
+    duration_ms: 100,
+    result: "",
+    session_id: "thr-1",
+    terminal_reason: "completed",
+    total_cost_usd: 0,
+    num_turns: 1,
+    usage: {
+      input_tokens: 180,
+      output_tokens: 95,
+      cache_read_input_tokens: 40,
+    },
+  };
+  const current = sampleTask({
+    codex_usage_session_id: "thr-1",
+    codex_cumulative_input_tokens: 200,
+    codex_cumulative_cached_input_tokens: 50,
+    codex_cumulative_output_tokens: 100,
+    total_input_tokens: 200,
+    total_cached_input_tokens: 50,
+    total_output_tokens: 100,
+  });
+  const accounting = buildUsageAccounting("codex", result, current);
+  assert.equal(accounting.inputTokens, 0);
+  assert.equal(accounting.cachedInputTokens, 0);
+  assert.equal(accounting.outputTokens, 0);
+  assert.equal(accounting.updates.last_run_input_tokens, 0);
+  assert.equal(accounting.updates.total_input_tokens, 200);
+  assert.equal(accounting.updates.total_cached_input_tokens, 50);
+  assert.equal(accounting.updates.total_output_tokens, 100);
+  assert.equal(accounting.updates.codex_cumulative_input_tokens, 200);
+  assert.equal(accounting.updates.codex_cumulative_cached_input_tokens, 50);
+  assert.equal(accounting.updates.codex_cumulative_output_tokens, 100);
+});
+
 test("buildUsageAccounting resets when a new Codex session starts", () => {
   const result: ClaudeRunResult = {
     type: "codex",
@@ -318,11 +358,27 @@ test("isBranchCheckedOutError matches git's known phrasing", () => {
   assert.equal(isBranchCheckedOutError(new Error("unrelated")), false);
 });
 
+test("shouldClearCompletedRunPid only clears the pid owned by the completed run", () => {
+  assert.equal(
+    shouldClearCompletedRunPid(sampleTask({ current_run_pid: 123 }), 123),
+    true
+  );
+  assert.equal(
+    shouldClearCompletedRunPid(sampleTask({ current_run_pid: 456 }), 123),
+    false
+  );
+  assert.equal(
+    shouldClearCompletedRunPid(sampleTask({ current_run_pid: 456 })),
+    true
+  );
+  assert.equal(shouldClearCompletedRunPid(sampleTask(), 123), true);
+});
+
 test("computeCodexUsageDelta returns the cumulative value when sessions differ", () => {
   assert.equal(computeCodexUsageDelta(100, 30, true), 70);
   assert.equal(computeCodexUsageDelta(100, 30, false), 100);
-  // If current shrinks for the same session, the raw value is taken.
-  assert.equal(computeCodexUsageDelta(20, 30, true), 20);
+  // Lower same-session counters are stale/out-of-order cumulative reports.
+  assert.equal(computeCodexUsageDelta(20, 30, true), 0);
 });
 
 test("Codex event helpers stamp received_at and pick the better timestamp", () => {

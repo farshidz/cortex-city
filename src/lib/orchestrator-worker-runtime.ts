@@ -25,6 +25,12 @@ import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store"
 import type { ReviewRequest, ReviewSummary, Task } from "./types";
 
 export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
+export const DEAD_OWNED_PID_GRACE_MS = 10_000;
+
+export interface DeadOwnedPid {
+  pid: number;
+  firstSeenAt: number;
+}
 
 export function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean): boolean {
   return Boolean(
@@ -42,6 +48,28 @@ export function shouldResetStaleFinalCleanup(task: Task, hasActivePid: boolean):
       !task.current_run_pid &&
       !hasActivePid
   );
+}
+
+export function shouldWaitForDeadOwnedPid(
+  task: Task,
+  activePids: Map<string, number>,
+  deadOwnedPids: Map<string, DeadOwnedPid>,
+  now = Date.now()
+): boolean {
+  const currentPid = task.current_run_pid;
+  if (typeof currentPid !== "number") return false;
+  if (activePids.get(task.id) !== currentPid) return false;
+
+  const existing = deadOwnedPids.get(task.id);
+  if (!existing || existing.pid !== currentPid) {
+    deadOwnedPids.set(task.id, {
+      pid: currentPid,
+      firstSeenAt: now,
+    });
+    return true;
+  }
+
+  return now - existing.firstSeenAt < DEAD_OWNED_PID_GRACE_MS;
 }
 
 interface WorkerLogger {
@@ -113,10 +141,14 @@ async function launchTaskRun(
       await deps.updateTask(task.id, options.preSpawnUpdates);
     }
 
+    const launchState: { pid?: number } = {};
     const { pid } = await deps.spawnAgentSession(task, options.mode, async (taskId) => {
-      activePids.delete(taskId);
+      if (launchState.pid === undefined || activePids.get(taskId) === launchState.pid) {
+        activePids.delete(taskId);
+      }
       await options.onComplete?.(taskId);
     });
+    launchState.pid = pid;
 
     activePids.set(task.id, pid);
     await deps.updateTask(task.id, {
@@ -140,7 +172,8 @@ async function launchTaskRun(
 export async function pollOnce(
   activePids = new Map<string, number>(),
   deps: WorkerRuntimeDeps = defaultWorkerRuntimeDeps,
-  activeReviewPids: Map<string, number> = new Map()
+  activeReviewPids: Map<string, number> = new Map(),
+  deadOwnedPids: Map<string, DeadOwnedPid> = new Map()
 ): Promise<void> {
   deps.logger.log("[worker] Poll phase: load state");
   let tasks = deps.readTasks();
@@ -151,6 +184,7 @@ export async function pollOnce(
   for (const task of tasks) {
     if (!task.current_run_pid) {
       activePids.delete(task.id);
+      deadOwnedPids.delete(task.id);
       continue;
     }
 
@@ -159,12 +193,21 @@ export async function pollOnce(
         throw new Error("process not running");
       }
       activePids.set(task.id, task.current_run_pid);
+      deadOwnedPids.delete(task.id);
       liveTaskIds.add(task.id);
     } catch {
+      if (shouldWaitForDeadOwnedPid(task, activePids, deadOwnedPids)) {
+        liveTaskIds.add(task.id);
+        deps.logger.log(
+          `[worker] Waiting for completed PID ${task.current_run_pid} to settle for task ${task.id}`
+        );
+        continue;
+      }
       deps.logger.log(
         `[worker] Clearing orphaned PID ${task.current_run_pid} for task ${task.id}`
       );
       activePids.delete(task.id);
+      deadOwnedPids.delete(task.id);
       await deps.updateTask(task.id, buildInterruptedTaskUpdates(task));
     }
   }
@@ -172,6 +215,7 @@ export async function pollOnce(
   for (const taskId of [...activePids.keys()]) {
     if (!liveTaskIds.has(taskId)) {
       activePids.delete(taskId);
+      deadOwnedPids.delete(taskId);
     }
   }
 

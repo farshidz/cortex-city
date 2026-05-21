@@ -28,6 +28,7 @@ installLogger();
 // Track active sessions
 const activePids = new Map<string, number>();
 const activeReviewPids = new Map<string, number>();
+const deadOwnedPids = new Map<string, { pid: number; firstSeenAt: number }>();
 const STATE_FILE = path.join(CORTEX_DIR, "orchestrator-state.json");
 let pollInFlight: Promise<void> | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
@@ -61,7 +62,7 @@ async function runPollCycle() {
     writeState();
     console.log(`[worker] Poll started at ${pollTime}`);
     try {
-      await pollOnce(activePids, undefined, activeReviewPids);
+      await pollOnce(activePids, undefined, activeReviewPids, deadOwnedPids);
     } catch (err) {
       console.error("[worker] Poll error:", err);
     }
