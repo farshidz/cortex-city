@@ -120,6 +120,10 @@ export default function ReviewsPage() {
           <span className="w-3 h-3 rounded-sm bg-green-500/20 border border-green-500/30" />
           Up to date
         </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-sm bg-red-500/20 border border-red-500/30" />
+          Summary errors
+        </span>
       </div>
     </div>
   );

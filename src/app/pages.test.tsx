@@ -840,6 +840,10 @@ test("reviews page renders final reviews and backend status labels", () => {
       pendingSummary: html.includes("No summary yet"),
       summarizing: html.includes("Summary being generated"),
       summaryError: html.includes("Summary error"),
+      summaryErrorLegend: html.includes("Summary errors"),
+      summaryErrorLegendSwatch: html.includes(
+        "bg-red-500/20 border border-red-500/30"
+      ),
       finalLabel: html.includes("No longer live"),
       finalRow: html.includes("Final review"),
     }));
@@ -852,6 +856,8 @@ test("reviews page renders final reviews and backend status labels", () => {
     pendingSummary: true,
     summarizing: true,
     summaryError: true,
+    summaryErrorLegend: true,
+    summaryErrorLegendSwatch: true,
     finalLabel: true,
     finalRow: true,
   });
