@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { nanoid } from "nanoid";
-import { readTasks, createTask, readConfig } from "@/lib/store";
+import { readTasks, createTask, deleteTask, readConfig } from "@/lib/store";
+import { getIssue, linkTask } from "@/lib/issue-store";
 import type { AgentRuntime, Task } from "@/lib/types";
 import { getOrchestrator } from "@/lib/orchestrator";
 import {
@@ -24,6 +25,22 @@ export async function POST(request: NextRequest) {
   const now = new Date().toISOString();
   const config = readConfig();
   const runtime: AgentRuntime = body.agent_runner || config.default_agent_runner;
+
+  const issueId: string | undefined =
+    typeof body.issue_id === "string" && body.issue_id ? body.issue_id : undefined;
+  if (issueId) {
+    const issue = await getIssue(issueId);
+    if (!issue) {
+      return NextResponse.json({ error: "Issue not found" }, { status: 400 });
+    }
+    if (issue.task_id) {
+      return NextResponse.json(
+        { error: "Issue is already linked to a task" },
+        { status: 409 }
+      );
+    }
+  }
+
   const task: Task = {
     id: nanoid(10),
     title: body.title,
@@ -46,8 +63,20 @@ export async function POST(request: NextRequest) {
     total_input_tokens: 0,
     total_cached_input_tokens: 0,
     total_output_tokens: 0,
+    issue_id: issueId,
   };
   await createTask(task);
+
+  if (issueId) {
+    try {
+      await linkTask(issueId, task.id);
+    } catch (error) {
+      await deleteTask(task.id).catch(() => {});
+      const message = error instanceof Error ? error.message : "Failed to link issue";
+      return NextResponse.json({ error: message }, { status: 409 });
+    }
+  }
+
   const orchestrator = getOrchestrator();
   orchestrator.requestPoll();
   return NextResponse.json(task, { status: 201 });

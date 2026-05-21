@@ -4,6 +4,7 @@ import type { Task, OrchestratorConfig } from "./types";
 import { snapshotCortex } from "./cortex-git";
 import { deleteTaskLogs } from "./logger";
 import { DEFAULT_TASK_RUN_TIMEOUT_MS } from "./run-timeout";
+import { syncIssueFromTask } from "./issue-store";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
@@ -48,7 +49,7 @@ export function getCortexPath(...segments: string[]): string {
 // Simple promise-chain mutex for serializing writes
 let writeLock: Promise<void> = Promise.resolve();
 
-function withWriteLock<T>(fn: () => T): Promise<T> {
+function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
   const result = writeLock.then(fn);
   writeLock = result.then(() => {}, () => {});
   return result;
@@ -89,7 +90,7 @@ export async function createTask(task: Task): Promise<Task> {
 }
 
 export async function updateTask(id: string, updates: Partial<Task>): Promise<Task> {
-  return withWriteLock(() => {
+  return withWriteLock(async () => {
     const tasks = readTasks();
     const index = tasks.findIndex((t) => t.id === id);
     if (index === -1) throw new Error(`Task ${id} not found`);
@@ -99,7 +100,11 @@ export async function updateTask(id: string, updates: Partial<Task>): Promise<Ta
       updated_at: new Date().toISOString(),
     };
     writeTasksLocked(tasks);
-    return tasks[index];
+    const updated = tasks[index];
+    if (updated.issue_id) {
+      await syncIssueFromTask(updated);
+    }
+    return updated;
   });
 }
 

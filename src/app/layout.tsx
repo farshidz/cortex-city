@@ -62,6 +62,7 @@ export default async function RootLayout({
               </div>
             </Link>
             <div className="flex flex-col gap-1 flex-1">
+              <NavLink href="/issues">Issues</NavLink>
               <NavLink href="/">Tasks</NavLink>
               <ReviewsNavLink />
               <NavLink href="/agents">Agents</NavLink>
