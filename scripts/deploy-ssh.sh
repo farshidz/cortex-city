@@ -100,6 +100,7 @@ SYSTEMD_USER="${SYSTEMD_USER:-cortex}"
 SYSTEMD_GROUP="${SYSTEMD_GROUP:-$SYSTEMD_USER}"
 REMOTE_OWNER="${REMOTE_OWNER:-$SYSTEMD_USER}"
 REMOTE_GROUP="${REMOTE_GROUP:-$REMOTE_OWNER}"
+BUILD_COMMIT_SHA="${CORTEX_COMMIT_SHA:-${GITHUB_SHA:-}}"
 
 if [[ -z "$SYSTEMD_USER" || -z "$SYSTEMD_GROUP" ]]; then
   printf 'Set SYSTEMD_USER and SYSTEMD_GROUP.\n' >&2
@@ -116,6 +117,10 @@ require_local_command rsync
 require_local_command ssh
 require_local_command sed
 require_local_command mktemp
+
+if [[ -z "$BUILD_COMMIT_SHA" ]]; then
+  BUILD_COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+fi
 
 ssh_cmd=(ssh -p "$SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking="$SSH_STRICT_HOST_KEY_CHECKING")
 if [[ -n "$SSH_KEY_PATH" ]]; then
@@ -187,7 +192,7 @@ log "Installing dependencies and rebuilding on remote host"
 run_remote "
 set -euo pipefail
 $SUDO chown -R $(quote "$SYSTEMD_USER:$SYSTEMD_GROUP") $(quote "$APP_DIR")
-$SUDO -u $(quote "$SYSTEMD_USER") -H sh -lc 'cd $(printf '%q' "$APP_DIR") && npm ci && npm run build'
+$SUDO -u $(quote "$SYSTEMD_USER") -H env CORTEX_COMMIT_SHA=$(quote "$BUILD_COMMIT_SHA") sh -lc 'cd $(printf '%q' "$APP_DIR") && npm ci && npm run build'
 "
 
 log "Installing systemd units and restarting services"

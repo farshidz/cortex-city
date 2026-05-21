@@ -1093,6 +1093,7 @@ test("task detail collapses large plans by default and can expand them", () => {
 
 test("root layout renders navigation around page content", () => {
   const output = runRenderScript(`
+    process.env.NEXT_PUBLIC_CORTEX_COMMIT_SHA = "1234567890abcdef";
     const Layout = await loadComponent("./src/app/layout.tsx");
     const html = await render(
       React.createElement(Layout, {
@@ -1105,4 +1106,6 @@ test("root layout renders navigation around page content", () => {
   const html = output.join("\n");
   assert.match(html, /Cortex City/);
   assert.match(html, /child content/);
+  assert.match(html, /commit 1234567/);
+  assert.match(html, /title="1234567890abcdef"/);
 });

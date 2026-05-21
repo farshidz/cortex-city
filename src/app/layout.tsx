@@ -26,6 +26,9 @@ export const metadata: Metadata = {
   },
 };
 
+const commitSha = process.env.NEXT_PUBLIC_CORTEX_COMMIT_SHA;
+const shortCommitSha = commitSha?.slice(0, 7);
+
 export default async function RootLayout({
   children,
 }: Readonly<{
@@ -66,6 +69,14 @@ export default async function RootLayout({
               <NavLink href="/settings">Settings</NavLink>
             </div>
             <CortexGitStatusIndicator />
+            {shortCommitSha ? (
+              <div
+                className="mb-3 px-2 font-mono text-[11px] text-muted-foreground"
+                title={commitSha}
+              >
+                {`commit ${shortCommitSha}`}
+              </div>
+            ) : null}
             <ThemeSwitcher />
           </nav>
           <main className="flex-1 p-6 overflow-auto">{children}</main>
