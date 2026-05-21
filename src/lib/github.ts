@@ -408,6 +408,8 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
   const resultsByUrl = new Map<string, SearchResultPR>();
   for (const pr of [...requested, ...reviewed]) {
     const url = (pr.url || "").trim();
+    const author = pr.author?.login?.trim();
+    if (myLogin && author === myLogin) continue;
     if (url && !resultsByUrl.has(url)) {
       resultsByUrl.set(url, pr);
     }
