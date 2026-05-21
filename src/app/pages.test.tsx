@@ -869,6 +869,130 @@ test("review detail submit success navigates back to reviews", () => {
       }),
       text: async () => "",
     });
+    for (const decision of ["approve", "request-changes", "comment"]) {
+      await renderPage(
+        "./src/app/reviews/[id]/page.tsx",
+        {
+          params: Promise.resolve({
+            id: Buffer.from("https://github.com/acme/widget/pull/1", "utf-8")
+              .toString("base64url"),
+          }),
+        },
+        [
+          "",
+          false,
+          false,
+          "",
+          "",
+          { decision, body: "LGTM", submitting: false },
+        ]
+      );
+      await invokeHandlers();
+    }
+    console.log(JSON.stringify({
+      pushes: globalThis.__ROUTER_PUSHES__,
+      mutateCount: globalThis.__MUTATE_COUNT__,
+    }));
+  `);
+
+  const result = JSON.parse(output[0]);
+  assert.ok(result.pushes.length >= 3);
+  assert.ok(result.pushes.every((path: string) => path === "/reviews"));
+  assert.equal(result.mutateCount, result.pushes.length);
+});
+
+test("review detail covers alternate submit and summary states", () => {
+  const output = runRenderScript(`
+    const originalData = globalThis.__SWR_DATA__;
+    const fallbackErrorReview = {
+      ...review,
+      pr_url: "https://github.com/acme/widget/pull/8",
+      pr_number: 8,
+      title: "Fallback error review",
+      author: "",
+      error: undefined,
+      review_status: "summary_error",
+      runtime: undefined,
+      effort: undefined,
+      followups: undefined,
+    };
+
+    globalThis.__SWR_DATA__ = {};
+    const loadingHtml = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from("https://github.com/acme/widget/pull/1", "utf-8")
+            .toString("base64url"),
+        }),
+      }
+    );
+
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/config": undefined,
+      "/api/reviews": [fallbackErrorReview],
+    };
+    const fallbackHtml = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from(fallbackErrorReview.pr_url, "utf-8").toString("base64url"),
+        }),
+      },
+      ["What should I check?", false, false, "", "", null]
+    );
+    await invokeHandlers();
+
+    globalThis.__SWR_DATA__ = originalData;
+    const requestDialog = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from("https://github.com/acme/widget/pull/1", "utf-8")
+            .toString("base64url"),
+        }),
+      },
+      [
+        "",
+        false,
+        false,
+        "",
+        "",
+        {
+          decision: "request-changes",
+          body: "Needs work",
+          submitting: true,
+          error: "Submit failed",
+        },
+      ]
+    );
+    const commentDialog = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from("https://github.com/acme/widget/pull/1", "utf-8")
+            .toString("base64url"),
+        }),
+      },
+      [
+        "",
+        false,
+        false,
+        "",
+        "",
+        { decision: "comment", body: "FYI", submitting: false },
+      ]
+    );
+
+    globalThis.__ROUTER_PUSHES__ = [];
+    globalThis.__MUTATE_COUNT__ = 0;
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 500,
+      json: async () => { throw new Error("bad json"); },
+      text: async () => "",
+    });
     await renderPage(
       "./src/app/reviews/[id]/page.tsx",
       {
@@ -883,18 +1007,33 @@ test("review detail submit success navigates back to reviews", () => {
         false,
         "",
         "",
-        { decision: "approve", body: "LGTM", submitting: false },
+        { decision: "comment", body: "FYI", submitting: false },
       ]
     );
     await invokeHandlers();
+    globalThis.__SWR_DATA__ = originalData;
+
     console.log(JSON.stringify({
-      pushes: globalThis.__ROUTER_PUSHES__,
-      mutateCount: globalThis.__MUTATE_COUNT__,
+      loading: loadingHtml.includes("Loading"),
+      fallbackError: fallbackHtml.includes("Summary error"),
+      fallbackAuthor: fallbackHtml.includes("—"),
+      requestedChanges: requestDialog.includes("Request changes"),
+      requestDialogLength: requestDialog.length,
+      commentDialogLength: commentDialog.length,
+      failurePushes: globalThis.__ROUTER_PUSHES__,
+      failureMutateCount: globalThis.__MUTATE_COUNT__,
     }));
   `);
 
-  assert.deepEqual(JSON.parse(output[0]).pushes, ["/reviews"]);
-  assert.ok(JSON.parse(output[0]).mutateCount > 0);
+  const result = JSON.parse(output[0]);
+  assert.equal(result.loading, true);
+  assert.equal(result.fallbackError, true);
+  assert.equal(result.fallbackAuthor, true);
+  assert.equal(result.requestedChanges, true);
+  assert.ok(result.requestDialogLength > 0);
+  assert.ok(result.commentDialogLength > 0);
+  assert.deepEqual(result.failurePushes, []);
+  assert.equal(result.failureMutateCount, 0);
 });
 
 test("task detail collapses large plans by default and can expand them", () => {
