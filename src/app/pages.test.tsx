@@ -2,6 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import {
+  REVIEW_STATUS_BADGE_CLASSES,
+  REVIEW_STATUS_LABELS,
+  REVIEW_STATUS_ROW_CLASSES,
+} from "../lib/review-status-presentation";
 
 const REPO_ROOT = process.cwd();
 const TSX_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "tsx");
@@ -103,7 +108,11 @@ function runRenderScript(body: string): string[] {
               data: globalThis.__SWR_DATA__?.[
                 typeof key === "string" ? key : JSON.stringify(key)
               ],
-              mutate() {},
+              mutate() {
+                globalThis.__MUTATE_COUNT__ =
+                  (globalThis.__MUTATE_COUNT__ || 0) + 1;
+                return Promise.resolve();
+              },
             });
             useSWR.default = useSWR;
             return useSWR;
@@ -119,11 +128,13 @@ function runRenderScript(body: string): string[] {
           const { AppRouterContext } = await import(
             "next/dist/shared/lib/app-router-context.shared-runtime"
           );
+          globalThis.__ROUTER_PUSHES__ = [];
+          globalThis.__MUTATE_COUNT__ = 0;
           const router = {
             back() {},
             forward() {},
             prefetch() { return Promise.resolve(); },
-            push() {},
+            push(path) { globalThis.__ROUTER_PUSHES__.push(path); },
             replace() {},
             refresh() {},
             hmrRefresh() {},
@@ -257,6 +268,7 @@ function runRenderScript(body: string): string[] {
             generated_at: now,
             runtime: "codex",
             effort: "medium",
+            review_status: "new_commits",
             followups: [
               {
                 asked_at: now,
@@ -274,6 +286,7 @@ function runRenderScript(body: string): string[] {
             title: "Unchanged review",
             head_sha: "same-sha",
             my_last_review_sha: "same-sha",
+            review_status: "up_to_date",
           };
           const runningReview = {
             ...review,
@@ -282,6 +295,7 @@ function runRenderScript(body: string): string[] {
             title: "Running review",
             summary: "",
             current_run_pid: 789,
+            review_status: "summarizing",
           };
           const errorReview = {
             ...review,
@@ -290,6 +304,7 @@ function runRenderScript(body: string): string[] {
             title: "Errored review",
             summary: "",
             error: "Unable to summarize",
+            review_status: "summary_error",
             followups: [
               {
                 asked_at: now,
@@ -308,6 +323,7 @@ function runRenderScript(body: string): string[] {
             title: "Empty review",
             summary: "",
             generated_at: "",
+            review_status: "pending_summary",
             followups: [
               {
                 asked_at: now,
@@ -317,6 +333,22 @@ function runRenderScript(body: string): string[] {
                 resumed: false,
               },
             ],
+          };
+          const needsReview = {
+            ...review,
+            pr_url: "https://github.com/acme/widget/pull/7",
+            pr_number: 7,
+            title: "Needs review",
+            my_last_review_sha: undefined,
+            review_status: "needs_review",
+          };
+          const finalReview = {
+            ...review,
+            pr_url: "https://github.com/acme/widget/pull/6",
+            pr_number: 6,
+            title: "Final review",
+            final_at: now,
+            review_status: "final",
           };
           const closedTask = {
             ...task,
@@ -380,12 +412,13 @@ function runRenderScript(body: string): string[] {
               path: "prompts/agents/.env.cortex-city-swe",
             },
             "/api/reviews": [
+              needsReview,
               review,
               unchangedReview,
               runningReview,
               errorReview,
               emptyReview,
-              { ...review, pr_url: "https://github.com/acme/widget/pull/6", final_at: now },
+              finalReview,
             ],
             "/api/sessions": [
               {
@@ -765,6 +798,242 @@ test("app pages render loading, empty, and detail variants", () => {
   for (const row of rows) {
     assert.ok(row.length > 0);
   }
+});
+
+test("review status presentation matches expected labels and classes", () => {
+  assert.deepEqual(REVIEW_STATUS_LABELS, {
+    needs_review: "Awaiting your review",
+    new_commits: "New commits since your review",
+    up_to_date: "Up to date with your review",
+    pending_summary: "No summary yet",
+    summarizing: "Summary being generated",
+    summary_error: "Summary error",
+    final: "No longer live",
+  });
+  assert.deepEqual(REVIEW_STATUS_ROW_CLASSES, {
+    needs_review: "bg-yellow-500/10",
+    new_commits: "bg-yellow-500/10",
+    up_to_date: "bg-green-500/10",
+    pending_summary: "",
+    summarizing: "animate-pulse-green",
+    summary_error: "bg-red-500/10",
+    final: "bg-muted/40 opacity-60",
+  });
+  assert.deepEqual(REVIEW_STATUS_BADGE_CLASSES, {
+    needs_review: "bg-yellow-100 text-yellow-800",
+    new_commits: "bg-yellow-100 text-yellow-800",
+    up_to_date: "bg-green-100 text-green-800",
+    pending_summary: "bg-blue-100 text-blue-800",
+    summarizing: "bg-green-100 text-green-800",
+    summary_error: "bg-red-100 text-red-800",
+    final: "bg-gray-100 text-gray-800",
+  });
+});
+
+test("reviews page renders final reviews and backend status labels", () => {
+  const output = runRenderScript(`
+    const html = await renderPage("./src/app/reviews/page.tsx");
+    console.log(JSON.stringify({
+      needsReview: html.includes("Awaiting your review"),
+      newCommits: html.includes("New commits since your review"),
+      upToDate: html.includes("Up to date with your review"),
+      pendingSummary: html.includes("No summary yet"),
+      summarizing: html.includes("Summary being generated"),
+      summaryError: html.includes("Summary error"),
+      finalLabel: html.includes("No longer live"),
+      finalRow: html.includes("Final review"),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    needsReview: true,
+    newCommits: true,
+    upToDate: true,
+    pendingSummary: true,
+    summarizing: true,
+    summaryError: true,
+    finalLabel: true,
+    finalRow: true,
+  });
+});
+
+test("review detail submit success navigates back to reviews", () => {
+  const output = runRenderScript(`
+    globalThis.fetch = async (url, init = {}) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        url,
+        method: init.method,
+      }),
+      text: async () => "",
+    });
+    for (const decision of ["approve", "request-changes", "comment"]) {
+      await renderPage(
+        "./src/app/reviews/[id]/page.tsx",
+        {
+          params: Promise.resolve({
+            id: Buffer.from("https://github.com/acme/widget/pull/1", "utf-8")
+              .toString("base64url"),
+          }),
+        },
+        [
+          "",
+          false,
+          false,
+          "",
+          "",
+          { decision, body: "LGTM", submitting: false },
+        ]
+      );
+      await invokeHandlers();
+    }
+    console.log(JSON.stringify({
+      pushes: globalThis.__ROUTER_PUSHES__,
+      mutateCount: globalThis.__MUTATE_COUNT__,
+    }));
+  `);
+
+  const result = JSON.parse(output[0]);
+  assert.ok(result.pushes.length >= 3);
+  assert.ok(result.pushes.every((path: string) => path === "/reviews"));
+  assert.ok(result.mutateCount >= result.pushes.length);
+});
+
+test("review detail covers alternate submit and summary states", () => {
+  const output = runRenderScript(`
+    const originalData = globalThis.__SWR_DATA__;
+    const fallbackErrorReview = {
+      ...review,
+      pr_url: "https://github.com/acme/widget/pull/8",
+      pr_number: 8,
+      title: "Fallback error review",
+      author: "",
+      error: undefined,
+      review_status: "summary_error",
+      runtime: undefined,
+      effort: undefined,
+      followups: undefined,
+    };
+
+    globalThis.__SWR_DATA__ = {};
+    const loadingHtml = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from("https://github.com/acme/widget/pull/1", "utf-8")
+            .toString("base64url"),
+        }),
+      }
+    );
+
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/config": undefined,
+      "/api/reviews": [fallbackErrorReview],
+    };
+    const fallbackHtml = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from(fallbackErrorReview.pr_url, "utf-8").toString("base64url"),
+        }),
+      },
+      ["What should I check?", false, false, "", "", null]
+    );
+    await invokeHandlers();
+
+    globalThis.__SWR_DATA__ = originalData;
+    const requestDialog = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from("https://github.com/acme/widget/pull/1", "utf-8")
+            .toString("base64url"),
+        }),
+      },
+      [
+        "",
+        false,
+        false,
+        "",
+        "",
+        {
+          decision: "request-changes",
+          body: "Needs work",
+          submitting: true,
+          error: "Submit failed",
+        },
+      ]
+    );
+    const commentDialog = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from("https://github.com/acme/widget/pull/1", "utf-8")
+            .toString("base64url"),
+        }),
+      },
+      [
+        "",
+        false,
+        false,
+        "",
+        "",
+        { decision: "comment", body: "FYI", submitting: false },
+      ]
+    );
+
+    globalThis.__ROUTER_PUSHES__ = [];
+    globalThis.__MUTATE_COUNT__ = 0;
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 500,
+      json: async () => { throw new Error("bad json"); },
+      text: async () => "",
+    });
+    await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from("https://github.com/acme/widget/pull/1", "utf-8")
+            .toString("base64url"),
+        }),
+      },
+      [
+        "",
+        false,
+        false,
+        "",
+        "",
+        { decision: "comment", body: "FYI", submitting: false },
+      ]
+    );
+    await invokeHandlers();
+    globalThis.__SWR_DATA__ = originalData;
+
+    console.log(JSON.stringify({
+      loading: loadingHtml.includes("Loading"),
+      fallbackError: fallbackHtml.includes("Summary error"),
+      fallbackAuthor: fallbackHtml.includes("—"),
+      requestedChanges: requestDialog.includes("Request changes"),
+      requestDialogLength: requestDialog.length,
+      commentDialogLength: commentDialog.length,
+      failurePushes: globalThis.__ROUTER_PUSHES__,
+      failureMutateCount: globalThis.__MUTATE_COUNT__,
+    }));
+  `);
+
+  const result = JSON.parse(output[0]);
+  assert.equal(result.loading, true);
+  assert.equal(result.fallbackError, true);
+  assert.equal(result.fallbackAuthor, true);
+  assert.equal(result.requestedChanges, true);
+  assert.ok(result.requestDialogLength > 0);
+  assert.ok(result.commentDialogLength > 0);
+  assert.deepEqual(result.failurePushes, []);
+  assert.ok(result.failureMutateCount >= 0);
 });
 
 test("task detail collapses large plans by default and can expand them", () => {

@@ -952,6 +952,9 @@ function withReviewState(body: string) {
 
       const prUrl = "https://github.com/acme/widget/pull/1";
       const staleUrl = "https://github.com/acme/widget/pull/2";
+      const runningUrl = "https://github.com/acme/widget/pull/3";
+      const needsReviewUrl = "https://github.com/acme/widget/pull/4";
+      const finalUrl = "https://github.com/acme/widget/pull/5";
       writeJson(path.join(cortexDir, "config.json"), {
         max_parallel_sessions: 2,
         poll_interval_seconds: 30,
@@ -967,11 +970,11 @@ function withReviewState(body: string) {
           title: "Older review",
           author: "octocat",
           head_sha: "def456",
+          my_last_review_sha: "old-sha",
           created_at: "2026-05-01T00:00:00.000Z",
           updated_at: "2026-05-01T00:00:00.000Z",
           summary: "older",
           generated_at: "2026-05-01T00:00:00.000Z",
-          review_state: "needs_approval",
         },
         [prUrl]: {
           pr_url: prUrl,
@@ -985,7 +988,6 @@ function withReviewState(body: string) {
           updated_at: "2026-05-02T00:00:00.000Z",
           summary: "current summary",
           generated_at: "2026-05-02T00:00:00.000Z",
-          review_state: "needs_approval",
           followups: [
             {
               asked_at: "2026-05-02T00:01:00.000Z",
@@ -996,19 +998,43 @@ function withReviewState(body: string) {
             },
           ],
         },
-        "https://github.com/acme/widget/pull/3": {
-          pr_url: "https://github.com/acme/widget/pull/3",
+        [runningUrl]: {
+          pr_url: runningUrl,
           pr_number: 3,
           repo_slug: "acme/widget",
           title: "Running review",
           author: "octocat",
           head_sha: "ghi789",
           created_at: "2026-05-03T00:00:00.000Z",
-          updated_at: "2026-05-03T00:00:00.000Z",
+          updated_at: "2026-05-05T00:00:00.000Z",
           summary: "",
           generated_at: "",
-          review_state: "needs_approval",
           current_run_pid: 12345,
+        },
+        [needsReviewUrl]: {
+          pr_url: needsReviewUrl,
+          pr_number: 4,
+          repo_slug: "acme/widget",
+          title: "Needs review",
+          author: "octocat",
+          head_sha: "jkl012",
+          created_at: "2026-05-04T00:00:00.000Z",
+          updated_at: "2026-05-04T00:00:00.000Z",
+          summary: "ready",
+          generated_at: "2026-05-04T00:00:00.000Z",
+        },
+        [finalUrl]: {
+          pr_url: finalUrl,
+          pr_number: 5,
+          repo_slug: "acme/widget",
+          title: "Final review",
+          author: "octocat",
+          head_sha: "mno345",
+          created_at: "2026-05-06T00:00:00.000Z",
+          updated_at: "2026-05-06T00:00:00.000Z",
+          summary: "done",
+          generated_at: "2026-05-06T00:00:00.000Z",
+          final_at: "2026-05-06T00:01:00.000Z",
         },
       });
       fs.writeFileSync(
@@ -1040,14 +1066,25 @@ function withReviewState(body: string) {
     `;
 }
 
-test("reviews route lists cached reviews by recency", () => {
+test("reviews route lists cached reviews by status group then recency", () => {
   runRouteAssertions(
     withReviewState(`
       const reviewsRoute = await loadRoute("./src/app/api/reviews/route.ts");
       const reviews = await json(await reviewsRoute.GET());
-      assert.equal(reviews.body[0].pr_url, "https://github.com/acme/widget/pull/3");
-      assert.equal(reviews.body[1].pr_url, prUrl);
-      assert.equal(reviews.body[2].pr_url, staleUrl);
+      assert.deepEqual(reviews.body.map((review) => review.pr_url), [
+        needsReviewUrl,
+        staleUrl,
+        runningUrl,
+        prUrl,
+        finalUrl,
+      ]);
+      assert.deepEqual(reviews.body.map((review) => review.review_status), [
+        "needs_review",
+        "new_commits",
+        "summarizing",
+        "up_to_date",
+        "final",
+      ]);
     `)
   );
 });

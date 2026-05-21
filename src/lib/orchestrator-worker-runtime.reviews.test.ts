@@ -6,6 +6,7 @@ import {
   pollOnce,
   type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
+import { withReviewStatus } from "./review-status";
 import type {
   OrchestratorConfig,
   ReviewRequest,
@@ -60,12 +61,12 @@ function makeSummary(
   base: ReviewRequest,
   overrides: Partial<ReviewSummary> = {}
 ): ReviewSummary {
-  return {
+  return withReviewStatus({
     ...base,
     summary: "",
     generated_at: "",
     ...overrides,
-  };
+  }) as ReviewSummary;
 }
 
 function makeHarness(options: HarnessOptions = {}): Harness {
@@ -97,9 +98,11 @@ function makeHarness(options: HarnessOptions = {}): Harness {
       spawnCalls.push(request);
       const pid = spawnPid();
       reviews[request.pr_url] = {
-        ...(reviews[request.pr_url] || makeSummary(request)),
-        ...request,
-        current_run_pid: pid,
+        ...withReviewStatus({
+          ...(reviews[request.pr_url] || makeSummary(request)),
+          ...request,
+          current_run_pid: pid,
+        }),
       };
       return {
         pid,
@@ -113,7 +116,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     },
     updateTask: async () => ({}) as never,
     upsertReviewSummary: async (entry) => {
-      reviews[entry.pr_url] = { ...entry };
+      reviews[entry.pr_url] = withReviewStatus(entry) as ReviewSummary;
       return reviews[entry.pr_url];
     },
     deleteReviewSummary: async (prUrl) => {

@@ -317,7 +317,7 @@ export async function spawnReviewSummary(
   const prompt = buildReviewWrapperPrompt(config, request.pr_url);
 
   const cachedBefore = getReviewSummary(request.pr_url);
-  const baseEntry: ReviewSummary = {
+  const baseEntry = {
     ...request,
     summary: cachedBefore?.summary ?? "",
     generated_at: cachedBefore?.generated_at ?? "",
@@ -348,7 +348,7 @@ export async function spawnReviewSummary(
 
   const completion = done.then(async (output) => {
     const generatedAt = new Date().toISOString();
-    const next: ReviewSummary = {
+    const next = {
       ...request,
       summary: output.error ? cachedBefore?.summary ?? "" : output.result_text.trim(),
       generated_at: output.error ? cachedBefore?.generated_at ?? "" : generatedAt,
@@ -364,11 +364,11 @@ export async function spawnReviewSummary(
       final_at: undefined,
       current_run_pid: undefined,
     };
-    await upsertReviewSummary(next);
+    const saved = await upsertReviewSummary(next);
     if (onComplete) {
-      await onComplete(next);
+      await onComplete(saved);
     }
-    return next;
+    return saved;
   });
 
   return { pid, child, done: completion };

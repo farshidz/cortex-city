@@ -22,6 +22,7 @@ test("resolveReviewOpts and resolveReviewPrompt cover their fallback branches", 
   const baseConfig = {
     max_parallel_sessions: 2,
     poll_interval_seconds: 30,
+    task_run_timeout_ms: undefined,
     default_permission_mode: "bypassPermissions" as const,
     default_agent_runner: "claude" as const,
     agents: {},
