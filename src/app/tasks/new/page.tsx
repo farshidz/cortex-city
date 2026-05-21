@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState, useEffect, useRef } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MdEditor } from "@/components/md-editor";
@@ -21,6 +22,7 @@ import {
 } from "@/components/ui/card";
 import type {
   AgentRuntime,
+  Issue,
   OrchestratorConfig,
   PermissionMode,
   TaskEffort,
@@ -34,8 +36,20 @@ import {
 } from "@/lib/runtime-config";
 
 export default function NewTaskPage() {
+  return (
+    <Suspense fallback={<div className="text-muted-foreground">Loading...</div>}>
+      <NewTaskPageBody />
+    </Suspense>
+  );
+}
+
+function NewTaskPageBody() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const issueId = searchParams?.get("issue_id") ?? null;
   const [config, setConfig] = useState<OrchestratorConfig | null>(null);
+  const [issue, setIssue] = useState<Issue | null>(null);
+  const prefilledRef = useRef(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [plan, setPlan] = useState("");
@@ -64,6 +78,20 @@ export default function NewTaskPage() {
       });
   }, []);
 
+  useEffect(() => {
+    if (!issueId || prefilledRef.current) return;
+    fetch(`/api/issues/${issueId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: Issue | null) => {
+        if (!data || prefilledRef.current) return;
+        prefilledRef.current = true;
+        setIssue(data);
+        setTitle(data.title);
+        setDescription(data.description ?? "");
+        setPlan(data.plan ?? "");
+      });
+  }, [issueId]);
+
   function handleRunnerChange(value: string) {
     if (!config) return;
     if (value !== "claude" && value !== "codex") return;
@@ -79,7 +107,7 @@ export default function NewTaskPage() {
     e.preventDefault();
     if (!title || !agent) return;
     setSubmitting(true);
-    await fetch("/api/tasks", {
+    const res = await fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -92,9 +120,18 @@ export default function NewTaskPage() {
         permission_mode: permissionMode || config?.default_permission_mode,
         model: model || undefined,
         effort: effort || undefined,
+        issue_id: issueId || undefined,
       }),
     });
-    router.push("/");
+    if (!res.ok) {
+      setSubmitting(false);
+      return;
+    }
+    if (issueId) {
+      router.push(`/issues/${issueId}`);
+    } else {
+      router.push("/");
+    }
   }
 
   if (!config) return <div className="text-muted-foreground">Loading...</div>;
@@ -104,6 +141,15 @@ export default function NewTaskPage() {
   return (
     <div className="max-w-2xl">
       <h1 className="text-2xl font-bold mb-4">New Task</h1>
+      {issueId && issue && (
+        <div className="mb-4 rounded-md border bg-muted/40 p-3 text-sm">
+          Creating a task from issue{" "}
+          <Link href={`/issues/${issue.id}`} className="underline font-medium">
+            {issue.title}
+          </Link>
+          .
+        </div>
+      )}
       <Card>
         <CardHeader>
           <CardTitle>Create a new task</CardTitle>

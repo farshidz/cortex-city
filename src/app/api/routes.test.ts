@@ -1286,3 +1286,422 @@ test("review summarize route launches Codex summaries with overrides", () => {
     `)
   );
 });
+
+test("issues route creates, lists, paginates, and filters resolved", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const issuesRoute = await loadRoute("./src/app/api/issues/route.ts");
+
+      const create = (title, plan) =>
+        issuesRoute.POST(
+          request("http://localhost/api/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title, description: title + " desc", plan }),
+          })
+        );
+
+      const a = (await json(await create("Alpha"))).body;
+      const b = (await json(await create("Beta", "## Plan"))).body;
+      const c = (await json(await create("Gamma"))).body;
+      assert.equal(typeof a.id, "string");
+      assert.equal(b.plan, "## Plan");
+
+      const issueDetailRoute = await loadRoute(
+        "./src/app/api/issues/[id]/route.ts"
+      );
+      await issueDetailRoute.PUT(
+        request("http://localhost/api/issues/" + c.id, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "closed" }),
+        }),
+        { params: Promise.resolve({ id: c.id }) }
+      );
+
+      const defaultList = (await json(
+        await issuesRoute.GET(request("http://localhost/api/issues"))
+      )).body;
+      assert.equal(defaultList.total, 2);
+      assert.equal(defaultList.items.length, 2);
+
+      const resolvedList = (await json(
+        await issuesRoute.GET(
+          request("http://localhost/api/issues?show_resolved=true")
+        )
+      )).body;
+      assert.equal(resolvedList.total, 3);
+
+      const page1 = (await json(
+        await issuesRoute.GET(
+          request("http://localhost/api/issues?show_resolved=true&page=1&page_size=2")
+        )
+      )).body;
+      assert.equal(page1.items.length, 2);
+      assert.equal(page1.page, 1);
+      assert.equal(page1.page_size, 2);
+
+      const page2 = (await json(
+        await issuesRoute.GET(
+          request("http://localhost/api/issues?show_resolved=true&page=2&page_size=2")
+        )
+      )).body;
+      assert.equal(page2.items.length, 1);
+      assert.equal(page2.page, 2);
+    `)
+  );
+});
+
+test("issues comments route appends comments and bumps updated_at", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const issuesRoute = await loadRoute("./src/app/api/issues/route.ts");
+      const commentsRoute = await loadRoute(
+        "./src/app/api/issues/[id]/comments/route.ts"
+      );
+      const issueDetailRoute = await loadRoute(
+        "./src/app/api/issues/[id]/route.ts"
+      );
+
+      const created = (await json(
+        await issuesRoute.POST(
+          request("http://localhost/api/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: "I", description: "" }),
+          })
+        )
+      )).body;
+
+      const empty = (await json(
+        await commentsRoute.POST(
+          request("http://localhost/api/issues/" + created.id + "/comments", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ body: "   " }),
+          }),
+          { params: Promise.resolve({ id: created.id }) }
+        )
+      ));
+      assert.equal(empty.status, 400);
+
+      const comment = (await json(
+        await commentsRoute.POST(
+          request("http://localhost/api/issues/" + created.id + "/comments", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ body: "Hello" }),
+          }),
+          { params: Promise.resolve({ id: created.id }) }
+        )
+      )).body;
+      assert.equal(comment.body, "Hello");
+
+      const detail = (await json(
+        await issueDetailRoute.GET(
+          request("http://localhost/api/issues/" + created.id),
+          { params: Promise.resolve({ id: created.id }) }
+        )
+      )).body;
+      assert.equal(detail.comments.length, 1);
+    `)
+  );
+});
+
+test("issue delete returns 409 when a task is linked", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const issuesRoute = await loadRoute("./src/app/api/issues/route.ts");
+      const issueDetailRoute = await loadRoute(
+        "./src/app/api/issues/[id]/route.ts"
+      );
+      const issueStoreImported = await import(
+        new URL("./src/lib/issue-store.ts", \`file://\${repoRoot}/\`).href
+      );
+      const issueStore = issueStoreImported.default || issueStoreImported;
+
+      const created = (await json(
+        await issuesRoute.POST(
+          request("http://localhost/api/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: "I", description: "" }),
+          })
+        )
+      )).body;
+      await issueStore.linkTask(created.id, "task-x");
+
+      const blocked = await json(
+        await issueDetailRoute.DELETE(
+          request("http://localhost/api/issues/" + created.id, { method: "DELETE" }),
+          { params: Promise.resolve({ id: created.id }) }
+        )
+      );
+      assert.equal(blocked.status, 409);
+    `)
+  );
+});
+
+test("issues routes return validation and not-found errors", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const issuesRoute = await loadRoute("./src/app/api/issues/route.ts");
+      const issueDetailRoute = await loadRoute(
+        "./src/app/api/issues/[id]/route.ts"
+      );
+      const commentsRoute = await loadRoute(
+        "./src/app/api/issues/[id]/comments/route.ts"
+      );
+
+      const noTitle = await json(
+        await issuesRoute.POST(
+          request("http://localhost/api/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ description: "x" }),
+          })
+        )
+      );
+      assert.equal(noTitle.status, 400);
+
+      const missingGet = await json(
+        await issueDetailRoute.GET(
+          request("http://localhost/api/issues/missing"),
+          { params: Promise.resolve({ id: "missing" }) }
+        )
+      );
+      assert.equal(missingGet.status, 404);
+
+      const missingDelete = await json(
+        await issueDetailRoute.DELETE(
+          request("http://localhost/api/issues/missing", { method: "DELETE" }),
+          { params: Promise.resolve({ id: "missing" }) }
+        )
+      );
+      assert.equal(missingDelete.status, 404);
+
+      const created = (await json(
+        await issuesRoute.POST(
+          request("http://localhost/api/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: "Live", description: "" }),
+          })
+        )
+      )).body;
+
+      const badStatus = await json(
+        await issueDetailRoute.PUT(
+          request("http://localhost/api/issues/" + created.id, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status: "bogus" }),
+          }),
+          { params: Promise.resolve({ id: created.id }) }
+        )
+      );
+      assert.equal(badStatus.status, 400);
+
+      const missingPut = await json(
+        await issueDetailRoute.PUT(
+          request("http://localhost/api/issues/missing", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: "X" }),
+          }),
+          { params: Promise.resolve({ id: "missing" }) }
+        )
+      );
+      assert.equal(missingPut.status, 404);
+
+      const emptyComment = await json(
+        await commentsRoute.POST(
+          request("http://localhost/api/issues/" + created.id + "/comments", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({}),
+          }),
+          { params: Promise.resolve({ id: created.id }) }
+        )
+      );
+      assert.equal(emptyComment.status, 400);
+
+      const missingComment = await json(
+        await commentsRoute.POST(
+          request("http://localhost/api/issues/missing/comments", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ body: "hi" }),
+          }),
+          { params: Promise.resolve({ id: "missing" }) }
+        )
+      );
+      assert.equal(missingComment.status, 404);
+
+      const okDelete = await json(
+        await issueDetailRoute.DELETE(
+          request("http://localhost/api/issues/" + created.id, { method: "DELETE" }),
+          { params: Promise.resolve({ id: created.id }) }
+        )
+      );
+      assert.equal(okDelete.status, 200);
+      assert.equal(okDelete.body.ok, true);
+    `)
+  );
+});
+
+test("tasks route rejects unknown issue_id and tasks DELETE unlinks issue", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const tasksRoute = await loadRoute("./src/app/api/tasks/route.ts");
+      const taskDetailRoute = await loadRoute(
+        "./src/app/api/tasks/[id]/route.ts"
+      );
+      const issuesRoute = await loadRoute("./src/app/api/issues/route.ts");
+      const issueDetailRoute = await loadRoute(
+        "./src/app/api/issues/[id]/route.ts"
+      );
+
+      const missingIssue = await json(
+        await tasksRoute.POST(
+          request("http://localhost/api/tasks", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: "T",
+              description: "",
+              agent: "cortex-city-swe",
+              issue_id: "missing",
+            }),
+          })
+        )
+      );
+      assert.equal(missingIssue.status, 400);
+
+      const issue = (await json(
+        await issuesRoute.POST(
+          request("http://localhost/api/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: "I", description: "" }),
+          })
+        )
+      )).body;
+
+      const task = (await json(
+        await tasksRoute.POST(
+          request("http://localhost/api/tasks", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: "T",
+              description: "",
+              agent: "cortex-city-swe",
+              issue_id: issue.id,
+            }),
+          })
+        )
+      )).body;
+
+      const deleted = await json(
+        await taskDetailRoute.DELETE(
+          request("http://localhost/api/tasks/" + task.id, { method: "DELETE" }),
+          { params: Promise.resolve({ id: task.id }) }
+        )
+      );
+      assert.equal(deleted.status, 200);
+
+      const reopened = (await json(
+        await issueDetailRoute.GET(
+          request("http://localhost/api/issues/" + issue.id),
+          { params: Promise.resolve({ id: issue.id }) }
+        )
+      )).body;
+      assert.equal(reopened.status, "open");
+      assert.equal(reopened.task_id, undefined);
+    `)
+  );
+});
+
+test("tasks route links and syncs issue on POST and PUT", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const tasksRoute = await loadRoute("./src/app/api/tasks/route.ts");
+      const taskDetailRoute = await loadRoute(
+        "./src/app/api/tasks/[id]/route.ts"
+      );
+      const issuesRoute = await loadRoute("./src/app/api/issues/route.ts");
+      const issueDetailRoute = await loadRoute(
+        "./src/app/api/issues/[id]/route.ts"
+      );
+
+      const issue = (await json(
+        await issuesRoute.POST(
+          request("http://localhost/api/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: "Source", description: "" }),
+          })
+        )
+      )).body;
+
+      const task = (await json(
+        await tasksRoute.POST(
+          request("http://localhost/api/tasks", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: "From issue",
+              description: "",
+              agent: "cortex-city-swe",
+              issue_id: issue.id,
+            }),
+          })
+        )
+      )).body;
+      assert.equal(task.issue_id, issue.id);
+
+      const linkedIssue = (await json(
+        await issueDetailRoute.GET(
+          request("http://localhost/api/issues/" + issue.id),
+          { params: Promise.resolve({ id: issue.id }) }
+        )
+      )).body;
+      assert.equal(linkedIssue.task_id, task.id);
+      assert.equal(linkedIssue.status, "in_progress");
+
+      await taskDetailRoute.PUT(
+        request("http://localhost/api/tasks/" + task.id, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "merged" }),
+        }),
+        { params: Promise.resolve({ id: task.id }) }
+      );
+
+      const doneIssue = (await json(
+        await issueDetailRoute.GET(
+          request("http://localhost/api/issues/" + issue.id),
+          { params: Promise.resolve({ id: issue.id }) }
+        )
+      )).body;
+      assert.equal(doneIssue.status, "done");
+
+      const duplicate = await json(
+        await tasksRoute.POST(
+          request("http://localhost/api/tasks", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: "Dupe",
+              description: "",
+              agent: "cortex-city-swe",
+              issue_id: issue.id,
+            }),
+          })
+        )
+      );
+      assert.equal(duplicate.status, 409);
+    `)
+  );
+});

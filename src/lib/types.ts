@@ -1,5 +1,31 @@
 export type TaskStatus = "open" | "in_progress" | "in_review" | "merged" | "closed";
 
+export type IssueStatus = "open" | "in_progress" | "done" | "closed";
+
+export interface IssueComment {
+  id: string;
+  body: string;
+  created_at: string;
+}
+
+export interface Issue {
+  id: string;
+  title: string;
+  description: string;
+  plan?: string;
+  status: IssueStatus;
+  task_id?: string;
+  comments: IssueComment[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LinkedTaskSummary {
+  id: string;
+  title: string;
+  status: TaskStatus;
+}
+
 export interface AgentReport {
   status: "completed" | "needs_review" | "blocked" | "failed";
   summary: string;
@@ -61,6 +87,7 @@ export interface Task {
   last_review_gh_state?: string; // hash of PR state captured after each run
   pr_status?: "clean" | "checks_failing" | "checks_pending" | "needs_approval" | "conflicts" | "unstable" | "unknown";
   notes?: string;
+  issue_id?: string;
 }
 
 export interface AgentConfig {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTask, updateTask, deleteTask, readTasks, readConfig } from "@/lib/store";
 import { removeWorktree } from "@/lib/agent-runner";
+import { unlinkTask } from "@/lib/issue-store";
 import type { AgentRuntime } from "@/lib/types";
 import {
   getDefaultModelForRuntime,
@@ -98,6 +99,12 @@ export async function DELETE(
       await removeWorktree(task);
     }
     await deleteTask(id);
+    if (task.issue_id) {
+      const isTerminal = task.status === "merged" || task.status === "closed";
+      await unlinkTask(task.issue_id, { keepTerminalStatus: isTerminal }).catch(
+        () => {}
+      );
+    }
     return NextResponse.json({ ok: true });
   } catch {
     return NextResponse.json({ error: "Not found" }, { status: 404 });

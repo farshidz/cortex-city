@@ -281,6 +281,29 @@ test("updateTask and deleteTask reject unknown task ids", () => {
   assert.deepEqual(result, ["Task missing not found", "Task missing not found"]);
 });
 
+test("updateTask syncs the linked issue status", () => {
+  const workspace = createTempWorkspace();
+  const result = runStoreScript(
+    workspace,
+    `
+      const imported = await import(${JSON.stringify(
+        pathToFileURL(path.join(REPO_ROOT, "src/lib/issue-store.ts")).href
+      )});
+      const issueStore = imported.default || imported;
+      const issue = await issueStore.createIssue({ title: "Issue", description: "" });
+      await issueStore.linkTask(issue.id, "task-1");
+      const task = ${JSON.stringify(sampleTask({ issue_id: "PLACEHOLDER" }))};
+      task.issue_id = issue.id;
+      await store.createTask(task);
+      await store.updateTask("task-1", { status: "merged" });
+      console.log(JSON.stringify(issueStore.readIssues()[0]));
+    `
+  );
+
+  assert.equal(result.status, "done");
+  assert.equal(result.task_id, "task-1");
+});
+
 test("deleteTask removes only the deleted task session logs", () => {
   const workspace = createTempWorkspace();
   mkdirSync(path.join(workspace, "logs"), { recursive: true });

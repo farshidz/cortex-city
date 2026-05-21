@@ -21,6 +21,7 @@ import {
   upsertReviewSummary,
 } from "./review-store";
 import { spawnReviewSummary } from "./review-runner";
+import { unlinkTask as unlinkIssueTask } from "./issue-store";
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
 import type { ReviewRequest, ReviewSummary, Task } from "./types";
 
@@ -288,6 +289,11 @@ export async function pollOnce(
       now - new Date(task.updated_at).getTime() > PRUNE_AGE_MS
     ) {
       await deps.deleteTask(task.id);
+      if (task.issue_id) {
+        await unlinkIssueTask(task.issue_id, { keepTerminalStatus: true }).catch(
+          () => {}
+        );
+      }
     }
   }
 
