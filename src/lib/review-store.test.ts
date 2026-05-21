@@ -51,7 +51,6 @@ function sampleReviewLiteral(prUrl: string) {
     updated_at: "2026-05-01T00:00:00.000Z",
     summary: "",
     generated_at: "",
-    review_state: "needs_approval",
   };
 }
 
@@ -81,6 +80,7 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   );
 
   assert.equal(result.saved.pr_url, entry.pr_url);
+  assert.equal(result.saved.review_status, "pending_summary");
   assert.deepEqual(result.all, [result.saved]);
   assert.deepEqual(result.fetched, result.saved);
 
@@ -89,6 +89,7 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   );
   assert.equal(Object.keys(persisted).length, 1);
   assert.equal(persisted[entry.pr_url].pr_url, entry.pr_url);
+  assert.equal(persisted[entry.pr_url].review_status, "pending_summary");
 });
 
 test("upsertReviewSummary overwrites existing entries with the same pr_url", () => {
@@ -111,6 +112,7 @@ test("upsertReviewSummary overwrites existing entries with the same pr_url", () 
   assert.equal(result.title, "Add fizzbuzz (v2)");
   assert.equal(result.summary, "second pass");
   assert.equal(result.generated_at, "2026-05-02T00:00:00.000Z");
+  assert.equal(result.review_status, "needs_review");
 });
 
 test("patchReviewSummary merges updates and returns the patched entry", () => {
@@ -122,7 +124,6 @@ test("patchReviewSummary merges updates and returns the patched entry", () => {
       const entry = ${JSON.stringify(entry)};
       await store.upsertReviewSummary(entry);
       const patched = await store.patchReviewSummary(entry.pr_url, {
-        review_state: "approved",
         final_at: "2026-05-03T00:00:00.000Z",
       });
       console.log(JSON.stringify({
@@ -132,10 +133,42 @@ test("patchReviewSummary merges updates and returns the patched entry", () => {
     `
   );
 
-  assert.equal(result.patched.review_state, "approved");
   assert.equal(result.patched.final_at, "2026-05-03T00:00:00.000Z");
+  assert.equal(result.patched.review_status, "final");
   assert.equal(result.patched.title, "Add fizzbuzz");
   assert.deepEqual(result.fetched, result.patched);
+});
+
+test("readReviewSummaries and readReviewSummaryMap backfill review_status", () => {
+  const workspace = createTempWorkspace();
+  const entry = {
+    ...sampleReviewLiteral("https://github.com/acme/widget/pull/1"),
+    summary: "Ready summary",
+    my_last_review_sha: "old-sha",
+    review_status: "up_to_date",
+  };
+  const result = runStoreScript(
+    workspace,
+    `
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const cortexDir = path.join(process.cwd(), ".cortex");
+      fs.mkdirSync(cortexDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(cortexDir, "reviews.json"),
+        JSON.stringify({ [${JSON.stringify(entry.pr_url)}]: ${JSON.stringify(entry)} })
+      );
+      const list = store.readReviewSummaries();
+      const map = store.readReviewSummaryMap();
+      console.log(JSON.stringify({
+        list: list[0],
+        mapEntry: map[${JSON.stringify(entry.pr_url)}],
+      }));
+    `
+  );
+
+  assert.equal(result.list.review_status, "new_commits");
+  assert.equal(result.mapEntry.review_status, "new_commits");
 });
 
 test("patchReviewSummary returns undefined for unknown pr_urls", () => {

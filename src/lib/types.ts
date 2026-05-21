@@ -135,9 +135,19 @@ export interface ReviewRequest {
   my_last_review_sha?: string;
 }
 
+export type ReviewStatus =
+  | "needs_review"
+  | "new_commits"
+  | "up_to_date"
+  | "pending_summary"
+  | "summarizing"
+  | "summary_error"
+  | "final";
+
 export interface ReviewSummary extends ReviewRequest {
   summary: string;
   generated_at: string;
+  review_status: ReviewStatus;
   runtime?: AgentRuntime;
   effort?: TaskEffort;
   model?: string;

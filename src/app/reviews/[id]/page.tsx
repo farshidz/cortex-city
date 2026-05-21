@@ -2,6 +2,7 @@
 
 import { use, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 import { ArrowLeft, ExternalLink, RefreshCcw } from "lucide-react";
@@ -24,6 +25,10 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { decodeReviewId } from "@/lib/review-id";
 import { getEffortOptions } from "@/lib/runtime-config";
+import {
+  getReviewStatusBadgeClass,
+  getReviewStatusLabel,
+} from "@/lib/review-status-presentation";
 import type {
   AgentRuntime,
   OrchestratorConfig,
@@ -33,20 +38,6 @@ import type {
 } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
-
-function statusLabel(review: ReviewSummary): string {
-  if (!review.my_last_review_sha) return "Awaiting your review";
-  return review.my_last_review_sha === review.head_sha
-    ? "Up to date with your review"
-    : "New commits since your review";
-}
-
-function statusBadgeClass(review: ReviewSummary): string {
-  if (review.my_last_review_sha && review.my_last_review_sha !== review.head_sha) {
-    return "bg-yellow-100 text-yellow-800";
-  }
-  return "bg-blue-100 text-blue-800";
-}
 
 interface SubmitState {
   decision: "approve" | "request-changes" | "comment";
@@ -60,6 +51,7 @@ export default function ReviewDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  const router = useRouter();
   const { id } = use(params);
   const prUrl = useMemo(() => {
     try {
@@ -148,7 +140,8 @@ export default function ReviewDetailPage({
       return;
     }
     setSubmitState(null);
-    mutate();
+    await mutate();
+    router.push("/reviews");
   }
 
   if (!prUrl) {
@@ -182,8 +175,6 @@ export default function ReviewDetailPage({
     return <div className="text-muted-foreground">Loading…</div>;
   }
 
-  const isSummarizing = !review.summary && Boolean(review.current_run_pid);
-
   return (
     <div className="space-y-6 max-w-3xl">
       <div className="flex items-center justify-between">
@@ -208,9 +199,9 @@ export default function ReviewDetailPage({
             {review.repo_slug} #{review.pr_number}
           </span>
           <span
-            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${statusBadgeClass(review)}`}
+            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getReviewStatusBadgeClass(review.review_status)}`}
           >
-            {statusLabel(review)}
+            {getReviewStatusLabel(review.review_status)}
           </span>
           <Badge variant="outline">{review.author || "—"}</Badge>
         </div>
@@ -269,10 +260,12 @@ export default function ReviewDetailPage({
           </div>
         </div>
         <div className="px-4 py-4 text-sm min-h-[6rem]">
-          {isSummarizing ? (
-            <span className="text-muted-foreground italic">Summarizing…</span>
-          ) : review.error ? (
-            <span className="text-destructive">{review.error}</span>
+          {review.review_status === "summarizing" ? (
+            <span className="text-muted-foreground italic">Summarizing...</span>
+          ) : review.review_status === "summary_error" ? (
+            <span className="text-destructive">
+              {review.error || "Summary error"}
+            </span>
           ) : review.summary ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown>{review.summary}</ReactMarkdown>

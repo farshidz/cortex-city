@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import path from "path";
-import type { ReviewSummary } from "./types";
+import { withReviewStatus } from "./review-status";
+import type { ReviewStatus, ReviewSummary } from "./types";
 import { snapshotCortex } from "./cortex-git";
 import { ensureCortexDir } from "./store";
 
@@ -14,7 +15,28 @@ function withWriteLock<T>(fn: () => T): Promise<T> {
   return result;
 }
 
+type ReviewSummaryInput = Omit<ReviewSummary, "review_status"> & {
+  review_status?: ReviewStatus;
+};
 type ReviewMap = Record<string, ReviewSummary>;
+type RawReviewMap = Record<string, ReviewSummaryInput>;
+
+function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
+  const withoutLegacyState = { ...review } as ReviewSummaryInput & {
+    review_state?: unknown;
+  };
+  delete withoutLegacyState.review_state;
+  return withReviewStatus(withoutLegacyState) as ReviewSummary;
+}
+
+function normalizeMap(map: RawReviewMap): ReviewMap {
+  return Object.fromEntries(
+    Object.entries(map).map(([prUrl, review]) => [
+      prUrl,
+      normalizeReview({ ...review, pr_url: review.pr_url || prUrl }),
+    ])
+  );
+}
 
 function readMap(): ReviewMap {
   ensureCortexDir();
@@ -23,7 +45,7 @@ function readMap(): ReviewMap {
     const raw = readFileSync(REVIEWS_FILE, "utf-8");
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as ReviewMap;
+      return normalizeMap(parsed as RawReviewMap);
     }
     return {};
   } catch {
@@ -49,12 +71,15 @@ export function getReviewSummary(prUrl: string): ReviewSummary | undefined {
   return readMap()[prUrl];
 }
 
-export function upsertReviewSummary(entry: ReviewSummary): Promise<ReviewSummary> {
+export function upsertReviewSummary(
+  entry: ReviewSummaryInput
+): Promise<ReviewSummary> {
   return withWriteLock(() => {
     const map = readMap();
-    map[entry.pr_url] = entry;
+    const normalized = normalizeReview(entry);
+    map[entry.pr_url] = normalized;
     writeMapLocked(map);
-    return entry;
+    return normalized;
   });
 }
 
@@ -66,7 +91,7 @@ export function patchReviewSummary(
     const map = readMap();
     const current = map[prUrl];
     if (!current) return undefined;
-    const next = { ...current, ...updates, pr_url: prUrl } as ReviewSummary;
+    const next = normalizeReview({ ...current, ...updates, pr_url: prUrl });
     map[prUrl] = next;
     writeMapLocked(map);
     return next;

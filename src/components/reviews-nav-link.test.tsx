@@ -17,36 +17,41 @@ function review(overrides: Partial<ReviewSummary> = {}): ReviewSummary {
     updated_at: now,
     summary: "Ready summary",
     generated_at: now,
+    review_status: "needs_review",
     ...overrides,
   };
 }
 
-test("countReadyActionableReviews only counts actionable reviews with summaries", () => {
+test("countReadyActionableReviews only counts ready review work", () => {
   assert.equal(
     countReadyActionableReviews([
-      review({ pr_url: "https://github.com/acme/widget/pull/1" }),
+      review({
+        pr_url: "https://github.com/acme/widget/pull/1",
+        review_status: "needs_review",
+      }),
       review({
         pr_url: "https://github.com/acme/widget/pull/2",
-        summary: "",
-        current_run_pid: 123,
+        review_status: "new_commits",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/3",
-        summary: "Previous summary",
-        current_run_pid: 456,
-        my_last_review_sha: "old-sha",
+        review_status: "pending_summary",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/4",
-        my_last_review_sha: "head-sha",
+        review_status: "summarizing",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/5",
-        final_at: now,
+        review_status: "summary_error",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/6",
-        summary: "   ",
+        review_status: "up_to_date",
+      }),
+      review({
+        pr_url: "https://github.com/acme/widget/pull/7",
+        review_status: "final",
       }),
     ]),
     2
