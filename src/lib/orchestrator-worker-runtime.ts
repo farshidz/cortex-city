@@ -113,10 +113,14 @@ async function launchTaskRun(
       await deps.updateTask(task.id, options.preSpawnUpdates);
     }
 
+    const launchState: { pid?: number } = {};
     const { pid } = await deps.spawnAgentSession(task, options.mode, async (taskId) => {
-      activePids.delete(taskId);
+      if (launchState.pid === undefined || activePids.get(taskId) === launchState.pid) {
+        activePids.delete(taskId);
+      }
       await options.onComplete?.(taskId);
     });
+    launchState.pid = pid;
 
     activePids.set(task.id, pid);
     await deps.updateTask(task.id, {

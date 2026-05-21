@@ -672,6 +672,70 @@ test("handleRunComplete uses Codex session deltas instead of re-adding cumulativ
   assert.equal(result.tasks[0].codex_cumulative_output_tokens, 27);
 });
 
+test("handleRunComplete does not clear a newer task pid", () => {
+  const { workspace } = setupWorkspace();
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        current_run_pid: 2222,
+      }))};
+      await createTask(task);
+      await __testUtils.handleRunComplete(
+        "task-1",
+        0,
+        "",
+        "",
+        65,
+        [],
+        "codex",
+        "initial",
+        {
+          type: "codex",
+          subtype: "exec",
+          is_error: false,
+          duration_ms: 0,
+          result: JSON.stringify({
+            status: "completed",
+            summary: "Original run completed after a new run started",
+            pr_url: "",
+            branch_name: "agent/stale-pid",
+            files_changed: [],
+            assumptions: [],
+            blockers: [],
+            next_steps: [],
+          }),
+          session_id: "thread-codex",
+          terminal_reason: "completed",
+          total_cost_usd: 0,
+          num_turns: 1,
+          structured_output: {
+            status: "completed",
+            summary: "Original run completed after a new run started",
+            pr_url: "",
+            branch_name: "agent/stale-pid",
+            files_changed: [],
+            assumptions: [],
+            blockers: [],
+            next_steps: [],
+          },
+          usage: {
+            input_tokens: 10,
+            cache_read_input_tokens: 0,
+            output_tokens: 4,
+          },
+        },
+        1111
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `
+  );
+
+  assert.equal(result.tasks[0].last_run_result, "success");
+  assert.equal(result.tasks[0].current_run_pid, 2222);
+});
+
 test("handleRunTimeout preserves Codex usage already observed before timeout", () => {
   const { workspace } = setupWorkspace();
   const result = runAgentRunnerScript(

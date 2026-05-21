@@ -3,8 +3,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  pollOnce,
   shouldFinalizeCleanupWorktree,
   shouldResetStaleFinalCleanup,
+  type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
 import type { Task } from "./types";
 
@@ -74,4 +76,66 @@ test("shouldResetStaleFinalCleanup detects running-but-orphaned cleanup state", 
     ),
     false
   );
+});
+
+test("completion callbacks leave newer active pids in place", async () => {
+  const tasks: Task[] = [
+    sample({
+      id: "task-1",
+      status: "open",
+      agent_runner: "codex",
+      permission_mode: "bypassPermissions",
+    }),
+  ];
+  const activePids = new Map<string, number>();
+  const completions: Array<(taskId: string) => Promise<void> | void> = [];
+  let nextPid = 101;
+
+  const deps: WorkerRuntimeDeps = {
+    deleteReviewSummary: async () => {},
+    deleteTask: async () => {},
+    getPRStateHash: async () => "",
+    getPRStatus: async () => "unknown",
+    getReviewRequestedPRs: async () => [],
+    getTask: async (id) => tasks.find((task) => task.id === id),
+    isPRMergedOrClosed: async () => null,
+    isPidRunning: () => true,
+    logger: { log: () => {}, error: () => {} },
+    readConfig: () => ({
+      max_parallel_sessions: 1,
+      poll_interval_seconds: 30,
+      default_permission_mode: "bypassPermissions",
+      default_agent_runner: "codex",
+      agents: {},
+    }),
+    readReviewSummaries: () => [],
+    readReviewSummaryMap: () => ({}),
+    readTasks: () => tasks,
+    removeWorktree: async () => {},
+    spawnAgentSession: async (_task, _mode, onComplete) => {
+      completions.push(onComplete);
+      return { pid: nextPid++, child: {} as never };
+    },
+    spawnReviewSummary: async () => ({
+      pid: nextPid++,
+      child: {} as never,
+      done: Promise.resolve({} as never),
+    }),
+    updateTask: async (id, updates) => {
+      const index = tasks.findIndex((task) => task.id === id);
+      assert.notEqual(index, -1);
+      tasks[index] = { ...tasks[index], ...updates };
+      return tasks[index];
+    },
+    upsertReviewSummary: async (summary) => summary as never,
+  };
+
+  await pollOnce(activePids, deps, new Map());
+  assert.equal(activePids.get("task-1"), 101);
+  assert.equal(completions.length, 1);
+
+  activePids.set("task-1", 202);
+  await completions[0]("task-1");
+
+  assert.equal(activePids.get("task-1"), 202);
 });

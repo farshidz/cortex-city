@@ -584,7 +584,8 @@ export async function spawnAgentSession(
           durationMs,
           runTimeoutMs,
           runtime,
-          runtime === "codex" ? buildCodexResult(codexAccumulator) : undefined
+          runtime === "codex" ? buildCodexResult(codexAccumulator) : undefined,
+          child.pid
         );
         return;
       }
@@ -597,7 +598,8 @@ export async function spawnAgentSession(
         preRunCommentIds,
         runtime,
         runReason,
-        runtime === "codex" ? buildCodexResult(codexAccumulator) : undefined
+        runtime === "codex" ? buildCodexResult(codexAccumulator) : undefined,
+        child.pid
       );
     });
   });
@@ -790,6 +792,17 @@ interface UsageAccounting {
   updates: Partial<Task>;
 }
 
+function shouldClearCompletedRunPid(
+  currentTask: Task | undefined,
+  completedPid?: number
+): boolean {
+  if (typeof completedPid !== "number") return true;
+  return (
+    typeof currentTask?.current_run_pid !== "number" ||
+    currentTask.current_run_pid === completedPid
+  );
+}
+
 function withCodexReceivedAt(event: CodexEvent): CodexEvent {
   return {
     ...event,
@@ -821,7 +834,7 @@ function computeCodexUsageDelta(
 ): number {
   if (!sameSession) return current;
   if (current >= previous) return current - previous;
-  return current;
+  return 0;
 }
 
 function buildUsageAccounting(
@@ -842,25 +855,35 @@ function buildUsageAccounting(
     const usageSessionId = result.session_id || currentTask?.session_id;
     if (usageSessionId) {
       const sameSession = currentTask?.codex_usage_session_id === usageSessionId;
+      const previousInputTokens = currentTask?.codex_cumulative_input_tokens || 0;
+      const previousCachedInputTokens =
+        currentTask?.codex_cumulative_cached_input_tokens || 0;
+      const previousOutputTokens = currentTask?.codex_cumulative_output_tokens || 0;
       inputTokens = computeCodexUsageDelta(
         rawInputTokens,
-        currentTask?.codex_cumulative_input_tokens || 0,
+        previousInputTokens,
         sameSession
       );
       cachedInputTokens = computeCodexUsageDelta(
         rawCachedInputTokens,
-        currentTask?.codex_cumulative_cached_input_tokens || 0,
+        previousCachedInputTokens,
         sameSession
       );
       outputTokens = computeCodexUsageDelta(
         rawOutputTokens,
-        currentTask?.codex_cumulative_output_tokens || 0,
+        previousOutputTokens,
         sameSession
       );
       updates.codex_usage_session_id = usageSessionId;
-      updates.codex_cumulative_input_tokens = rawInputTokens;
-      updates.codex_cumulative_cached_input_tokens = rawCachedInputTokens;
-      updates.codex_cumulative_output_tokens = rawOutputTokens;
+      updates.codex_cumulative_input_tokens = sameSession
+        ? Math.max(rawInputTokens, previousInputTokens)
+        : rawInputTokens;
+      updates.codex_cumulative_cached_input_tokens = sameSession
+        ? Math.max(rawCachedInputTokens, previousCachedInputTokens)
+        : rawCachedInputTokens;
+      updates.codex_cumulative_output_tokens = sameSession
+        ? Math.max(rawOutputTokens, previousOutputTokens)
+        : rawOutputTokens;
     }
   }
 
@@ -1092,12 +1115,15 @@ async function handleRunTimeout(
   durationMs: number,
   timeoutMs: number,
   runtime?: AgentRuntime,
-  preParsedResult?: ClaudeRunResult
+  preParsedResult?: ClaudeRunResult,
+  completedPid?: number
 ): Promise<void> {
   const { getTask } = await import("./store");
   const currentTask = await getTask(taskId);
   const resumedUpdates = currentTask
-    ? buildInterruptedTaskUpdates(currentTask)
+    ? shouldClearCompletedRunPid(currentTask, completedPid)
+      ? buildInterruptedTaskUpdates(currentTask)
+      : {}
     : { current_run_pid: undefined };
   const usageUpdates =
     currentTask && preParsedResult && runtime
@@ -1124,13 +1150,15 @@ async function handleRunComplete(
   preRunCommentIds: number[],
   runtime: AgentRuntime,
   runReason: "initial" | "review" | "cleanup" | "manual_instruction" | "resume_after_kill",
-  preParsedResult?: ClaudeRunResult
+  preParsedResult?: ClaudeRunResult,
+  completedPid?: number
 ) {
+  let currentTask: Task | undefined;
   try {
+    const { getTask } = await import("./store");
+    currentTask = await getTask(taskId);
     const result: ClaudeRunResult =
       preParsedResult || (runtime === "codex" ? parseCodexResult(stdout) : JSON.parse(stdout));
-    const { getTask } = await import("./store");
-    const currentTask = await getTask(taskId);
     const usageAccounting = buildUsageAccounting(runtime, result, currentTask);
     const didFail = exitCode !== 0 || result.is_error;
     const isBudgetExceeded = result.terminal_reason === "budget_exceeded";
@@ -1143,9 +1171,11 @@ async function handleRunComplete(
       session_id: result.session_id,
       ...usageAccounting.updates,
       last_run_result: didFail ? "error" : "success",
-      current_run_pid: undefined,
       last_run_at: new Date().toISOString(),
     };
+    if (shouldClearCompletedRunPid(currentTask, completedPid)) {
+      updates.current_run_pid = undefined;
+    }
 
     if (isBudgetExceeded) {
       updates.last_run_result = "budget_exceeded";
@@ -1224,12 +1254,15 @@ async function handleRunComplete(
 
     await updateTask(taskId, updates);
   } catch {
-    await updateTask(taskId, {
+    const updates: Partial<Task> = {
       last_run_result: "error",
       error_log: `Exit code: ${exitCode}`,
-      current_run_pid: undefined,
       last_run_at: new Date().toISOString(),
-    });
+    };
+    if (shouldClearCompletedRunPid(currentTask, completedPid)) {
+      updates.current_run_pid = undefined;
+    }
+    await updateTask(taskId, updates);
   }
 }
 
@@ -1259,6 +1292,7 @@ export const __testUtils = {
   parseCodexResult,
   resolveAgentWorkingDirectory,
   sanitizeManagedRepoName,
+  shouldClearCompletedRunPid,
   slugify,
   updateCodexResultAccumulator,
   withCodexReceivedAt,
