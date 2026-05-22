@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ThemeProvider } from "next-themes";
 import { CortexGitStatusIndicator } from "@/components/cortex-git-status";
 import { ReviewsNavLink } from "@/components/reviews-nav-link";
+import { SidebarNavLink } from "@/components/sidebar-nav-link";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import "./globals.css";
 
@@ -62,12 +63,14 @@ export default async function RootLayout({
               </div>
             </Link>
             <div className="flex flex-col gap-1 flex-1">
-              <NavLink href="/issues">Issues</NavLink>
-              <NavLink href="/">Tasks</NavLink>
+              <SidebarNavLink href="/issues">Issues</SidebarNavLink>
+              <SidebarNavLink href="/" match={["/", "/tasks"]}>
+                Tasks
+              </SidebarNavLink>
               <ReviewsNavLink />
-              <NavLink href="/agents">Agents</NavLink>
-              <NavLink href="/sessions">Sessions</NavLink>
-              <NavLink href="/settings">Settings</NavLink>
+              <SidebarNavLink href="/agents">Agents</SidebarNavLink>
+              <SidebarNavLink href="/sessions">Sessions</SidebarNavLink>
+              <SidebarNavLink href="/settings">Settings</SidebarNavLink>
             </div>
             <CortexGitStatusIndicator />
             {shortCommitSha ? (
@@ -84,22 +87,5 @@ export default async function RootLayout({
         </ThemeProvider>
       </body>
     </html>
-  );
-}
-
-function NavLink({
-  href,
-  children,
-}: {
-  href: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <Link
-      href={href}
-      className="px-2 py-1.5 rounded-md text-sm hover:bg-accent transition-colors"
-    >
-      {children}
-    </Link>
   );
 }
