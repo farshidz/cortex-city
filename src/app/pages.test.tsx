@@ -1153,4 +1153,5 @@ test("root layout renders navigation around page content", () => {
   assert.match(html, /child content/);
   assert.match(html, /commit 1234567/);
   assert.match(html, /title="1234567890abcdef"/);
+  assert.match(html, /aria-current="page"/);
 });
