@@ -26,6 +26,12 @@ export interface LinkedTaskSummary {
   status: TaskStatus;
 }
 
+export interface LinkedIssueSummary {
+  id: string;
+  title: string;
+  status: IssueStatus;
+}
+
 export interface AgentReport {
   status: "completed" | "needs_review" | "blocked" | "failed";
   summary: string;

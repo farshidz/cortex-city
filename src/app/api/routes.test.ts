@@ -1661,6 +1661,18 @@ test("tasks route links and syncs issue on POST and PUT", () => {
       )).body;
       assert.equal(task.issue_id, issue.id);
 
+      const linkedTask = (await json(
+        await taskDetailRoute.GET(
+          request("http://localhost/api/tasks/" + task.id),
+          { params: Promise.resolve({ id: task.id }) }
+        )
+      )).body;
+      assert.deepEqual(linkedTask.linked_issue, {
+        id: issue.id,
+        title: "Source",
+        status: "in_progress",
+      });
+
       const linkedIssue = (await json(
         await issueDetailRoute.GET(
           request("http://localhost/api/issues/" + issue.id),

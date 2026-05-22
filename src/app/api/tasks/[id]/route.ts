@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTask, updateTask, deleteTask, readTasks, readConfig } from "@/lib/store";
 import { removeWorktree } from "@/lib/agent-runner";
-import { unlinkTask } from "@/lib/issue-store";
-import type { AgentRuntime } from "@/lib/types";
+import { getIssue, unlinkTask } from "@/lib/issue-store";
+import type { AgentRuntime, LinkedIssueSummary } from "@/lib/types";
 import {
   getDefaultModelForRuntime,
   normalizeEffort,
@@ -28,7 +28,15 @@ export async function GET(
       agent: t.agent,
     }));
 
-  return NextResponse.json({ ...task, child_tasks: childTasks });
+  let linked_issue: LinkedIssueSummary | undefined;
+  if (task.issue_id) {
+    const issue = await getIssue(task.issue_id);
+    if (issue) {
+      linked_issue = { id: issue.id, title: issue.title, status: issue.status };
+    }
+  }
+
+  return NextResponse.json({ ...task, child_tasks: childTasks, linked_issue });
 }
 
 export async function PUT(

@@ -32,6 +32,7 @@ import type {
   AgentRuntime,
   PermissionMode,
   TaskEffort,
+  LinkedIssueSummary,
 } from "@/lib/types";
 import {
   formatEffortLabel,
@@ -62,6 +63,8 @@ const ALL_STATUSES: TaskStatus[] = [
 const LARGE_PLAN_LINE_THRESHOLD = 12;
 const LARGE_PLAN_CHARACTER_THRESHOLD = 1000;
 
+type TaskDetail = Task & { linked_issue?: LinkedIssueSummary };
+
 function isLargeTaskPlan(plan: string): boolean {
   const trimmed = plan.trim();
   if (!trimmed) return false;
@@ -78,7 +81,7 @@ export default function TaskDetailPage({
 }) {
   const { id } = use(params);
   const router = useRouter();
-  const { data: task, mutate } = useSWR<Task>(`/api/tasks/${id}`, fetcher, {
+  const { data: task, mutate } = useSWR<TaskDetail>(`/api/tasks/${id}`, fetcher, {
     refreshInterval: 5000,
   });
   const { data: config } = useSWR<OrchestratorConfig>("/api/config", fetcher);
@@ -549,6 +552,32 @@ export default function TaskDetailPage({
               )}
             </CardContent>
           </Card>
+
+          {task.linked_issue && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Linked Issue</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between rounded-md border p-3">
+                  <div>
+                    <Link
+                      href={`/issues/${task.linked_issue.id}`}
+                      className="font-medium hover:underline"
+                    >
+                      {task.linked_issue.title}
+                    </Link>
+                    <div className="text-xs text-muted-foreground font-mono">
+                      {task.linked_issue.id}
+                    </div>
+                  </div>
+                  <Badge variant="outline">
+                    {task.linked_issue.status.replace("_", " ")}
+                  </Badge>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {task.child_tasks && task.child_tasks.length > 0 && (
             <Card>

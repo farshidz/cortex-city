@@ -1097,6 +1097,45 @@ test("task detail collapses large plans by default and can expand them", () => {
   });
 });
 
+test("task detail renders linked issue summary", () => {
+  const output = runRenderScript(`
+    const originalData = globalThis.__SWR_DATA__;
+
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/tasks/task-linked-issue": {
+        ...task,
+        id: "task-linked-issue",
+        linked_issue: {
+          id: "issue-1",
+          title: "Source issue",
+          status: "in_progress",
+        },
+      },
+    };
+
+    const html = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-linked-issue" }) }
+    );
+    globalThis.__SWR_DATA__ = originalData;
+
+    console.log(JSON.stringify({
+      hasLinkedIssueHeading: html.includes("Linked Issue"),
+      hasLinkedIssueTitle: html.includes("Source issue"),
+      hasLinkedIssueStatus: html.includes("in progress"),
+      hasLinkedIssueHref: html.includes("/issues/issue-1"),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    hasLinkedIssueHeading: true,
+    hasLinkedIssueTitle: true,
+    hasLinkedIssueStatus: true,
+    hasLinkedIssueHref: true,
+  });
+});
+
 test("root layout renders navigation around page content", () => {
   const output = runRenderScript(`
     process.env.NEXT_PUBLIC_CORTEX_COMMIT_SHA = "1234567890abcdef";
