@@ -130,6 +130,12 @@ interface LaunchOptions {
   rollbackOnError?: Partial<Task>;
 }
 
+interface ReviewRunCandidate {
+  task: Task & { pr_url: string };
+  ghState: string;
+  hasConflicts: boolean;
+}
+
 async function launchTaskRun(
   task: Task,
   activePids: Map<string, number>,
@@ -364,7 +370,7 @@ export async function pollOnce(
     (task): task is Task & { pr_url: string } =>
       task.status === "in_review" && typeof task.pr_url === "string"
   );
-  const tasksToReview: Task[] = [];
+  const tasksToReview: ReviewRunCandidate[] = [];
 
   await Promise.all(
     inReviewTasks.map(async (task) => {
@@ -394,15 +400,36 @@ export async function pollOnce(
           return;
         }
 
-        tasksToReview.push(task);
+        tasksToReview.push({ task, ghState, hasConflicts });
       } catch (error) {
         deps.logger.error(`[worker] PR check failed for ${task.id}:`, error);
       }
     })
   );
 
-  for (const task of tasksToReview) {
+  for (const candidate of tasksToReview) {
     if (availableSlots <= 0) break;
+    const task = await deps.getTask(candidate.task.id);
+    if (
+      !task ||
+      task.status !== "in_review" ||
+      typeof task.pr_url !== "string" ||
+      task.pr_url !== candidate.task.pr_url
+    ) {
+      continue;
+    }
+
+    const hasManualInstruction = Boolean(task.pending_manual_instruction);
+    const hasConflicts = task.pr_status === "conflicts" || candidate.hasConflicts;
+    if (task.current_run_pid || activePids.has(task.id)) continue;
+    if (!candidate.ghState && !hasManualInstruction) continue;
+    if (
+      !hasManualInstruction &&
+      !hasConflicts &&
+      candidate.ghState === task.last_review_gh_state
+    ) {
+      continue;
+    }
 
     deps.logger.log(`[worker] Picking up task "${task.title}" (${task.id}) [review]`);
     const didLaunch = await launchTaskRun(task, activePids, deps, {
