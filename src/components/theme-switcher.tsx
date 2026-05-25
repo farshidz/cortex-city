@@ -1,10 +1,12 @@
 "use client";
 
+import { Moon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
 
 export function ThemeSwitcher() {
-  const { theme, setTheme } = useTheme();
+  const { resolvedTheme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -13,27 +15,20 @@ export function ThemeSwitcher() {
   }, []);
   if (!mounted) return null;
 
-  const options = [
-    { value: "system", label: "System" },
-    { value: "light", label: "Light" },
-    { value: "dark", label: "Dark" },
-  ];
+  const isDark = resolvedTheme === "dark";
 
   return (
-    <div className="flex items-center gap-1 px-1 py-1 rounded-md bg-muted/60">
-      {options.map((opt) => (
-        <button
-          key={opt.value}
-          onClick={() => setTheme(opt.value)}
-          className={`flex-1 text-xs py-1 rounded transition-colors ${
-            theme === opt.value
-              ? "bg-background text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground"
-          }`}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
+    <Button
+      type="button"
+      variant="outline"
+      size="icon-lg"
+      aria-label={`Switch to ${isDark ? "light" : "dark"} theme`}
+      aria-pressed={isDark}
+      title={`Switch to ${isDark ? "light" : "dark"} theme`}
+      onClick={() => setTheme(isDark ? "light" : "dark")}
+      className="fixed right-4 bottom-4 z-50 rounded-full bg-background shadow-lg"
+    >
+      <Moon aria-hidden="true" />
+    </Button>
   );
 }
