@@ -81,9 +81,9 @@ export default async function RootLayout({
                 {`commit ${shortCommitSha}`}
               </div>
             ) : null}
-            <ThemeSwitcher />
           </nav>
           <main className="flex-1 p-6 overflow-auto">{children}</main>
+          <ThemeSwitcher />
         </ThemeProvider>
       </body>
     </html>

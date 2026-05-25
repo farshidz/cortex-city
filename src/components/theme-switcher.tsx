@@ -1,7 +1,22 @@
 "use client";
 
+import { Moon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
+import { buttonVariants } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+
+const themeOptions = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
 
 export function ThemeSwitcher() {
   const { theme, setTheme } = useTheme();
@@ -13,27 +28,32 @@ export function ThemeSwitcher() {
   }, []);
   if (!mounted) return null;
 
-  const options = [
-    { value: "system", label: "System" },
-    { value: "light", label: "Light" },
-    { value: "dark", label: "Dark" },
-  ];
-
   return (
-    <div className="flex items-center gap-1 px-1 py-1 rounded-md bg-muted/60">
-      {options.map((opt) => (
-        <button
-          key={opt.value}
-          onClick={() => setTheme(opt.value)}
-          className={`flex-1 text-xs py-1 rounded transition-colors ${
-            theme === opt.value
-              ? "bg-background text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground"
-          }`}
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label="Select theme"
+        title="Select theme"
+        className={buttonVariants({
+          variant: "outline",
+          size: "icon-lg",
+          className:
+            "fixed right-4 bottom-4 z-50 rounded-full bg-background shadow-lg",
+        })}
+      >
+        <Moon aria-hidden="true" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" side="top" sideOffset={8} className="w-36">
+        <DropdownMenuRadioGroup
+          value={theme ?? "system"}
+          onValueChange={setTheme}
         >
-          {opt.label}
-        </button>
-      ))}
-    </div>
+          {themeOptions.map((opt) => (
+            <DropdownMenuRadioItem key={opt.value} value={opt.value}>
+              {opt.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
