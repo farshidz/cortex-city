@@ -245,3 +245,56 @@ test("pollOnce gives dead owned pids a grace window before resuming", async () =
   assert.equal(tasks[0].current_run_pid, undefined);
   assert.equal(tasks[0].resume_requested, true);
 });
+
+test("pollOnce rechecks latest review hash before launching review run", async () => {
+  const staleTask = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: "https://github.com/acme/widget/pull/1",
+    last_review_gh_state: "old-hash",
+    agent_runner: "codex",
+    permission_mode: "bypassPermissions",
+  });
+  const latestTask = {
+    ...staleTask,
+    last_review_gh_state: "new-hash",
+  };
+  const spawnedTasks: Task[] = [];
+  const deps: WorkerRuntimeDeps = {
+    deleteReviewSummary: async () => {},
+    deleteTask: async () => {},
+    getPRStateHash: async () => "new-hash",
+    getPRStatus: async () => "unknown",
+    getReviewRequestedPRs: async () => [],
+    getTask: async (id) => (id === latestTask.id ? latestTask : undefined),
+    isPRMergedOrClosed: async () => null,
+    isPidRunning: () => true,
+    logger: { log: () => {}, error: () => {} },
+    readConfig: () => ({
+      max_parallel_sessions: 1,
+      poll_interval_seconds: 30,
+      default_permission_mode: "bypassPermissions",
+      default_agent_runner: "codex",
+      agents: {},
+    }),
+    readReviewSummaries: () => [],
+    readReviewSummaryMap: () => ({}),
+    readTasks: () => [staleTask],
+    removeWorktree: async () => {},
+    spawnAgentSession: async (task) => {
+      spawnedTasks.push(task);
+      return { pid: 202, child: {} as never };
+    },
+    spawnReviewSummary: async () => ({
+      pid: 303,
+      child: {} as never,
+      done: Promise.resolve({} as never),
+    }),
+    updateTask: async (_id, updates) => ({ ...latestTask, ...updates }),
+    upsertReviewSummary: async (summary) => summary as never,
+  };
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(spawnedTasks, []);
+});
