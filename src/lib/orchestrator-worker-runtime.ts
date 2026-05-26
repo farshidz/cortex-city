@@ -464,6 +464,12 @@ function prFieldsFromRequest(request: ReviewRequest) {
   };
 }
 
+function summaryHeadShaFor(
+  review: Pick<ReviewSummary, "head_sha" | "summary" | "summary_head_sha">
+): string | undefined {
+  return review.summary_head_sha || (review.summary?.trim() ? review.head_sha : undefined);
+}
+
 async function runReviewPhases(
   activeReviewPids: Map<string, number>,
   deps: WorkerRuntimeDeps,
@@ -517,11 +523,11 @@ async function runReviewPhases(
       continue;
     }
     if (cached.head_sha !== pr.head_sha) {
+      const staleSummaryHeadSha = summaryHeadShaFor(cached);
       await deps.upsertReviewSummary({
         ...cached,
         ...prFieldsFromRequest(pr),
-        summary: "",
-        generated_at: "",
+        summary_head_sha: staleSummaryHeadSha,
         session_id: undefined,
         followups: [],
         error: undefined,
@@ -549,8 +555,7 @@ async function runReviewPhases(
       if (reviewSlots <= 0) break;
       if (activeReviewPids.has(pr.pr_url)) continue;
       const cached = refreshed[pr.pr_url];
-      const needsSummary =
-        !cached?.summary || cached.head_sha !== pr.head_sha;
+      const needsSummary = !cached?.summary;
       if (!needsSummary) continue;
       try {
         const { pid } = await deps.spawnReviewSummary(pr, {}, async () => {

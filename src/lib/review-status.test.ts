@@ -23,6 +23,13 @@ test("deriveReviewStatus returns every review status", () => {
     "summarizing"
   );
   assert.equal(
+    deriveReviewStatus({
+      ...base,
+      summary_head_sha: "old-head-sha",
+    }),
+    "needs_review"
+  );
+  assert.equal(
     deriveReviewStatus({ ...base, error: "failed" }),
     "summary_error"
   );
@@ -63,6 +70,7 @@ test("deriveReviewStatus enforces precedence", () => {
     deriveReviewStatus({
       ...base,
       error: "failed",
+      summary_head_sha: "old-head-sha",
       my_last_review_sha: "head-sha",
     }),
     "summary_error"

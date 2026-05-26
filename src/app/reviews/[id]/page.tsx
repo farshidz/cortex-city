@@ -80,6 +80,15 @@ export default function ReviewDetailPage({
   const defaultRuntime: AgentRuntime =
     config?.review_runtime || config?.default_agent_runner || "claude";
   const activeRuntime: AgentRuntime = runtimeOverride || defaultRuntime;
+  const hasVisibleSummary = Boolean(review?.summary?.trim());
+  const isSummaryStale =
+    hasVisibleSummary &&
+    Boolean(
+      review?.summary_head_sha && review.summary_head_sha !== review.head_sha
+    );
+  const isSummaryRefreshing = Boolean(review?.current_run_pid);
+  const canAskFollowup =
+    hasVisibleSummary && !isSummaryRefreshing && !isSummaryStale;
 
   async function regenerate() {
     if (!review) return;
@@ -250,19 +259,17 @@ export default function ReviewDetailPage({
               variant="outline"
               className="gap-1"
               onClick={regenerate}
-              disabled={Boolean(review.current_run_pid) || regenerating}
+              disabled={isSummaryRefreshing || regenerating}
             >
               <RefreshCcw className="size-3.5" />
-              {regenerating || review.current_run_pid
+              {regenerating || isSummaryRefreshing
                 ? "Regenerating…"
                 : "Regenerate"}
             </Button>
           </div>
         </div>
         <div className="px-4 py-4 text-sm min-h-[6rem]">
-          {review.review_status === "summarizing" ? (
-            <span className="text-muted-foreground italic">Summarizing...</span>
-          ) : review.review_status === "summary_error" ? (
+          {review.review_status === "summary_error" ? (
             <span className="text-destructive">
               {review.error || "Summary error"}
             </span>
@@ -270,6 +277,8 @@ export default function ReviewDetailPage({
             <div className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown>{review.summary}</ReactMarkdown>
             </div>
+          ) : review.review_status === "summarizing" ? (
+            <span className="text-muted-foreground italic">Summarizing...</span>
           ) : (
             <span className="text-muted-foreground italic">
               No summary yet.
@@ -281,6 +290,8 @@ export default function ReviewDetailPage({
             Generated {new Date(review.generated_at).toLocaleString()}
             {review.runtime ? ` · ${review.runtime}` : ""}
             {review.effort ? ` · ${review.effort}` : ""}
+            {isSummaryRefreshing ? " · refreshing latest commits" : ""}
+            {isSummaryStale ? " · based on older commits" : ""}
           </div>
         )}
       </div>
@@ -301,7 +312,7 @@ export default function ReviewDetailPage({
             <Button
               size="sm"
               onClick={askFollowup}
-              disabled={asking || !question.trim() || !review.summary}
+              disabled={asking || !question.trim() || !canAskFollowup}
             >
               {asking ? "Asking…" : "Send"}
             </Button>

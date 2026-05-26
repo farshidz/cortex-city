@@ -169,6 +169,8 @@ test("readReviewSummaries and readReviewSummaryMap backfill review_status", () =
 
   assert.equal(result.list.review_status, "new_commits");
   assert.equal(result.mapEntry.review_status, "new_commits");
+  assert.equal(result.list.summary_head_sha, "abc123");
+  assert.equal(result.mapEntry.summary_head_sha, "abc123");
 });
 
 test("patchReviewSummary returns undefined for unknown pr_urls", () => {

@@ -26,6 +26,12 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
     review_state?: unknown;
   };
   delete withoutLegacyState.review_state;
+  if (
+    withoutLegacyState.summary?.trim() &&
+    !withoutLegacyState.summary_head_sha
+  ) {
+    withoutLegacyState.summary_head_sha = withoutLegacyState.head_sha;
+  }
   return withReviewStatus(withoutLegacyState) as ReviewSummary;
 }
 

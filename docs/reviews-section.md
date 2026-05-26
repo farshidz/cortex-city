@@ -25,7 +25,7 @@ A new lightweight, **task-free** runner — review summarization does not spawn 
 **Polling lives in the existing orchestrator worker, not on the client.** Mirrors the existing pattern at `src/lib/orchestrator-worker-runtime.ts:293-346` ("scan in_review tasks") where the worker polls GitHub for outgoing-PR state. Concretely:
 
 - Every worker tick (`config.poll_interval_seconds`, default 30s) `pollOnce` calls `getReviewRequestedPRs()` and reconciles `.cortex/reviews.json`: adds new PRs, updates `head_sha` / `pr_status`, drops entries that have left the open review live set (handled by the GC phase below).
-- For any entry that has no summary yet, or whose cached `head_sha` differs from the live one, the worker spawns a **review run** via a dedicated `spawnReviewSummary()` (analogous to `spawnAgentSession` but with no worktree, no session-resume, no `Task` row). It tracks an in-memory `activeReviewPids` map so the next tick doesn't re-fire a run that's still in flight.
+- For any entry that has no summary yet, the worker spawns a **review run** via a dedicated `spawnReviewSummary()` (analogous to `spawnAgentSession` but with no worktree, no session-resume, no `Task` row). If the live `head_sha` changes after a summary exists, the worker updates the PR fields but leaves regeneration to the user. It tracks an in-memory `activeReviewPids` map so the next tick doesn't re-fire a run that's still in flight.
 - Review-run concurrency is capped separately from `max_parallel_sessions` so heavy task agents don't starve quick review summaries (and vice versa). Default cap: `max_parallel_reviews = 2`, new field on `OrchestratorConfig`. Same pid-reconcile pattern as `pollOnce` uses for tasks (`orchestrator-worker-runtime.ts:124-151`).
 - `GET /api/reviews` becomes a pure read of `.cortex/reviews.json`. It does **not** shell out to `gh`. The frontend SWR-polls this cheap endpoint at 5s, just like `/api/tasks`.
 - Manual **force-regenerate** is still synchronous (`POST /api/reviews/summarize`) — the user is in front of the page waiting; bypassing the worker keeps the latency tight. The endpoint reuses the same `spawnReviewSummary` and adds its pid to `activeReviewPids` so a worker tick fired mid-run won't double-spawn.
@@ -193,7 +193,7 @@ SWR-polled (5 s) table that mirrors the visual conventions of `src/app/page.tsx`
 Columns: Repo · PR # · Title (link to PR) · Author · PR status badge (reuses the status palette from `page.tsx:39-44`) · Summary (truncated, click-to-expand) · Actions.
 
 Behavior:
-- Read-only consumer of `.cortex/reviews.json` via `GET /api/reviews`. No client-side summary triggering — when a PR has no summary, the row shows a "Summarizing…" placeholder and the worker fills it in on the next tick (≤ poll_interval_seconds). SHA-stale rows show "Outdated — refreshing…" with the same expectation.
+- Read-only consumer of `.cortex/reviews.json` via `GET /api/reviews`. No client-side summary triggering — when a PR has no summary, the row shows a "Summarizing…" placeholder and the worker fills it in on the next tick (≤ poll_interval_seconds). SHA-stale rows keep showing the previous summary until the user clicks **Regenerate**.
 - Row actions:
   - **Open PR** — `<a href={pr_url} target=_blank>`.
   - **Regenerate** — `POST /api/reviews/summarize` with `force: true` (always starts a fresh session, replaces `session_id`, clears `followups[]` since they belonged to the previous summary).
@@ -246,7 +246,7 @@ deps.logger.log("[worker] Poll phase: scan review requests");
 const openReviewRequests = await deps.getReviewRequestedPRs();
 const cache = readReviewSummaries();
 
-// Upsert request fields for every open PR; clear stale summary+session on SHA change.
+// Upsert request fields for every open PR; preserve summaries on SHA change.
 for (const pr of openReviewRequests) {
   const cached = cache[pr.pr_url];
   if (!cached) {
@@ -254,7 +254,8 @@ for (const pr of openReviewRequests) {
   } else if (cached.head_sha !== pr.head_sha) {
     await upsertReviewSummary({
       ...cached, ...prFieldsOnly(pr),
-      summary: "", session_id: undefined, followups: [], generated_at: "",
+      summary_head_sha: cached.summary_head_sha ?? cached.head_sha,
+      session_id: undefined, followups: [],
     });
   } else if (cached.pr_status !== pr.pr_status) {
     await upsertReviewSummary({ ...cached, pr_status: pr.pr_status });
@@ -267,7 +268,7 @@ for (const pr of openReviewRequests) {
   if (reviewSlots <= 0) break;
   if (activeReviewPids.has(pr.pr_url)) continue;
   const cached = readReviewSummaries()[pr.pr_url];
-  const needsSummary = !cached?.summary || cached.head_sha !== pr.head_sha;
+  const needsSummary = !cached?.summary;
   if (!needsSummary) continue;
   const { pid } = await spawnReviewSummary(pr.pr_url, pr.head_sha, configDefaults, () => {
     activeReviewPids.delete(pr.pr_url);
@@ -315,7 +316,7 @@ Notes:
 4. **Summary (worker-driven)**:
    - On first sight, the row appears with a "Summarizing…" placeholder. Within one worker tick (`poll_interval_seconds`, default 30 s), the worker logs `[worker] Poll phase: scan review requests` and a `[worker] Spawning review summary for <pr_url>`.
    - Verify `.cortex/reviews.json` contains the entry with `summary` + `head_sha` + `session_id` populated.
-   - Push a new commit to the PR; within one poll cycle the row should re-summarize (different `head_sha`, follow-ups cleared).
+   - Push a new commit to the PR; within one poll cycle the row should keep the existing summary and not spawn a new run. Click **Regenerate** when a fresh summary is wanted for the new `head_sha`.
    - Click **Regenerate** — confirm a fresh `generated_at` timestamp and new tokens count, and that the worker's next tick does *not* double-spawn (only one run logged, `activeReviewPids` reflects the in-flight pid).
 5. **Inline review**:
    - Click **Comment**, type a body, submit → confirm the comment appears on GitHub.
