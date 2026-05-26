@@ -317,9 +317,13 @@ export async function spawnReviewSummary(
   const prompt = buildReviewWrapperPrompt(config, request.pr_url);
 
   const cachedBefore = getReviewSummary(request.pr_url);
+  const cachedSummaryHeadSha =
+    cachedBefore?.summary_head_sha ||
+    (cachedBefore?.summary?.trim() ? cachedBefore.head_sha : undefined);
   const baseEntry = {
     ...request,
     summary: cachedBefore?.summary ?? "",
+    summary_head_sha: cachedSummaryHeadSha,
     generated_at: cachedBefore?.generated_at ?? "",
     runtime: cachedBefore?.runtime,
     effort: cachedBefore?.effort,
@@ -351,6 +355,7 @@ export async function spawnReviewSummary(
     const next = {
       ...request,
       summary: output.error ? cachedBefore?.summary ?? "" : output.result_text.trim(),
+      summary_head_sha: output.error ? cachedSummaryHeadSha : request.head_sha,
       generated_at: output.error ? cachedBefore?.generated_at ?? "" : generatedAt,
       runtime: opts.runtime,
       effort: opts.effort,
@@ -392,6 +397,12 @@ export async function askFollowup(
   }
   if (!cached.summary) {
     throw new Error("Summary is not yet available for this PR.");
+  }
+  if (cached.current_run_pid != null) {
+    throw new Error("Summary is being refreshed for this PR.");
+  }
+  if (cached.summary_head_sha && cached.summary_head_sha !== cached.head_sha) {
+    throw new Error("Summary is stale; regenerate it before asking follow-up.");
   }
   const config = readConfig();
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);

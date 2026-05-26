@@ -2,6 +2,7 @@ import type { ReviewStatus } from "./types";
 
 export interface ReviewStatusInput {
   summary?: string;
+  summary_head_sha?: string;
   error?: string;
   current_run_pid?: number;
   final_at?: string;
@@ -23,7 +24,7 @@ export function deriveReviewStatus(review: ReviewStatusInput): ReviewStatus {
   const hasSummary = Boolean(review.summary?.trim());
 
   if (review.final_at) return "final";
-  if (!hasSummary && review.current_run_pid != null) return "summarizing";
+  if (review.current_run_pid != null) return "summarizing";
   if (review.error) return "summary_error";
   if (!hasSummary) return "pending_summary";
   if (!review.my_last_review_sha) return "needs_review";

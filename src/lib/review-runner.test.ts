@@ -171,7 +171,9 @@ test("summarizePR persists Claude output as a ReviewSummary", () => {
   assert.equal(result.summary.output_tokens, 34);
   assert.equal(result.summary.error, undefined);
   assert.equal(result.summary.current_run_pid, undefined);
+  assert.equal(result.summary.summary_head_sha, request.head_sha);
   assert.equal(result.persisted.summary, "## Summary\nLooks fine.");
+  assert.equal(result.persisted.summary_head_sha, request.head_sha);
   assert.equal(result.persisted.session_id, "claude-session-1");
 });
 
@@ -221,6 +223,8 @@ test("summarizePR persists Codex output as a ReviewSummary", () => {
   assert.equal(result.summary.runtime, "codex");
   assert.equal(result.summary.input_tokens, 5);
   assert.equal(result.summary.output_tokens, 7);
+  assert.equal(result.summary.summary_head_sha, "def456");
+  assert.equal(result.persisted.summary_head_sha, "def456");
   assert.equal(result.persisted.session_id, "codex-thread-1");
 });
 
@@ -242,6 +246,7 @@ test("summarizePR records error and preserves previous summary on non-zero exit"
         [request.pr_url]: {
           ...request,
           summary: "old text",
+          summary_head_sha: request.head_sha,
           generated_at: "2026-05-01T00:00:00.000Z",
         },
       },
@@ -272,7 +277,9 @@ test("summarizePR records error and preserves previous summary on non-zero exit"
   assert.ok(result.summary.error, "error should be populated");
   assert.match(result.summary.error, /boom|claude exited with code 7/);
   assert.equal(result.summary.summary, "old text");
+  assert.equal(result.summary.summary_head_sha, request.head_sha);
   assert.equal(result.persisted.summary, "old text");
+  assert.equal(result.persisted.summary_head_sha, request.head_sha);
 });
 
 test("summarizePR applies the configured task run timeout", () => {
@@ -359,6 +366,63 @@ test("askFollowup throws when the cached entry has no summary yet", () => {
   );
 
   assert.equal(result.error, "Summary is not yet available for this PR.");
+});
+
+test("askFollowup throws for stale summaries and active refreshes", () => {
+  const workspace = setupRunnerWorkspace("review-runner-followup-refreshing-");
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  const request = sampleRequest({ head_sha: "new-head" });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify(
+      {
+        [request.pr_url]: {
+          ...request,
+          summary: "old text",
+          summary_head_sha: "old-head",
+          generated_at: "2026-05-01T00:00:00.000Z",
+        },
+      },
+      null,
+      2
+    )
+  );
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { askFollowup } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      let staleError = null;
+      try {
+        await askFollowup(${JSON.stringify(request.pr_url)}, "ping");
+      } catch (err) {
+        staleError = err.message;
+      }
+
+      await patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+        summary_head_sha: ${JSON.stringify(request.head_sha)},
+        current_run_pid: 123,
+      });
+      let runningError = null;
+      try {
+        await askFollowup(${JSON.stringify(request.pr_url)}, "ping");
+      } catch (err) {
+        runningError = err.message;
+      }
+      console.log(JSON.stringify({ staleError, runningError }));
+    `,
+    prependBinToPath(workspace)
+  );
+
+  assert.equal(
+    result.staleError,
+    "Summary is stale; regenerate it before asking follow-up."
+  );
+  assert.equal(result.runningError, "Summary is being refreshed for this PR.");
 });
 
 test("askFollowup throws when the PR has no cached summary", () => {

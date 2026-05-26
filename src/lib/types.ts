@@ -146,6 +146,7 @@ export type ReviewStatus =
 
 export interface ReviewSummary extends ReviewRequest {
   summary: string;
+  summary_head_sha?: string;
   generated_at: string;
   review_status: ReviewStatus;
   runtime?: AgentRuntime;

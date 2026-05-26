@@ -166,10 +166,11 @@ test("pollOnce skips spawn when cached entry has matching head SHA and a summary
   assert.equal(h.reviews[pr.pr_url].session_id, "sess-1");
 });
 
-test("pollOnce clears summary + session + followups when head SHA changes", async () => {
+test("pollOnce preserves stale summary without auto-refreshing a changed head SHA", async () => {
   const pr = makeRequest({ head_sha: "newSha" });
   const cached = makeSummary(makeRequest({ head_sha: "oldSha" }), {
     summary: "stale",
+    summary_head_sha: "oldSha",
     generated_at: "2026-05-01T00:00:00.000Z",
     session_id: "sess-1",
     followups: [
@@ -191,9 +192,14 @@ test("pollOnce clears summary + session + followups when head SHA changes", asyn
 
   const stored = h.reviews[pr.pr_url];
   assert.equal(stored.head_sha, "newSha");
+  assert.equal(stored.summary, "stale");
+  assert.equal(stored.summary_head_sha, "oldSha");
+  assert.equal(stored.generated_at, "2026-05-01T00:00:00.000Z");
+  assert.equal(stored.review_status, "needs_review");
+  assert.equal(stored.current_run_pid, undefined);
   assert.equal(stored.session_id, undefined);
   assert.deepEqual(stored.followups, []);
-  assert.equal(h.spawnCalls.length, 1);
+  assert.equal(h.spawnCalls.length, 0);
 });
 
 test("pollOnce refreshes my_last_review_sha when the cached value changes", async () => {
