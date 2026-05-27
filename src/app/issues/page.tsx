@@ -13,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { Issue, IssueStatus } from "@/lib/types";
+import type { Issue, IssuePriority, IssueStatus } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -24,6 +24,12 @@ const STATUS_COLORS: Record<IssueStatus, string> = {
   in_progress: "bg-yellow-100 text-yellow-800",
   done: "bg-green-100 text-green-800",
   closed: "bg-gray-100 text-gray-800",
+};
+
+const PRIORITY_COLORS: Record<IssuePriority, string> = {
+  high: "bg-red-500",
+  medium: "bg-yellow-500",
+  low: "bg-green-500",
 };
 
 interface IssueListResponse {
@@ -73,6 +79,7 @@ export default function IssuesPage() {
       <Table>
         <TableHeader>
           <TableRow>
+            <TableHead className="w-[12px] p-0" aria-label="Priority" />
             <TableHead className="w-[80px]">ID</TableHead>
             <TableHead>Title</TableHead>
             <TableHead>Status</TableHead>
@@ -85,6 +92,16 @@ export default function IssuesPage() {
         <TableBody>
           {items.map((issue) => (
             <TableRow key={issue.id}>
+              <TableCell className="p-0 w-[12px]">
+                {issue.priority ? (
+                  <span
+                    aria-label={`priority ${issue.priority}`}
+                    title={`priority: ${issue.priority}`}
+                    className={`block h-full w-1.5 rounded-sm ${PRIORITY_COLORS[issue.priority]}`}
+                    style={{ minHeight: "1.5rem" }}
+                  />
+                ) : null}
+              </TableCell>
               <TableCell className="font-mono text-xs">
                 {issue.id.slice(0, 8)}
               </TableCell>
@@ -127,7 +144,7 @@ export default function IssuesPage() {
           {items.length === 0 && (
             <TableRow>
               <TableCell
-                colSpan={7}
+                colSpan={8}
                 className="text-center text-muted-foreground py-8"
               >
                 No issues.{" "}

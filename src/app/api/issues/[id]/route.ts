@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { deleteIssue, getIssue, updateIssue } from "@/lib/issue-store";
+import type { UpdateIssueInput } from "@/lib/issue-store";
 import { getTask } from "@/lib/store";
-import type { IssueStatus, LinkedTaskSummary } from "@/lib/types";
+import type { IssuePriority, IssueStatus, LinkedTaskSummary } from "@/lib/types";
 
 const ALLOWED_STATUSES: IssueStatus[] = ["open", "in_progress", "done", "closed"];
+const ALLOWED_PRIORITIES: IssuePriority[] = ["low", "medium", "high"];
 
 export async function GET(
   _request: NextRequest,
@@ -28,12 +30,7 @@ export async function PUT(
 ) {
   const { id } = await params;
   const body = await request.json();
-  const updates: {
-    title?: string;
-    description?: string;
-    plan?: string;
-    status?: IssueStatus;
-  } = {};
+  const updates: UpdateIssueInput = {};
   if (typeof body.title === "string") updates.title = body.title;
   if (typeof body.description === "string") updates.description = body.description;
   if (typeof body.plan === "string") updates.plan = body.plan;
@@ -42,6 +39,18 @@ export async function PUT(
       return NextResponse.json({ error: "Invalid status" }, { status: 400 });
     }
     updates.status = body.status as IssueStatus;
+  }
+  if ("priority" in body) {
+    if (body.priority === null || body.priority === "") {
+      updates.priority = null;
+    } else if (
+      typeof body.priority === "string" &&
+      ALLOWED_PRIORITIES.includes(body.priority as IssuePriority)
+    ) {
+      updates.priority = body.priority as IssuePriority;
+    } else {
+      return NextResponse.json({ error: "Invalid priority" }, { status: 400 });
+    }
   }
   try {
     const updated = await updateIssue(id, updates);

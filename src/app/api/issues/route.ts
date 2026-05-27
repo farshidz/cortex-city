@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createIssue, readIssues } from "@/lib/issue-store";
+import { compareIssues, createIssue, readIssues } from "@/lib/issue-store";
+import type { IssuePriority } from "@/lib/types";
+
+const VALID_PRIORITIES: IssuePriority[] = ["low", "medium", "high"];
 
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
@@ -22,9 +25,7 @@ export async function GET(request: NextRequest) {
   if (!showResolved) {
     issues = issues.filter((i) => i.status !== "done" && i.status !== "closed");
   }
-  issues.sort(
-    (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-  );
+  issues.sort(compareIssues);
   const total = issues.length;
   const start = (page - 1) * pageSize;
   const items = issues.slice(start, start + pageSize);
@@ -36,10 +37,21 @@ export async function POST(request: NextRequest) {
   if (!body.title || typeof body.title !== "string") {
     return NextResponse.json({ error: "title is required" }, { status: 400 });
   }
+  let priority: IssuePriority | undefined;
+  if (body.priority !== undefined && body.priority !== null && body.priority !== "") {
+    if (
+      typeof body.priority !== "string" ||
+      !VALID_PRIORITIES.includes(body.priority as IssuePriority)
+    ) {
+      return NextResponse.json({ error: "Invalid priority" }, { status: 400 });
+    }
+    priority = body.priority as IssuePriority;
+  }
   const issue = await createIssue({
     title: body.title,
     description: body.description ?? "",
     plan: body.plan || undefined,
+    priority,
   });
   return NextResponse.json(issue, { status: 201 });
 }

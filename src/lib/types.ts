@@ -2,6 +2,8 @@ export type TaskStatus = "open" | "in_progress" | "in_review" | "merged" | "clos
 
 export type IssueStatus = "open" | "in_progress" | "done" | "closed";
 
+export type IssuePriority = "low" | "medium" | "high";
+
 export interface IssueComment {
   id: string;
   body: string;
@@ -14,6 +16,7 @@ export interface Issue {
   description: string;
   plan?: string;
   status: IssueStatus;
+  priority?: IssuePriority;
   task_id?: string;
   comments: IssueComment[];
   created_at: string;

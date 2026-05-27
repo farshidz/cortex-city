@@ -215,6 +215,76 @@ test("syncIssueFromTask is a no-op when issue is linked to a different task", ()
   assert.equal(result.task_id, "t1");
 });
 
+test("createIssue accepts and persists priority; invalid values normalize to undefined", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const high = await store.createIssue({ title: "H", description: "", priority: "high" });
+      const bogus = await store.createIssue({ title: "B", description: "", priority: "urgent" });
+      const none = await store.createIssue({ title: "N", description: "" });
+      console.log(JSON.stringify({ high, bogus, none }));
+    `
+  );
+  assert.equal(result.high.priority, "high");
+  assert.equal(result.bogus.priority, undefined);
+  assert.equal(result.none.priority, undefined);
+});
+
+test("updateIssue sets, changes, and clears priority", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const issue = await store.createIssue({ title: "T", description: "" });
+      const set = await store.updateIssue(issue.id, { priority: "medium" });
+      const raised = await store.updateIssue(issue.id, { priority: "high" });
+      const cleared = await store.updateIssue(issue.id, { priority: null });
+      console.log(JSON.stringify({ set, raised, cleared }));
+    `
+  );
+  assert.equal(result.set.priority, "medium");
+  assert.equal(result.raised.priority, "high");
+  assert.equal(result.cleared.priority, undefined);
+});
+
+test("compareIssues sorts by priority desc, then updated_at desc, undefined last", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const mkIssue = (priority, updated_at) => ({
+        id: priority + "-" + updated_at,
+        title: "",
+        description: "",
+        status: "open",
+        priority,
+        comments: [],
+        created_at: updated_at,
+        updated_at,
+      });
+      const list = [
+        mkIssue(undefined, "2026-05-04T00:00:00Z"),
+        mkIssue("low", "2026-05-01T00:00:00Z"),
+        mkIssue("high", "2026-05-02T00:00:00Z"),
+        mkIssue("medium", "2026-05-03T00:00:00Z"),
+        mkIssue("high", "2026-05-03T00:00:00Z"),
+        mkIssue(undefined, "2026-05-05T00:00:00Z"),
+      ];
+      list.sort(store.compareIssues);
+      console.log(JSON.stringify(list.map((i) => i.id)));
+    `
+  );
+  assert.deepEqual(result, [
+    "high-2026-05-03T00:00:00Z",
+    "high-2026-05-02T00:00:00Z",
+    "medium-2026-05-03T00:00:00Z",
+    "low-2026-05-01T00:00:00Z",
+    "undefined-2026-05-05T00:00:00Z",
+    "undefined-2026-05-04T00:00:00Z",
+  ]);
+});
+
 test("deleteIssue removes the issue from disk", () => {
   const workspace = createTempWorkspace();
   const result = runScript(
