@@ -478,6 +478,165 @@ test("manual instruction runs leave the existing review hash unchanged", () => {
   assert.equal(result.tasks[0].last_review_gh_state, "existing-hash");
 });
 
+test("builder runs skip reviewer scheduling when the current PR head was reviewed", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-reviewed-head-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#24": {
+        state: "open",
+        merged: false,
+        headRefOid: "reviewed-sha",
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        checks: [{ name: "test", state: "SUCCESS" }],
+      },
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_review",
+        pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/24",
+        reviewer_last_reviewed_head_sha: "reviewed-sha",
+      }))};
+      await createTask(task);
+      await __testUtils.handleRunComplete(
+        "task-1",
+        0,
+        ${JSON.stringify(
+          JSON.stringify({
+            type: "result",
+            subtype: "print",
+            is_error: false,
+            duration_ms: 10,
+            result: "done",
+            session_id: "claude-session",
+            terminal_reason: "completed",
+            total_cost_usd: 0,
+            num_turns: 1,
+            structured_output: {
+              status: "completed",
+              summary: "No actionable feedback",
+              pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/24",
+              branch_name: "agent/no-op",
+              files_changed: [],
+              assumptions: [],
+              blockers: [],
+              next_steps: [],
+            },
+            usage: {
+              input_tokens: 1,
+              output_tokens: 1,
+              cache_read_input_tokens: 0,
+            },
+          })
+        )},
+        "",
+        10,
+        [],
+        "claude",
+        "review"
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.tasks[0].reviewer_run_pending, undefined);
+  assert.equal(result.tasks[0].reviewer_last_reviewed_head_sha, "reviewed-sha");
+});
+
+test("reviewer runs use reviewer session state and leave feedback hash untouched", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-reviewer-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#25": {
+        state: "open",
+        merged: false,
+        headRefOid: "fresh-sha",
+        reviews: [{ id: 100, state: "COMMENTED" }],
+        comments: [],
+        issueComments: [],
+        checks: [{ name: "test", state: "SUCCESS" }],
+      },
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_review",
+        pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/25",
+        current_run_pid: 444,
+        current_run_mode: "reviewer",
+        reviewer_run_pending: false,
+        reviewer_session_id: "reviewer-old",
+        last_review_gh_state: "existing-hash",
+      }))};
+      await createTask(task);
+      await __testUtils.handleRunComplete(
+        "task-1",
+        0,
+        ${JSON.stringify(
+          JSON.stringify({
+            type: "result",
+            subtype: "print",
+            is_error: false,
+            duration_ms: 10,
+            result: "review submitted",
+            session_id: "reviewer-new",
+            terminal_reason: "completed",
+            total_cost_usd: 0,
+            num_turns: 1,
+            structured_output: {
+              status: "completed",
+              summary: "Submitted PR review",
+              pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/25",
+              branch_name: "agent/reviewer",
+              files_changed: [],
+              assumptions: [],
+              blockers: [],
+              next_steps: [],
+            },
+            usage: {
+              input_tokens: 2,
+              output_tokens: 1,
+              cache_read_input_tokens: 0,
+            },
+          })
+        )},
+        "",
+        10,
+        [],
+        "claude",
+        "reviewer",
+        undefined,
+        444
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.tasks[0].reviewer_session_id, "reviewer-new");
+  assert.equal(result.tasks[0].reviewer_last_reviewed_head_sha, "fresh-sha");
+  assert.equal(result.tasks[0].reviewer_run_pending, false);
+  assert.equal(result.tasks[0].last_review_gh_state, "existing-hash");
+  assert.equal(result.tasks[0].current_run_mode, undefined);
+});
+
 test("new GitHub comments during a run skip review hash updates", () => {
   const { workspace } = setupWorkspace();
   const ghStateFile = path.join(workspace, "gh-comments-state.json");

@@ -298,3 +298,66 @@ test("pollOnce rechecks latest review hash before launching review run", async (
 
   assert.deepEqual(spawnedTasks, []);
 });
+
+test("pollOnce launches a pending reviewer run before feedback handling", async () => {
+  const tasks: Task[] = [
+    sample({
+      id: "task-1",
+      status: "in_review",
+      pr_url: "https://github.com/acme/widget/pull/1",
+      reviewer_run_pending: true,
+      agent_runner: "codex",
+      permission_mode: "bypassPermissions",
+    }),
+  ];
+  const launchedModes: string[] = [];
+  let hashCalls = 0;
+  const deps: WorkerRuntimeDeps = {
+    deleteReviewSummary: async () => {},
+    deleteTask: async () => {},
+    getPRStateHash: async () => {
+      hashCalls++;
+      return "new-hash";
+    },
+    getPRStatus: async () => "checks_pending",
+    getReviewRequestedPRs: async () => [],
+    getTask: async (id) => tasks.find((task) => task.id === id),
+    isPRMergedOrClosed: async () => null,
+    isPidRunning: () => true,
+    logger: { log: () => {}, error: () => {} },
+    readConfig: () => ({
+      max_parallel_sessions: 1,
+      poll_interval_seconds: 30,
+      default_permission_mode: "bypassPermissions",
+      default_agent_runner: "codex",
+      agents: {},
+    }),
+    readReviewSummaries: () => [],
+    readReviewSummaryMap: () => ({}),
+    readTasks: () => tasks,
+    removeWorktree: async () => {},
+    spawnAgentSession: async (_task, mode) => {
+      launchedModes.push(mode);
+      return { pid: 202, child: {} as never };
+    },
+    spawnReviewSummary: async () => ({
+      pid: 303,
+      child: {} as never,
+      done: Promise.resolve({} as never),
+    }),
+    updateTask: async (id, updates) => {
+      const index = tasks.findIndex((task) => task.id === id);
+      assert.notEqual(index, -1);
+      tasks[index] = { ...tasks[index], ...updates };
+      return tasks[index];
+    },
+    upsertReviewSummary: async (summary) => summary as never,
+  };
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(launchedModes, ["reviewer"]);
+  assert.equal(hashCalls, 0);
+  assert.equal(tasks[0].reviewer_run_pending, false);
+  assert.equal(tasks[0].current_run_mode, "reviewer");
+});

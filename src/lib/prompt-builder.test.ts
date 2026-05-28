@@ -83,40 +83,38 @@ function writeTestTemplates(workspace: string) {
   );
 }
 
-function writeConfig(workspace: string) {
+function writeConfig(workspace: string, overrides: Record<string, unknown> = {}) {
   mkdirSync(path.join(workspace, ".cortex"), { recursive: true });
   mkdirSync(path.join(workspace, "prompts", "agents"), { recursive: true });
+  const config = {
+    max_parallel_sessions: 2,
+    poll_interval_seconds: 30,
+    default_permission_mode: "bypassPermissions",
+    default_agent_runner: "claude",
+    agents: {
+      "cortex-city-swe": {
+        name: "Cortex City SWE",
+        repo_slug: "farshidz/marqo-cortex-city",
+        repo_path: workspace,
+        prompt_file: "prompts/agents/cortex-city-swe.md",
+        review_prompt_file: "prompts/agents/cortex-city-swe.review.md",
+        cleanup_prompt_file: "prompts/agents/cortex-city-swe.cleanup.md",
+        default_branch: "main",
+        description: "Owns the Cortex City control panel.",
+      },
+      "marqo-documentation-agent": {
+        name: "Marqo Documentation Agent",
+        repo_slug: "marqo-ai/marqodocs",
+        repo_path: workspace,
+        prompt_file: "prompts/agents/marqo-documentation-agent.md",
+        default_branch: "trunk",
+      },
+    },
+    ...overrides,
+  };
   writeFileSync(
     path.join(workspace, ".cortex", "config.json"),
-    JSON.stringify(
-      {
-        max_parallel_sessions: 2,
-        poll_interval_seconds: 30,
-        default_permission_mode: "bypassPermissions",
-        default_agent_runner: "claude",
-        agents: {
-          "cortex-city-swe": {
-            name: "Cortex City SWE",
-            repo_slug: "farshidz/marqo-cortex-city",
-            repo_path: workspace,
-            prompt_file: "prompts/agents/cortex-city-swe.md",
-            review_prompt_file: "prompts/agents/cortex-city-swe.review.md",
-            cleanup_prompt_file: "prompts/agents/cortex-city-swe.cleanup.md",
-            default_branch: "main",
-            description: "Owns the Cortex City control panel.",
-          },
-          "marqo-documentation-agent": {
-            name: "Marqo Documentation Agent",
-            repo_slug: "marqo-ai/marqodocs",
-            repo_path: workspace,
-            prompt_file: "prompts/agents/marqo-documentation-agent.md",
-            default_branch: "trunk",
-          },
-        },
-      },
-      null,
-      2
-    )
+    JSON.stringify(config, null, 2)
   );
   writeFileSync(
     path.join(workspace, "prompts", "agents", "cortex-city-swe.md"),
@@ -257,6 +255,33 @@ test("buildReviewPrompt uses sensible defaults for unknown mergeability", () => 
   );
   assert.match(result, /Base=trunk/);
   assert.doesNotMatch(result, /Agent Review Context/);
+});
+
+test("buildReviewerPrompt keeps reviewer instructions separate from feedback prompts", () => {
+  const workspace = createTempWorkspace();
+  writeTestTemplates(workspace);
+  writeConfig(workspace, {
+    reviewer_agent_prompt: "Check accessibility-sensitive UI changes.",
+  });
+
+  const result = runPromptScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/456",
+        })
+      )};
+      console.log(JSON.stringify(prompts.buildReviewerPrompt(task)));
+    `
+  );
+
+  assert.match(result, /reviewer agent/);
+  assert.match(result, /Task: Add unit tests/);
+  assert.match(result, /Plan: Cover the lib modules/);
+  assert.match(result, /PR: https:\/\/github.com\/farshidz\/marqo-cortex-city\/pull\/456/);
+  assert.match(result, /Submit one GitHub PR review/);
+  assert.match(result, /Check accessibility-sensitive UI changes\./);
 });
 
 test("shared review template requires the robot prefix in GitHub replies", () => {

@@ -23,7 +23,7 @@ import {
 import { spawnReviewSummary } from "./review-runner";
 import { unlinkTask as unlinkIssueTask } from "./issue-store";
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
-import type { ReviewRequest, ReviewSummary, Task } from "./types";
+import type { ReviewRequest, ReviewSummary, Task, TaskRunMode } from "./types";
 
 export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 export const DEAD_OWNED_PID_GRACE_MS = 10_000;
@@ -124,7 +124,7 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
 };
 
 interface LaunchOptions {
-  mode: "initial" | "review" | "cleanup";
+  mode: TaskRunMode;
   onComplete?: (taskId: string) => Promise<void> | void;
   postSpawnUpdates?: Partial<Task>;
   preSpawnUpdates?: Partial<Task>;
@@ -160,6 +160,7 @@ async function launchTaskRun(
     activePids.set(task.id, pid);
     await deps.updateTask(task.id, {
       current_run_pid: pid,
+      current_run_mode: options.mode,
       ...options.postSpawnUpdates,
     });
     return true;
@@ -252,6 +253,7 @@ export async function pollOnce(
         await deps.updateTask(taskId, {
           final_cleanup_state: "finished",
           current_run_pid: undefined,
+          current_run_mode: undefined,
         });
         if (currentTask.worktree_path) {
           await deps.removeWorktree(currentTask);
@@ -266,6 +268,7 @@ export async function pollOnce(
       rollbackOnError: {
         final_cleanup_state: undefined,
         current_run_pid: undefined,
+        current_run_mode: undefined,
       },
     });
   }
@@ -326,13 +329,14 @@ export async function pollOnce(
       mode: runMode,
       postSpawnUpdates: {
         resume_requested: undefined,
+        resume_run_mode: undefined,
         pending_manual_instruction: undefined,
       },
       preSpawnUpdates: task.status === "open" ? { status: "in_progress" } : undefined,
       rollbackOnError:
         task.status === "open"
-          ? { status: "open", current_run_pid: undefined }
-          : undefined,
+          ? { status: "open", current_run_pid: undefined, current_run_mode: undefined }
+          : { current_run_pid: undefined, current_run_mode: undefined },
     });
     if (didLaunch) availableSlots--;
   }
@@ -366,6 +370,7 @@ export async function pollOnce(
       rollbackOnError: {
         status: "open",
         current_run_pid: undefined,
+        current_run_mode: undefined,
       },
     });
     if (didLaunch) availableSlots--;
@@ -376,6 +381,7 @@ export async function pollOnce(
     (task): task is Task & { pr_url: string } =>
       task.status === "in_review" && typeof task.pr_url === "string"
   );
+  const tasksToRunReviewer: Array<Task & { pr_url: string }> = [];
   const tasksToReview: ReviewRunCandidate[] = [];
 
   await Promise.all(
@@ -395,8 +401,13 @@ export async function pollOnce(
           task.pr_status = prStatus;
         }
 
-        if (prStatus === "checks_pending" && !hasManualInstruction) return;
         if (activePids.has(task.id)) return;
+        if (task.reviewer_run_pending) {
+          tasksToRunReviewer.push(task);
+          return;
+        }
+
+        if (prStatus === "checks_pending" && !hasManualInstruction) return;
 
         const ghState = await deps.getPRStateHash(task.pr_url);
         if (!ghState && !hasManualInstruction) return;
@@ -412,6 +423,38 @@ export async function pollOnce(
       }
     })
   );
+
+  for (const candidate of tasksToRunReviewer) {
+    if (availableSlots <= 0) break;
+    const task = await deps.getTask(candidate.id);
+    if (
+      !task ||
+      task.status !== "in_review" ||
+      typeof task.pr_url !== "string" ||
+      task.pr_url !== candidate.pr_url ||
+      !task.reviewer_run_pending
+    ) {
+      continue;
+    }
+    if (task.current_run_pid || activePids.has(task.id)) continue;
+
+    deps.logger.log(`[worker] Picking up task "${task.title}" (${task.id}) [reviewer]`);
+    const didLaunch = await launchTaskRun(task, activePids, deps, {
+      mode: "reviewer",
+      preSpawnUpdates: {
+        reviewer_run_pending: false,
+      },
+      postSpawnUpdates: {
+        pending_manual_instruction: undefined,
+      },
+      rollbackOnError: {
+        reviewer_run_pending: true,
+        current_run_pid: undefined,
+        current_run_mode: undefined,
+      },
+    });
+    if (didLaunch) availableSlots--;
+  }
 
   for (const candidate of tasksToReview) {
     if (availableSlots <= 0) break;

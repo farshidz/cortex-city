@@ -234,6 +234,16 @@ export async function hasPendingChecks(prUrl: string): Promise<boolean> {
   return parseInt(result) > 0;
 }
 
+export async function getPRHeadSha(prUrl: string): Promise<string> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return "";
+
+  const data = await execJson<{ headRefOid?: string }>(
+    `gh pr view ${prUrl} --json headRefOid`
+  );
+  return data?.headRefOid?.trim() || "";
+}
+
 export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return [];

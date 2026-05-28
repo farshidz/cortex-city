@@ -66,12 +66,15 @@ export interface Task {
 
   // Orchestration metadata
   session_id?: string;
+  reviewer_session_id?: string;
   pr_url?: string;
   branch_name?: string;
   worktree_path?: string;
   final_cleanup_state?: "running" | "finished";
   current_run_pid?: number;
+  current_run_mode?: TaskRunMode;
   resume_requested?: boolean;
+  resume_run_mode?: ResumableTaskRunMode;
   pending_manual_instruction?: string;
   last_run_at?: string;
   last_run_result?: "success" | "error" | "timeout" | "budget_exceeded";
@@ -89,7 +92,13 @@ export interface Task {
   codex_cumulative_input_tokens?: number;
   codex_cumulative_cached_input_tokens?: number;
   codex_cumulative_output_tokens?: number;
+  reviewer_codex_usage_session_id?: string;
+  reviewer_codex_cumulative_input_tokens?: number;
+  reviewer_codex_cumulative_cached_input_tokens?: number;
+  reviewer_codex_cumulative_output_tokens?: number;
   // Review tracking
+  reviewer_run_pending?: boolean;
+  reviewer_last_reviewed_head_sha?: string;
   last_review_gh_state?: string; // hash of PR state captured after each run
   pr_status?: "clean" | "checks_failing" | "checks_pending" | "needs_approval" | "conflicts" | "unstable" | "unknown";
   notes?: string;
@@ -112,6 +121,10 @@ export interface AgentConfig {
 }
 
 export type PromptMode = "initial" | "review" | "cleanup";
+
+export type TaskRunMode = "initial" | "review" | "reviewer" | "cleanup";
+
+export type ResumableTaskRunMode = Exclude<TaskRunMode, "cleanup">;
 
 export type AgentRuntime = "claude" | "codex";
 
@@ -139,6 +152,7 @@ export interface OrchestratorConfig {
   default_codex_effort?: CodexEffort;
   agents: Record<string, AgentConfig>;
   review_prompt?: string;
+  reviewer_agent_prompt?: string;
   review_runtime?: AgentRuntime;
   review_effort?: TaskEffort;
   review_model?: string;
