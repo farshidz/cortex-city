@@ -292,12 +292,9 @@ test("buildReviewerPrompt keeps reviewer instructions separate from feedback pro
   assert.match(result, /Do not approve or request changes/);
   assert.match(
     result,
-    /Start every GitHub comment you create with `🤖\[Cortex City Reviewer\]`/
+    /Start every GitHub review\/comment body you create with `🤖\[Cortex City Reviewer\]`/
   );
-  assert.match(
-    result,
-    /first line and final line exactly `🤖\[Cortex City Reviewer\]`/
-  );
+  assert.doesNotMatch(result, /final line exactly `🤖\[Cortex City Reviewer\]`/);
   assert.doesNotMatch(result, /approve when the implementation is sound/);
 });
 
