@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MdEditor } from "@/components/md-editor";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -57,6 +58,7 @@ function NewTaskPageBody() {
   const [branchName, setBranchName] = useState("");
   const [agentRunner, setAgentRunner] = useState<AgentRuntime | "">("");
   const [permissionMode, setPermissionMode] = useState<PermissionMode | "">("");
+  const [reviewerAgentEnabled, setReviewerAgentEnabled] = useState(true);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState<TaskEffort | "">("");
   const [submitting, setSubmitting] = useState(false);
@@ -118,6 +120,7 @@ function NewTaskPageBody() {
         branch_name: branchName || undefined,
         agent_runner: agentRunner || config?.default_agent_runner,
         permission_mode: permissionMode || config?.default_permission_mode,
+        reviewer_agent_enabled: reviewerAgentEnabled,
         model: model || undefined,
         effort: effort || undefined,
         issue_id: issueId || undefined,
@@ -234,6 +237,14 @@ function NewTaskPageBody() {
               <p className="text-xs text-muted-foreground">
                 Defaults to {config?.default_permission_mode || "bypassPermissions"} if not set.
               </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={reviewerAgentEnabled}
+                onCheckedChange={setReviewerAgentEnabled}
+              />
+              <Label>Reviewer agent</Label>
             </div>
 
             <div className="space-y-2">

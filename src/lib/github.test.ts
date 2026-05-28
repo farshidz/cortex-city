@@ -62,7 +62,7 @@ function runGithubScript(
     [
       "--eval",
       [
-        `import { getPRStateHash, getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { getPRHeadSha, getPRStateHash, getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
         "(async () => {",
         body,
         "})().catch((error) => {",
@@ -97,6 +97,10 @@ function setupWorkspace(): string {
 
 function prViewKey(prUrl: string): string {
   return `pr view ${prUrl} --json headRefOid,statusCheckRollup`;
+}
+
+function prHeadShaKey(prUrl: string): string {
+  return `pr view ${prUrl} --json headRefOid`;
 }
 
 function reviewsKey(): string {
@@ -148,6 +152,49 @@ test("getPRStateHash keeps a stable hash when GitHub reports no checks", () => {
     .digest("hex")
     .slice(0, 16);
   assert.equal(hash, expected);
+});
+
+test("getPRHeadSha returns the current PR head SHA", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const responses = {
+    [prHeadShaKey(prUrl)]: {
+      stdout: JSON.stringify({ headRefOid: "abc123" }),
+    },
+  };
+
+  const headSha = runGithubScript(
+    workspace,
+    responses,
+    `
+      const headSha = await getPRHeadSha(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(headSha));
+    `
+  );
+
+  assert.equal(headSha, "abc123");
+});
+
+test("getPRHeadSha returns an empty string when gh cannot resolve the PR", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const responses = {
+    [prHeadShaKey(prUrl)]: {
+      stderr: "not found",
+      exitCode: 1,
+    },
+  };
+
+  const headSha = runGithubScript(
+    workspace,
+    responses,
+    `
+      const headSha = await getPRHeadSha(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(headSha));
+    `
+  );
+
+  assert.equal(headSha, "");
 });
 
 test("getPRStateHash fails closed when a GitHub review fetch is throttled", () => {

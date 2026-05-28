@@ -107,8 +107,11 @@ function getLiveActiveSessions(
       kind: "task",
       task_id: t.id,
       task_title: t.title,
-      agent: t.agent,
-      session_id: t.session_id || "unknown",
+      agent: t.current_run_mode === "reviewer" ? `${t.agent} reviewer` : t.agent,
+      session_id:
+        t.current_run_mode === "reviewer"
+          ? t.reviewer_session_id || "pending"
+          : t.session_id || "unknown",
       pid: t.current_run_pid,
       started_at: t.last_run_at || t.updated_at,
       status: "running" as const,

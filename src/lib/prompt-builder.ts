@@ -112,6 +112,28 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 
+export function buildReviewerPrompt(task: Task): string {
+  const config = readConfig();
+  const customInstructions = config.reviewer_agent_prompt?.trim();
+  const sections = [
+    "You are the reviewer agent for this task.",
+    "",
+    `Task: ${task.title}`,
+    `Description: ${task.description || "No description provided."}`,
+    `Plan: ${task.plan || "No detailed plan provided."}`,
+    `PR: ${task.pr_url || "Unknown"}`,
+    "",
+    "Review the PR implementation against the task description and plan. Use GitHub tooling to inspect the diff and relevant code. Do not edit files, commit, or push. Submit one GitHub PR review with your findings: request changes for blocking issues, approve when the implementation is sound, or leave a comment review for non-blocking notes.",
+  ];
+
+  if (customInstructions) {
+    sections.push("", "Additional reviewer instructions:", customInstructions);
+  }
+
+  sections.push("", "Then respond with the required JSON status.");
+  return sections.join("\n");
+}
+
 export function buildCleanupPrompt(task: Task): string {
   const config = readConfig();
   const agentConfig = config.agents[task.agent];

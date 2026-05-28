@@ -258,15 +258,15 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Reviews</CardTitle>
+          <CardTitle className="text-base">Review Summaries</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label>Review Prompt</Label>
+            <Label>Review Summary Prompt</Label>
             <Textarea
               rows={8}
               value={form.review_prompt ?? ""}
-              placeholder="Default review prompt will be used if left blank."
+              placeholder="Default summary prompt will be used if left blank."
               onChange={(e) =>
                 setForm({
                   ...form,
@@ -276,7 +276,7 @@ export default function SettingsPage() {
             />
           </div>
           <div className="space-y-2">
-            <Label>Default Review Runtime</Label>
+            <Label>Default Review Summary Runtime</Label>
             <Select
               value={form.review_runtime || form.default_agent_runner}
               onValueChange={(v) =>
@@ -298,7 +298,7 @@ export default function SettingsPage() {
             </Select>
           </div>
           <div className="space-y-2">
-            <Label>Default Review Effort</Label>
+            <Label>Default Review Summary Effort</Label>
             <Select
               value={form.review_effort || UNSET_VALUE}
               onValueChange={(v) =>
@@ -325,7 +325,7 @@ export default function SettingsPage() {
             </Select>
           </div>
           <div className="space-y-2">
-            <Label>Max Parallel Review Runs</Label>
+            <Label>Max Parallel Review Summary Runs</Label>
             <Input
               type="number"
               min={1}
@@ -335,6 +335,28 @@ export default function SettingsPage() {
                 setForm({
                   ...form,
                   max_parallel_reviews: parseInt(e.target.value) || 1,
+                })
+              }
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Reviewer Agent</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Reviewer Agent Instructions</Label>
+            <Textarea
+              rows={6}
+              value={form.reviewer_agent_prompt ?? ""}
+              placeholder="Optional instructions appended to the reviewer agent prompt."
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  reviewer_agent_prompt: e.target.value || undefined,
                 })
               }
             />

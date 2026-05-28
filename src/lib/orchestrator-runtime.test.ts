@@ -5,6 +5,8 @@ import type { Task } from "./types";
 import {
   buildInterruptedTaskUpdates,
   getTaskRunMode,
+  isReviewerAgentEnabled,
+  shouldDeferBuilderRunForReviewer,
   shouldResumeTask,
   shouldUseContinuePrompt,
 } from "./orchestrator-runtime";
@@ -32,6 +34,7 @@ test("buildInterruptedTaskUpdates marks active work for resume", () => {
 
   assert.deepEqual(updates, {
     current_run_pid: undefined,
+    current_run_mode: undefined,
     resume_requested: true,
   });
 });
@@ -46,6 +49,7 @@ test("buildInterruptedTaskUpdates only clears pid for final tasks", () => {
 
   assert.deepEqual(updates, {
     current_run_pid: undefined,
+    current_run_mode: undefined,
   });
 });
 
@@ -60,7 +64,25 @@ test("buildInterruptedTaskUpdates resets orphaned final cleanup runs", () => {
 
   assert.deepEqual(updates, {
     current_run_pid: undefined,
+    current_run_mode: undefined,
     final_cleanup_state: undefined,
+  });
+});
+
+test("buildInterruptedTaskUpdates preserves reviewer mode for resume", () => {
+  const updates = buildInterruptedTaskUpdates(
+    sampleTask({
+      status: "in_review",
+      current_run_pid: 12345,
+      current_run_mode: "reviewer",
+    })
+  );
+
+  assert.deepEqual(updates, {
+    current_run_pid: undefined,
+    current_run_mode: undefined,
+    resume_requested: true,
+    resume_run_mode: "reviewer",
   });
 });
 
@@ -88,9 +110,59 @@ test("shouldResumeTask accepts interrupted review runs and manual instructions",
   );
 });
 
+test("isReviewerAgentEnabled defaults to enabled unless explicitly disabled", () => {
+  assert.equal(isReviewerAgentEnabled(sampleTask()), true);
+  assert.equal(
+    isReviewerAgentEnabled(sampleTask({ reviewer_agent_enabled: true })),
+    true
+  );
+  assert.equal(
+    isReviewerAgentEnabled(sampleTask({ reviewer_agent_enabled: false })),
+    false
+  );
+});
+
+test("shouldDeferBuilderRunForReviewer prioritizes queued reviewer runs", () => {
+  assert.equal(
+    shouldDeferBuilderRunForReviewer(
+      sampleTask({
+        status: "in_review",
+        reviewer_run_pending: true,
+      })
+    ),
+    true
+  );
+
+  assert.equal(
+    shouldDeferBuilderRunForReviewer(
+      sampleTask({
+        status: "in_review",
+        reviewer_agent_enabled: false,
+        reviewer_run_pending: true,
+      })
+    ),
+    false
+  );
+
+  assert.equal(
+    shouldDeferBuilderRunForReviewer(
+      sampleTask({
+        status: "in_review",
+        reviewer_run_pending: true,
+        resume_run_mode: "reviewer",
+      })
+    ),
+    false
+  );
+});
+
 test("getTaskRunMode uses review mode only for in_review tasks", () => {
   assert.equal(getTaskRunMode(sampleTask({ status: "in_review" })), "review");
   assert.equal(getTaskRunMode(sampleTask({ status: "open" })), "initial");
+  assert.equal(
+    getTaskRunMode(sampleTask({ status: "in_review", resume_run_mode: "reviewer" })),
+    "reviewer"
+  );
 });
 
 test("shouldUseContinuePrompt requires an existing session", () => {
@@ -112,5 +184,16 @@ test("shouldUseContinuePrompt requires an existing session", () => {
       })
     ),
     false
+  );
+
+  assert.equal(
+    shouldUseContinuePrompt(
+      sampleTask({
+        resume_requested: true,
+        reviewer_session_id: "reviewer-thread",
+      }),
+      "reviewer"
+    ),
+    true
   );
 });

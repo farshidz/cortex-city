@@ -19,9 +19,10 @@ import type {
   TaskEffort,
 } from "./types";
 
-export const DEFAULT_REVIEW_PROMPT = `You are reviewing an open pull request that the signed-in user has been asked to review.
+export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request that the signed-in user has been asked to review.
 
 Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused summary as **GitHub-flavored Markdown**.`;
+export const DEFAULT_REVIEW_PROMPT = DEFAULT_REVIEW_SUMMARY_PROMPT;
 
 interface SpawnOpts {
   runtime: AgentRuntime;
@@ -61,7 +62,9 @@ export function resolveReviewOpts(
 
 export function resolveReviewPrompt(config: OrchestratorConfig): string {
   const configured = config.review_prompt?.trim();
-  return configured && configured.length > 0 ? configured : DEFAULT_REVIEW_PROMPT;
+  return configured && configured.length > 0
+    ? configured
+    : DEFAULT_REVIEW_SUMMARY_PROMPT;
 }
 
 export function resolveReviewRunTimeoutMs(

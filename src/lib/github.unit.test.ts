@@ -4,14 +4,33 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { __testUtils } from "./github";
+import * as github from "./github";
 
 const {
   parsePRUrl,
   isNoChecksError,
   serializeCheckStates,
   isCommentFromSubmittedReview,
-} = __testUtils;
+} = github.__testUtils;
+
+test("github exports are reachable via module namespace", () => {
+  assert.equal(typeof github.getAuthenticatedUserLogin, "function");
+  assert.equal(typeof github.getCIStatus, "function");
+  assert.equal(typeof github.getMyLastReviewSha, "function");
+  assert.equal(typeof github.getPRHeadSha, "function");
+  assert.equal(typeof github.getPRStateHash, "function");
+  assert.equal(typeof github.getPRStatus, "function");
+  assert.equal(typeof github.getReviewLifecycleState, "function");
+  assert.equal(typeof github.getReviewRequestedPRs, "function");
+  assert.equal(typeof github.getSubmittedCommentIds, "function");
+  assert.equal(typeof github.hasPendingChecks, "function");
+  assert.equal(typeof github.isPRBehindBase, "function");
+  assert.equal(typeof github.isPRMergedOrClosed, "function");
+  assert.equal(typeof github.prNeedsAttention, "function");
+  assert.equal(typeof github.submitPRReview, "function");
+  assert.equal(typeof github.updatePRBranch, "function");
+  assert.equal(typeof github.__testUtils, "object");
+});
 
 test("parsePRUrl extracts owner/repo/number from canonical URLs", () => {
   assert.deepEqual(parsePRUrl("https://github.com/acme/widget/pull/123"), {
