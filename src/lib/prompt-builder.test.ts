@@ -280,8 +280,25 @@ test("buildReviewerPrompt keeps reviewer instructions separate from feedback pro
   assert.match(result, /Task: Add unit tests/);
   assert.match(result, /Plan: Cover the lib modules/);
   assert.match(result, /PR: https:\/\/github.com\/farshidz\/marqo-cortex-city\/pull\/456/);
-  assert.match(result, /Submit one GitHub PR review/);
   assert.match(result, /Check accessibility-sensitive UI changes\./);
+  assert.ok(
+    result.indexOf("Additional reviewer instructions:") <
+      result.indexOf("GitHub reviewer protocol:")
+  );
+  assert.match(
+    result,
+    /Submit exactly one GitHub PR review using the comment action only/
+  );
+  assert.match(result, /Do not approve or request changes/);
+  assert.match(
+    result,
+    /Start every GitHub comment you create with `🤖\[Cortex City Reviewer\]`/
+  );
+  assert.match(
+    result,
+    /first line and final line exactly `🤖\[Cortex City Reviewer\]`/
+  );
+  assert.doesNotMatch(result, /approve when the implementation is sound/);
 });
 
 test("shared review template requires the robot prefix in GitHub replies", () => {
