@@ -287,15 +287,7 @@ test("buildReviewerPrompt keeps reviewer instructions separate from feedback pro
   );
   assert.match(
     result,
-    /Only post GitHub feedback when you found something that should be changed or fixed/
-  );
-  assert.match(
-    result,
-    /If there are no requested changes or fixes, do not create a GitHub comment and do not submit a PR review/
-  );
-  assert.match(
-    result,
-    /When feedback is needed, submit at most one GitHub PR review using the comment action only/
+    /Submit exactly one GitHub PR review using the comment action only/
   );
   assert.match(result, /Do not approve or request changes/);
   assert.match(
