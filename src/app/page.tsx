@@ -16,6 +16,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useState } from "react";
 import type { Task, TaskStatus } from "@/lib/types";
+import { getTaskTableRows } from "@/lib/task-hierarchy";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -73,6 +74,7 @@ export default function TasksPage() {
     statusFilter === "all"
       ? sorted
       : sorted?.filter((t) => t.status === statusFilter);
+  const taskRows = filtered ? getTaskTableRows(filtered) : undefined;
 
   async function updateStatus(id: string, status: TaskStatus) {
     await fetch(`/api/tasks/${id}`, {
@@ -146,18 +148,26 @@ export default function TasksPage() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {filtered?.map((task) => (
+          {taskRows?.map(({ task, depth }) => (
             <TableRow key={task.id} className={getRowClass(task)}>
               <TableCell className="font-mono text-xs">
                 {task.id.slice(0, 8)}
               </TableCell>
               <TableCell>
-                <Link
-                  href={`/tasks/${task.id}`}
-                  className="hover:underline font-medium"
+                <div
+                  style={
+                    depth > 0
+                      ? { paddingLeft: `${Math.min(depth, 3) * 1.25}rem` }
+                      : undefined
+                  }
                 >
-                  {task.title}
-                </Link>
+                  <Link
+                    href={`/tasks/${task.id}`}
+                    className="hover:underline font-medium"
+                  >
+                    {task.title}
+                  </Link>
+                </div>
               </TableCell>
               <TableCell>
                 <Badge variant="outline">{task.agent || "—"}</Badge>
@@ -227,7 +237,7 @@ export default function TasksPage() {
               </TableCell>
             </TableRow>
           ))}
-          {(!filtered || filtered.length === 0) && (
+          {(!taskRows || taskRows.length === 0) && (
             <TableRow>
               <TableCell
                 colSpan={8}
