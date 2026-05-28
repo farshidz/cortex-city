@@ -13,6 +13,7 @@ import {
   buildInterruptedTaskUpdates,
   getTaskRunMode,
   isReviewerAgentEnabled,
+  shouldDeferBuilderRunForReviewer,
   shouldResumeTask,
 } from "./orchestrator-runtime";
 import {
@@ -314,7 +315,12 @@ export async function pollOnce(
 
   deps.logger.log("[worker] Poll phase: resume interrupted tasks");
   const resumableTasks = tasks
-    .filter((task) => !activePids.has(task.id) && shouldResumeTask(task))
+    .filter(
+      (task) =>
+        !activePids.has(task.id) &&
+        shouldResumeTask(task) &&
+        !shouldDeferBuilderRunForReviewer(task)
+    )
     .sort(
       (a, b) => new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime()
     );
@@ -441,20 +447,22 @@ export async function pollOnce(
     if (task.current_run_pid || activePids.has(task.id)) continue;
 
     deps.logger.log(`[worker] Picking up task "${task.title}" (${task.id}) [reviewer]`);
-    const didLaunch = await launchTaskRun(task, activePids, deps, {
-      mode: "reviewer",
-      preSpawnUpdates: {
-        reviewer_run_pending: false,
-      },
-      postSpawnUpdates: {
-        pending_manual_instruction: undefined,
-      },
-      rollbackOnError: {
-        reviewer_run_pending: true,
-        current_run_pid: undefined,
-        current_run_mode: undefined,
-      },
-    });
+    const didLaunch = await launchTaskRun(
+      { ...task, pending_manual_instruction: undefined },
+      activePids,
+      deps,
+      {
+        mode: "reviewer",
+        preSpawnUpdates: {
+          reviewer_run_pending: false,
+        },
+        rollbackOnError: {
+          reviewer_run_pending: true,
+          current_run_pid: undefined,
+          current_run_mode: undefined,
+        },
+      }
+    );
     if (didLaunch) availableSlots--;
   }
 
@@ -473,6 +481,7 @@ export async function pollOnce(
     const hasManualInstruction = Boolean(task.pending_manual_instruction);
     const hasConflicts = task.pr_status === "conflicts" || candidate.hasConflicts;
     if (task.current_run_pid || activePids.has(task.id)) continue;
+    if (shouldDeferBuilderRunForReviewer(task)) continue;
     if (!candidate.ghState && !hasManualInstruction) continue;
     if (
       !hasManualInstruction &&

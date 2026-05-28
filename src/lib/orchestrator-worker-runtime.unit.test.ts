@@ -305,12 +305,14 @@ test("pollOnce launches a pending reviewer run before feedback handling", async 
       id: "task-1",
       status: "in_review",
       pr_url: "https://github.com/acme/widget/pull/1",
+      pending_manual_instruction: "apply this after review",
       reviewer_run_pending: true,
       agent_runner: "codex",
       permission_mode: "bypassPermissions",
     }),
   ];
   const launchedModes: string[] = [];
+  const spawnedManualInstructions: Array<string | undefined> = [];
   let hashCalls = 0;
   const deps: WorkerRuntimeDeps = {
     deleteReviewSummary: async () => {},
@@ -336,7 +338,8 @@ test("pollOnce launches a pending reviewer run before feedback handling", async 
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
     removeWorktree: async () => {},
-    spawnAgentSession: async (_task, mode) => {
+    spawnAgentSession: async (task, mode) => {
+      spawnedManualInstructions.push(task.pending_manual_instruction);
       launchedModes.push(mode);
       return { pid: 202, child: {} as never };
     },
@@ -357,8 +360,10 @@ test("pollOnce launches a pending reviewer run before feedback handling", async 
   await pollOnce(new Map(), deps, new Map());
 
   assert.deepEqual(launchedModes, ["reviewer"]);
+  assert.deepEqual(spawnedManualInstructions, [undefined]);
   assert.equal(hashCalls, 0);
   assert.equal(tasks[0].reviewer_run_pending, false);
+  assert.equal(tasks[0].pending_manual_instruction, "apply this after review");
   assert.equal(tasks[0].current_run_mode, "reviewer");
 });
 

@@ -6,6 +6,7 @@ import {
   buildInterruptedTaskUpdates,
   getTaskRunMode,
   isReviewerAgentEnabled,
+  shouldDeferBuilderRunForReviewer,
   shouldResumeTask,
   shouldUseContinuePrompt,
 } from "./orchestrator-runtime";
@@ -117,6 +118,40 @@ test("isReviewerAgentEnabled defaults to enabled unless explicitly disabled", ()
   );
   assert.equal(
     isReviewerAgentEnabled(sampleTask({ reviewer_agent_enabled: false })),
+    false
+  );
+});
+
+test("shouldDeferBuilderRunForReviewer prioritizes queued reviewer runs", () => {
+  assert.equal(
+    shouldDeferBuilderRunForReviewer(
+      sampleTask({
+        status: "in_review",
+        reviewer_run_pending: true,
+      })
+    ),
+    true
+  );
+
+  assert.equal(
+    shouldDeferBuilderRunForReviewer(
+      sampleTask({
+        status: "in_review",
+        reviewer_agent_enabled: false,
+        reviewer_run_pending: true,
+      })
+    ),
+    false
+  );
+
+  assert.equal(
+    shouldDeferBuilderRunForReviewer(
+      sampleTask({
+        status: "in_review",
+        reviewer_run_pending: true,
+        resume_run_mode: "reviewer",
+      })
+    ),
     false
   );
 });

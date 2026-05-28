@@ -36,6 +36,20 @@ export function isReviewerAgentEnabled(
   return task.reviewer_agent_enabled !== false;
 }
 
+export function shouldDeferBuilderRunForReviewer(
+  task: Pick<
+    Task,
+    "reviewer_agent_enabled" | "reviewer_run_pending" | "resume_run_mode" | "status"
+  >
+): boolean {
+  return (
+    task.status === "in_review" &&
+    isReviewerAgentEnabled(task) &&
+    Boolean(task.reviewer_run_pending) &&
+    task.resume_run_mode !== "reviewer"
+  );
+}
+
 export function getTaskRunMode(task: Task): ResumableTaskRunMode {
   if (task.resume_run_mode) return task.resume_run_mode;
   return task.status === "in_review" ? "review" : "initial";
