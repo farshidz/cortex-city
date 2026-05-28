@@ -32,7 +32,11 @@ import type {
   TaskRunMode,
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
-import { buildInterruptedTaskUpdates, shouldUseContinuePrompt } from "./orchestrator-runtime";
+import {
+  buildInterruptedTaskUpdates,
+  isReviewerAgentEnabled,
+  shouldUseContinuePrompt,
+} from "./orchestrator-runtime";
 import { resolveTaskRunTimeoutMs } from "./run-timeout";
 
 const FORCE_KILL_GRACE_MS = 5_000;
@@ -1142,6 +1146,7 @@ async function createFollowupTasks(
       agent: agentId,
       agent_runner: inheritedRunner,
       permission_mode: inheritedPermission,
+      reviewer_agent_enabled: true,
       model: inheritedModel,
       effort: inheritedEffort,
       parent_task_id: parentTask.id,
@@ -1317,8 +1322,12 @@ async function handleRunComplete(
         }
       } else if (runReason !== "cleanup") {
         const lastReviewedHead = currentTask?.reviewer_last_reviewed_head_sha;
-        if (!prHeadSha || prHeadSha !== lastReviewedHead) {
-          updates.reviewer_run_pending = true;
+        if (isReviewerAgentEnabled(currentTask || {})) {
+          if (!prHeadSha || prHeadSha !== lastReviewedHead) {
+            updates.reviewer_run_pending = true;
+          }
+        } else {
+          updates.reviewer_run_pending = false;
         }
       }
     }

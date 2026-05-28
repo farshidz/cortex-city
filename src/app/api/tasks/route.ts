@@ -49,6 +49,7 @@ export async function POST(request: NextRequest) {
     status: "open",
     agent: body.agent,
     agent_runner: runtime,
+    reviewer_agent_enabled: body.reviewer_agent_enabled !== false,
     permission_mode: normalizePermissionMode(
       runtime,
       body.permission_mode,

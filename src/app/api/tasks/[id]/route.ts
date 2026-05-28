@@ -74,6 +74,9 @@ export async function PUT(
         config
       );
     }
+    if ("reviewer_agent_enabled" in body) {
+      body.reviewer_agent_enabled = body.reviewer_agent_enabled !== false;
+    }
 
     // If transitioning to a final status, clean up the worktree
     if (body.status === "merged" || body.status === "closed") {

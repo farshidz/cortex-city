@@ -57,6 +57,7 @@ export interface Task {
   agent: string; // key from config.agents
   agent_runner?: AgentRuntime;
   permission_mode?: PermissionMode;
+  reviewer_agent_enabled?: boolean;
   model?: string;
   effort?: TaskEffort;
   parent_task_id?: string;

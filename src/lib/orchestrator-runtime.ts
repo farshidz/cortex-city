@@ -30,6 +30,12 @@ export function shouldResumeTask(task: Task): boolean {
   );
 }
 
+export function isReviewerAgentEnabled(
+  task: Pick<Task, "reviewer_agent_enabled">
+): boolean {
+  return task.reviewer_agent_enabled !== false;
+}
+
 export function getTaskRunMode(task: Task): ResumableTaskRunMode {
   if (task.resume_run_mode) return task.resume_run_mode;
   return task.status === "in_review" ? "review" : "initial";

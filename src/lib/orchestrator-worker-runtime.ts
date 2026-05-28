@@ -12,6 +12,7 @@ import {
 import {
   buildInterruptedTaskUpdates,
   getTaskRunMode,
+  isReviewerAgentEnabled,
   shouldResumeTask,
 } from "./orchestrator-runtime";
 import {
@@ -402,7 +403,7 @@ export async function pollOnce(
         }
 
         if (activePids.has(task.id)) return;
-        if (task.reviewer_run_pending) {
+        if (task.reviewer_run_pending && isReviewerAgentEnabled(task)) {
           tasksToRunReviewer.push(task);
           return;
         }
@@ -432,7 +433,8 @@ export async function pollOnce(
       task.status !== "in_review" ||
       typeof task.pr_url !== "string" ||
       task.pr_url !== candidate.pr_url ||
-      !task.reviewer_run_pending
+      !task.reviewer_run_pending ||
+      !isReviewerAgentEnabled(task)
     ) {
       continue;
     }

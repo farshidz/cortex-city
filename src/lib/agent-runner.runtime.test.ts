@@ -553,6 +553,82 @@ test("builder runs skip reviewer scheduling when the current PR head was reviewe
   assert.equal(result.tasks[0].reviewer_last_reviewed_head_sha, "reviewed-sha");
 });
 
+test("builder runs do not schedule reviewer when reviewer agent is disabled", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-disabled-reviewer-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#26": {
+        state: "open",
+        merged: false,
+        headRefOid: "fresh-sha",
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        checks: [{ name: "test", state: "SUCCESS" }],
+      },
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_review",
+        pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/26",
+        reviewer_agent_enabled: false,
+        reviewer_run_pending: true,
+      }))};
+      await createTask(task);
+      await __testUtils.handleRunComplete(
+        "task-1",
+        0,
+        ${JSON.stringify(
+          JSON.stringify({
+            type: "result",
+            subtype: "print",
+            is_error: false,
+            duration_ms: 10,
+            result: "done",
+            session_id: "claude-session",
+            terminal_reason: "completed",
+            total_cost_usd: 0,
+            num_turns: 1,
+            structured_output: {
+              status: "completed",
+              summary: "Handled feedback without reviewer",
+              pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/26",
+              branch_name: "agent/reviewer-disabled",
+              files_changed: [],
+              assumptions: [],
+              blockers: [],
+              next_steps: [],
+            },
+            usage: {
+              input_tokens: 1,
+              output_tokens: 1,
+              cache_read_input_tokens: 0,
+            },
+          })
+        )},
+        "",
+        10,
+        [],
+        "claude",
+        "review"
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.tasks[0].reviewer_agent_enabled, false);
+  assert.equal(result.tasks[0].reviewer_run_pending, false);
+});
+
 test("reviewer runs use reviewer session state and leave feedback hash untouched", () => {
   const { workspace } = setupWorkspace();
   const ghStateFile = path.join(workspace, "gh-reviewer-state.json");

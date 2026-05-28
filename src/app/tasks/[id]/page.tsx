@@ -25,6 +25,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import type {
   Task,
   TaskStatus,
@@ -108,6 +109,7 @@ export default function TaskDetailPage({
       plan: task!.plan || "",
       agent: task!.agent,
       agent_runner: runtime,
+      reviewer_agent_enabled: task!.reviewer_agent_enabled !== false,
       permission_mode: normalizePermissionMode(
         runtime,
         task!.permission_mode,
@@ -330,6 +332,18 @@ export default function TaskDetailPage({
                 </SelectContent>
               </Select>
             </div>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={form.reviewer_agent_enabled !== false}
+                onCheckedChange={(checked) =>
+                  setForm({
+                    ...form,
+                    reviewer_agent_enabled: checked,
+                  })
+                }
+              />
+              <Label>Reviewer agent</Label>
+            </div>
             <div className="space-y-2">
               <Label>Model</Label>
               <Input
@@ -489,6 +503,12 @@ export default function TaskDetailPage({
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Effort:
                   <Badge variant="outline">{formatEffortLabel(resolvedEffort)}</Badge>
+                </span>
+                <span className="text-sm text-muted-foreground flex items-center gap-2">
+                  Reviewer:
+                  <Badge variant="outline">
+                    {task.reviewer_agent_enabled === false ? "Off" : "On"}
+                  </Badge>
                 </span>
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Session ID:

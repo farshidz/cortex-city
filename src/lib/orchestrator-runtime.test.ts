@@ -5,6 +5,7 @@ import type { Task } from "./types";
 import {
   buildInterruptedTaskUpdates,
   getTaskRunMode,
+  isReviewerAgentEnabled,
   shouldResumeTask,
   shouldUseContinuePrompt,
 } from "./orchestrator-runtime";
@@ -105,6 +106,18 @@ test("shouldResumeTask accepts interrupted review runs and manual instructions",
       })
     ),
     true
+  );
+});
+
+test("isReviewerAgentEnabled defaults to enabled unless explicitly disabled", () => {
+  assert.equal(isReviewerAgentEnabled(sampleTask()), true);
+  assert.equal(
+    isReviewerAgentEnabled(sampleTask({ reviewer_agent_enabled: true })),
+    true
+  );
+  assert.equal(
+    isReviewerAgentEnabled(sampleTask({ reviewer_agent_enabled: false })),
+    false
   );
 });
 

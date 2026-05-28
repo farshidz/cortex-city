@@ -426,6 +426,7 @@ test("tasks route filters and creates tasks with normalized defaults", () => {
       assert.equal(createdTask.body.status, "open");
       assert.equal(createdTask.body.agent_runner, "claude");
       assert.equal(createdTask.body.permission_mode, "acceptEdits");
+      assert.equal(createdTask.body.reviewer_agent_enabled, true);
       assert.equal(createdTask.body.model, "claude-sonnet-4-6");
     `)
   );
@@ -471,6 +472,7 @@ test("task detail route updates task metadata with normalized permissions", () =
             body: JSON.stringify({
               agent_runner: "claude",
               permission_mode: "yolo",
+              reviewer_agent_enabled: false,
               status: "closed",
             }),
           }),
@@ -479,6 +481,7 @@ test("task detail route updates task metadata with normalized permissions", () =
       );
       assert.equal(updatedTask.body.status, "closed");
       assert.equal(updatedTask.body.permission_mode, "acceptEdits");
+      assert.equal(updatedTask.body.reviewer_agent_enabled, false);
       assert.equal(
         (await json(await taskRoute.PUT(
           request("http://localhost/api/tasks/missing", {
