@@ -1201,6 +1201,98 @@ test("ensureWorktree creates a missing branch from origin/main", () => {
   assert.equal(result.tasks[0].worktree_path, result.worktreePath);
 });
 
+test("ensureWorktree creates a fallback branch for auto-derived local branch collisions", () => {
+  const workspace = createTempWorkspace("agent-runner-local-collision-");
+  const { repoPath } = initGitTestRepo(workspace);
+  execFileSync("git", ["-C", repoPath, "branch", "agent/existing-branch", "main"]);
+  const setup = setupWorkspace({ repoPath });
+
+  const result = runAgentRunnerScript(
+    setup.workspace,
+    `
+      const { execFileSync } = require("node:child_process");
+      const task = ${JSON.stringify(sampleTask({
+        title: "Existing branch",
+      }))};
+      await createTask(task);
+      const worktreePath = await __testUtils.ensureWorktree(task, ${JSON.stringify(repoPath)}, "main");
+      const branch = execFileSync("git", ["-C", worktreePath, "branch", "--show-current"], {
+        encoding: "utf-8",
+      }).trim();
+      console.log(JSON.stringify({ branch, tasks: readTasks(), worktreePath }));
+    `
+  );
+
+  assert.equal(result.branch, "agent/existing-branch-2");
+  assert.equal(result.tasks[0].branch_name, "agent/existing-branch-2");
+  assert.match(result.worktreePath, /existing-branch-2$/);
+});
+
+test("ensureWorktree creates a fallback branch for auto-derived remote branch collisions", () => {
+  const workspace = createTempWorkspace("agent-runner-remote-collision-");
+  const { repoPath } = initGitTestRepo(workspace);
+  execFileSync("git", ["-C", repoPath, "checkout", "-b", "agent/remote-conflict", "main"]);
+  execFileSync("git", ["-C", repoPath, "push", "origin", "agent/remote-conflict"]);
+  execFileSync("git", ["-C", repoPath, "checkout", "main"]);
+  execFileSync("git", ["-C", repoPath, "branch", "-D", "agent/remote-conflict"]);
+  execFileSync("git", [
+    "-C",
+    repoPath,
+    "update-ref",
+    "-d",
+    "refs/remotes/origin/agent/remote-conflict",
+  ]);
+  const setup = setupWorkspace({ repoPath });
+
+  const result = runAgentRunnerScript(
+    setup.workspace,
+    `
+      const { execFileSync } = require("node:child_process");
+      const task = ${JSON.stringify(sampleTask({
+        title: "Remote conflict",
+      }))};
+      await createTask(task);
+      const worktreePath = await __testUtils.ensureWorktree(task, ${JSON.stringify(repoPath)}, "main");
+      const branch = execFileSync("git", ["-C", worktreePath, "branch", "--show-current"], {
+        encoding: "utf-8",
+      }).trim();
+      console.log(JSON.stringify({ branch, tasks: readTasks() }));
+    `
+  );
+
+  assert.equal(result.branch, "agent/remote-conflict-2");
+  assert.equal(result.tasks[0].branch_name, "agent/remote-conflict-2");
+});
+
+test("ensureWorktree creates a fallback path for auto-derived worktree path collisions", () => {
+  const workspace = createTempWorkspace("agent-runner-path-collision-");
+  const { repoPath } = initGitTestRepo(workspace);
+  mkdirSync(path.join(repoPath, "..", ".worktrees", "repeated-title"), {
+    recursive: true,
+  });
+  const setup = setupWorkspace({ repoPath });
+
+  const result = runAgentRunnerScript(
+    setup.workspace,
+    `
+      const { execFileSync } = require("node:child_process");
+      const task = ${JSON.stringify(sampleTask({
+        title: "Repeated title",
+      }))};
+      await createTask(task);
+      const worktreePath = await __testUtils.ensureWorktree(task, ${JSON.stringify(repoPath)}, "main");
+      const branch = execFileSync("git", ["-C", worktreePath, "branch", "--show-current"], {
+        encoding: "utf-8",
+      }).trim();
+      console.log(JSON.stringify({ branch, tasks: readTasks(), worktreePath }));
+    `
+  );
+
+  assert.equal(result.branch, "agent/repeated-title-2");
+  assert.equal(result.tasks[0].branch_name, "agent/repeated-title-2");
+  assert.match(result.worktreePath, /repeated-title-2$/);
+});
+
 test("ensureWorktree configures the requested Git author identity locally", () => {
   const workspace = createTempWorkspace("agent-runner-git-identity-");
   const { repoPath } = initGitTestRepo(workspace);
