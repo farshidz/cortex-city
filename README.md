@@ -266,7 +266,13 @@ To deploy the current checkout to a remote Linux host over SSH, use:
 scripts/deploy-ssh.sh ubuntu@your-server /opt/cortex-city/app
 ```
 
-The script syncs the repo with `rsync`, runs `npm ci` and `npm run build` on the remote host, installs rendered `systemd` units, and restarts the web and worker services. By default it deploys as the `cortex` service user created by bootstrap; override `SYSTEMD_USER`, `SYSTEMD_GROUP`, `REMOTE_OWNER`, and `REMOTE_GROUP` if you want a different account.
+The script syncs the repo to a remote staging release under `.deploy/staging/`,
+runs `npm ci` and `npm run build` there while the current services keep
+running, then publishes the staged release, installs rendered `systemd` units,
+and restarts the web, worker, and host metrics services. By default it deploys
+as the `cortex` service user created by bootstrap; override `SYSTEMD_USER`,
+`SYSTEMD_GROUP`, `REMOTE_OWNER`, and `REMOTE_GROUP` if you want a different
+account. Override `REMOTE_STAGING_BASE` to place staged releases somewhere else.
 
 For first-time host setup, run:
 
