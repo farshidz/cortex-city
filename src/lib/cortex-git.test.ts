@@ -11,6 +11,11 @@ const TSX_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "tsx");
 const CORTEX_GIT_MODULE_URL = pathToFileURL(
   path.join(REPO_ROOT, "src/lib/cortex-git.ts")
 ).href;
+const EMPTY_WORKTREE_SCAN = {
+  orphanedWorktreeCount: 0,
+  orphanedWorktrees: [],
+  worktreeScanErrors: [],
+};
 
 function createTempWorkspace(): string {
   return mkdtempSync(path.join(os.tmpdir(), "cortex-git-test-"));
@@ -51,6 +56,7 @@ test("getCortexGitStatus reports disabled when .cortex is not a git repository",
   assert.deepEqual(status, {
     enabled: false,
     pushing: false,
+    ...EMPTY_WORKTREE_SCAN,
   });
 });
 
@@ -68,6 +74,7 @@ test("getCortexGitStatus reports enabled without pushing when the repo has no re
   assert.deepEqual(status, {
     enabled: true,
     pushing: false,
+    ...EMPTY_WORKTREE_SCAN,
   });
 });
 
@@ -93,6 +100,7 @@ test("getCortexGitStatus reports the configured remote when .cortex has one", ()
     remoteName: "origin",
     remoteUrl: "https://github.com/farshidz/marqo-cortex-city.git",
     remoteSlug: "farshidz/marqo-cortex-city",
+    ...EMPTY_WORKTREE_SCAN,
   });
 });
 

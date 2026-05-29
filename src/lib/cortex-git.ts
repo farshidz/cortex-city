@@ -1,6 +1,7 @@
 import { existsSync, statSync, unlinkSync } from "fs";
 import { spawn, execFileSync } from "child_process";
 import path from "path";
+import { scanOrphanWorktrees, type OrphanWorktree } from "./worktree-scanner";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const GIT_DIR = path.join(CORTEX_DIR, ".git");
@@ -13,6 +14,9 @@ export interface CortexGitStatus {
   remoteName?: string;
   remoteUrl?: string;
   remoteSlug?: string;
+  orphanedWorktreeCount: number;
+  orphanedWorktrees: OrphanWorktree[];
+  worktreeScanErrors: string[];
 }
 
 function extractRepoSlug(remoteUrl?: string): string | undefined {
@@ -25,8 +29,9 @@ function extractRepoSlug(remoteUrl?: string): string | undefined {
 }
 
 export function getCortexGitStatus(): CortexGitStatus {
+  const worktreeScan = getWorktreeScanStatus();
   if (!existsSync(GIT_DIR)) {
-    return { enabled: false, pushing: false };
+    return { enabled: false, pushing: false, ...worktreeScan };
   }
 
   try {
@@ -61,9 +66,32 @@ export function getCortexGitStatus(): CortexGitStatus {
       remoteName,
       remoteUrl,
       remoteSlug: extractRepoSlug(remoteUrl),
+      ...worktreeScan,
     };
   } catch {
-    return { enabled: true, pushing: false };
+    return { enabled: true, pushing: false, ...worktreeScan };
+  }
+}
+
+function getWorktreeScanStatus(): Pick<
+  CortexGitStatus,
+  "orphanedWorktreeCount" | "orphanedWorktrees" | "worktreeScanErrors"
+> {
+  try {
+    const scan = scanOrphanWorktrees();
+    return {
+      orphanedWorktreeCount: scan.orphanedWorktrees.length,
+      orphanedWorktrees: scan.orphanedWorktrees,
+      worktreeScanErrors: scan.errors,
+    };
+  } catch (error) {
+    return {
+      orphanedWorktreeCount: 0,
+      orphanedWorktrees: [],
+      worktreeScanErrors: [
+        error instanceof Error ? error.message : "Failed to scan worktrees",
+      ],
+    };
   }
 }
 

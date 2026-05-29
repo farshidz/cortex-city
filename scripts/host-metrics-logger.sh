@@ -6,10 +6,14 @@ usage() {
 Usage: scripts/host-metrics-logger.sh [log-file] [interval-seconds]
 
 Continuously write lightweight host and service diagnostics to disk.
+Default logs rotate daily and keep 7 days of host metrics files.
 
 Defaults:
-  log-file         /opt/cortex-city/app/logs/host-metrics-<timestamp>.log
+  log-file         /opt/cortex-city/app/logs/host-metrics-<YYYY-MM-DD>.log
   interval-seconds 5
+
+Environment:
+  HOST_METRICS_RETENTION_DAYS  Retention for host-metrics-*.log files. Default: 7
 EOF
 }
 
@@ -19,18 +23,25 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 DEFAULT_LOG_DIR="/opt/cortex-city/app/logs"
-TIMESTAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
-LOG_FILE="${1:-$DEFAULT_LOG_DIR/host-metrics-$TIMESTAMP.log}"
+LOG_FILE_ARG="${1:-}"
 INTERVAL="${2:-5}"
-LOG_DIR="$(dirname "$LOG_FILE")"
+LOG_DIR="$(dirname "${LOG_FILE_ARG:-$DEFAULT_LOG_DIR/host-metrics.log}")"
 LOCK_FILE="$LOG_DIR/host-metrics.lock"
 PID_FILE="$LOG_DIR/host-metrics.pid"
 CURRENT_LINK="$LOG_DIR/host-metrics-current.log"
+RETENTION_DAYS="${HOST_METRICS_RETENTION_DAYS:-7}"
+LOG_FILE=""
+LOG_DATE=""
 
 mkdir -p "$LOG_DIR"
 
 if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || [[ "$INTERVAL" -lt 1 ]]; then
   printf 'Interval must be a positive integer. Got: %s\n' "$INTERVAL" >&2
+  exit 1
+fi
+
+if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || [[ "$RETENTION_DAYS" -lt 1 ]]; then
+  printf 'HOST_METRICS_RETENTION_DAYS must be a positive integer. Got: %s\n' "$RETENTION_DAYS" >&2
   exit 1
 fi
 
@@ -40,7 +51,6 @@ if ! flock -n 9; then
   exit 1
 fi
 
-ln -sfn "$(basename "$LOG_FILE")" "$CURRENT_LINK"
 printf '%s\n' "$$" >"$PID_FILE"
 
 cleanup() {
@@ -48,10 +58,44 @@ cleanup() {
 }
 trap cleanup EXIT
 
-exec >>"$LOG_FILE" 2>&1
-
 section() {
   printf '\n=== %s ===\n' "$1"
+}
+
+prune_old_logs() {
+  local keep_mtime_days=$((RETENTION_DAYS - 1))
+  find "$LOG_DIR" \
+    -maxdepth 1 \
+    -type f \
+    -name 'host-metrics-*.log' \
+    -mtime +"$keep_mtime_days" \
+    ! -name "$(basename "$LOG_FILE")" \
+    -delete
+}
+
+rotate_log_file() {
+  if [[ -n "$LOG_FILE_ARG" ]]; then
+    if [[ "$LOG_FILE" != "$LOG_FILE_ARG" ]]; then
+      LOG_FILE="$LOG_FILE_ARG"
+      ln -sfn "$(basename "$LOG_FILE")" "$CURRENT_LINK"
+      exec >>"$LOG_FILE" 2>&1
+    fi
+    return
+  fi
+
+  local today
+  today="$(date -u +%Y-%m-%d)"
+  if [[ "$today" == "$LOG_DATE" ]]; then
+    return
+  fi
+
+  LOG_DATE="$today"
+  LOG_FILE="$DEFAULT_LOG_DIR/host-metrics-$today.log"
+  ln -sfn "$(basename "$LOG_FILE")" "$CURRENT_LINK"
+  exec >>"$LOG_FILE" 2>&1
+  section "host-metrics-logger rotated"
+  printf 'log_file=%s\n' "$LOG_FILE"
+  prune_old_logs
 }
 
 safe_run() {
@@ -124,10 +168,12 @@ sample() {
   safe_run "ss -s" ss -s
 }
 
+rotate_log_file
 section "host-metrics-logger start"
 printf 'pid=%s\n' "$$"
 printf 'hostname=%s\n' "$(hostname)"
 printf 'interval_seconds=%s\n' "$INTERVAL"
+printf 'retention_days=%s\n' "$RETENTION_DAYS"
 printf 'log_file=%s\n' "$LOG_FILE"
 printf 'current_link=%s\n' "$CURRENT_LINK"
 
@@ -135,5 +181,6 @@ sample
 
 while true; do
   sleep "$INTERVAL"
+  rotate_log_file
   sample
 done
