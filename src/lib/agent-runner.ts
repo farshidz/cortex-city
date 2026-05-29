@@ -781,7 +781,8 @@ async function ensureWorktree(
         worktreePath: path.join(worktreesBase, slug),
       }
     : await findAvailableDerivedWorktree(repoPath, worktreesBase, slug);
-  let { branchName, worktreePath } = derivedNames;
+  let { branchName } = derivedNames;
+  const { worktreePath } = derivedNames;
 
   try {
     if (existsSync(worktreePath)) {

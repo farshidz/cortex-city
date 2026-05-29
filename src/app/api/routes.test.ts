@@ -343,6 +343,9 @@ test("cortex git route reports disabled state outside cortex git repos", () => {
       assert.deepEqual((await json(await cortexGitRoute.GET())).body, {
         enabled: false,
         pushing: false,
+        orphanedWorktreeCount: 0,
+        orphanedWorktrees: [],
+        worktreeScanErrors: [],
       });
     `)
   );
