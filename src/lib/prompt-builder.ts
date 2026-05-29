@@ -137,8 +137,7 @@ export function buildReviewerPrompt(task: Task): string {
     "- Submit exactly one GitHub PR review using the comment action only. Use `gh pr review --comment` or a GitHub API review action of `COMMENT`.",
     "- Do not approve or request changes. Never use `--approve`, `--request-changes`, `APPROVE`, or `REQUEST_CHANGES`, even when findings are blocking.",
     "- If there are blocking findings, describe them in the comment review body and set your final JSON `status` to `needs_review`.",
-    `- Start every GitHub comment you create with \`${CORTEX_CITY_REVIEWER_SIGNATURE}\`. This includes top-level PR comments and inline review comments.`,
-    `- For the PR-level review body, make the first line and final line exactly \`${CORTEX_CITY_REVIEWER_SIGNATURE}\`.`
+    `- Start every GitHub comment or PR review body you create with \`${CORTEX_CITY_REVIEWER_SIGNATURE}\`. This includes top-level PR comments, inline review comments, and PR-level review bodies.`
   );
 
   sections.push("", "Then respond with the required JSON status.");
