@@ -1553,6 +1553,90 @@ test("issues routes return validation and not-found errors", () => {
   );
 });
 
+test("issues route accepts priority on create and sorts priority desc then updated_at", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const issuesRoute = await loadRoute("./src/app/api/issues/route.ts");
+      const issueDetailRoute = await loadRoute(
+        "./src/app/api/issues/[id]/route.ts"
+      );
+
+      const create = (title, priority) =>
+        issuesRoute.POST(
+          request("http://localhost/api/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title, description: "", priority }),
+          })
+        );
+
+      const none = (await json(await create("none"))).body;
+      const low = (await json(await create("low", "low"))).body;
+      const med = (await json(await create("med", "medium"))).body;
+      const high = (await json(await create("high", "high"))).body;
+      assert.equal(none.priority, undefined);
+      assert.equal(low.priority, "low");
+      assert.equal(med.priority, "medium");
+      assert.equal(high.priority, "high");
+
+      const list = (await json(
+        await issuesRoute.GET(request("http://localhost/api/issues"))
+      )).body;
+      assert.deepEqual(
+        list.items.map((i) => i.title),
+        ["high", "med", "low", "none"]
+      );
+
+      const bad = await json(
+        await issuesRoute.POST(
+          request("http://localhost/api/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: "x", priority: "urgent" }),
+          })
+        )
+      );
+      assert.equal(bad.status, 400);
+
+      const updated = (await json(
+        await issueDetailRoute.PUT(
+          request("http://localhost/api/issues/" + low.id, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ priority: "high" }),
+          }),
+          { params: Promise.resolve({ id: low.id }) }
+        )
+      )).body;
+      assert.equal(updated.priority, "high");
+
+      const cleared = (await json(
+        await issueDetailRoute.PUT(
+          request("http://localhost/api/issues/" + low.id, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ priority: null }),
+          }),
+          { params: Promise.resolve({ id: low.id }) }
+        )
+      )).body;
+      assert.equal(cleared.priority, undefined);
+
+      const badPut = await json(
+        await issueDetailRoute.PUT(
+          request("http://localhost/api/issues/" + low.id, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ priority: "urgent" }),
+          }),
+          { params: Promise.resolve({ id: low.id }) }
+        )
+      );
+      assert.equal(badPut.status, 400);
+    `)
+  );
+});
+
 test("tasks route rejects unknown issue_id and tasks DELETE unlinks issue", () => {
   runRouteAssertions(
     withCortexState(`

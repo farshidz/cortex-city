@@ -215,6 +215,76 @@ test("syncIssueFromTask is a no-op when issue is linked to a different task", ()
   assert.equal(result.task_id, "t1");
 });
 
+test("createIssue accepts and persists priority; invalid values normalize to undefined", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const high = await store.createIssue({ title: "H", description: "", priority: "high" });
+      const bogus = await store.createIssue({ title: "B", description: "", priority: "urgent" });
+      const none = await store.createIssue({ title: "N", description: "" });
+      console.log(JSON.stringify({ high, bogus, none }));
+    `
+  );
+  assert.equal(result.high.priority, "high");
+  assert.equal(result.bogus.priority, undefined);
+  assert.equal(result.none.priority, undefined);
+});
+
+test("updateIssue sets, changes, and clears priority", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const issue = await store.createIssue({ title: "T", description: "" });
+      const set = await store.updateIssue(issue.id, { priority: "medium" });
+      const raised = await store.updateIssue(issue.id, { priority: "high" });
+      const cleared = await store.updateIssue(issue.id, { priority: null });
+      console.log(JSON.stringify({ set, raised, cleared }));
+    `
+  );
+  assert.equal(result.set.priority, "medium");
+  assert.equal(result.raised.priority, "high");
+  assert.equal(result.cleared.priority, undefined);
+});
+
+test("compareIssues sorts by priority desc, then updated_at desc, undefined last", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const mkIssue = (priority, updated_at) => ({
+        id: priority + "-" + updated_at,
+        title: "",
+        description: "",
+        status: "open",
+        priority,
+        comments: [],
+        created_at: updated_at,
+        updated_at,
+      });
+      const list = [
+        mkIssue(undefined, "2026-05-04T00:00:00Z"),
+        mkIssue("low", "2026-05-01T00:00:00Z"),
+        mkIssue("high", "2026-05-02T00:00:00Z"),
+        mkIssue("medium", "2026-05-03T00:00:00Z"),
+        mkIssue("high", "2026-05-03T00:00:00Z"),
+        mkIssue(undefined, "2026-05-05T00:00:00Z"),
+      ];
+      list.sort(store.compareIssues);
+      console.log(JSON.stringify(list.map((i) => i.id)));
+    `
+  );
+  assert.deepEqual(result, [
+    "high-2026-05-03T00:00:00Z",
+    "high-2026-05-02T00:00:00Z",
+    "medium-2026-05-03T00:00:00Z",
+    "low-2026-05-01T00:00:00Z",
+    "undefined-2026-05-05T00:00:00Z",
+    "undefined-2026-05-04T00:00:00Z",
+  ]);
+});
+
 test("deleteIssue removes the issue from disk", () => {
   const workspace = createTempWorkspace();
   const result = runScript(
@@ -228,4 +298,171 @@ test("deleteIssue removes the issue from disk", () => {
   );
   assert.equal(result.length, 1);
   assert.equal(result[0].title, "B");
+});
+
+test("getIssue returns the issue when found and undefined otherwise", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const created = await store.createIssue({ title: "Find me", description: "" });
+      const hit = await store.getIssue(created.id);
+      const miss = await store.getIssue("nope");
+      console.log(JSON.stringify({ hit, miss: miss ?? null }));
+    `
+  );
+  assert.equal(result.hit.title, "Find me");
+  assert.equal(result.miss, null);
+});
+
+test("updateIssue throws when issue is missing and deleteIssue rejects missing ids", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      let updateError;
+      try {
+        await store.updateIssue("missing", { title: "x" });
+      } catch (e) {
+        updateError = e instanceof Error ? e.message : String(e);
+      }
+      let deleteError;
+      try {
+        await store.deleteIssue("missing");
+      } catch (e) {
+        deleteError = e instanceof Error ? e.message : String(e);
+      }
+      console.log(JSON.stringify({ updateError, deleteError }));
+    `
+  );
+  assert.match(result.updateError, /not found/);
+  assert.match(result.deleteError, /not found/);
+});
+
+test("addComment throws when issue is missing", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      let err;
+      try {
+        await store.addComment("missing", "hi");
+      } catch (e) {
+        err = e instanceof Error ? e.message : String(e);
+      }
+      console.log(JSON.stringify({ err }));
+    `
+  );
+  assert.match(result.err, /not found/);
+});
+
+test("linkTask throws when issue is missing and is a no-op when re-linking same task", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      let missingErr;
+      try {
+        await store.linkTask("missing", "t1");
+      } catch (e) {
+        missingErr = e instanceof Error ? e.message : String(e);
+      }
+      const issue = await store.createIssue({ title: "T", description: "" });
+      await store.linkTask(issue.id, "t1");
+      const again = await store.linkTask(issue.id, "t1");
+      console.log(JSON.stringify({ missingErr, again }));
+    `
+  );
+  assert.match(result.missingErr, /not found/);
+  assert.equal(result.again.task_id, "t1");
+  assert.equal(result.again.status, "in_progress");
+});
+
+test("unlinkTask returns undefined for missing issues and returns issue untouched when not linked", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const missing = await store.unlinkTask("missing", { keepTerminalStatus: false });
+      const issue = await store.createIssue({ title: "T", description: "" });
+      const unlinked = await store.unlinkTask(issue.id, { keepTerminalStatus: false });
+      console.log(JSON.stringify({ missing: missing ?? null, unlinked }));
+    `
+  );
+  assert.equal(result.missing, null);
+  assert.equal(result.unlinked.task_id, undefined);
+  assert.equal(result.unlinked.status, "open");
+});
+
+test("syncIssueFromTask is a no-op when task has no issue_id or issue is missing", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const baseTask = {
+        id: "t1",
+        title: "",
+        description: "",
+        agent: "a",
+        status: "merged",
+        created_at: "2026-05-01T00:00:00.000Z",
+        updated_at: "2026-05-01T00:00:00.000Z",
+      };
+      await store.syncIssueFromTask({ ...baseTask });
+      await store.syncIssueFromTask({ ...baseTask, issue_id: "missing" });
+      const issue = await store.createIssue({ title: "I", description: "" });
+      await store.linkTask(issue.id, "t1");
+      await store.syncIssueFromTask({ ...baseTask, id: "t1", issue_id: issue.id, status: "in_progress" });
+      const after = store.readIssues()[0];
+      console.log(JSON.stringify({ after }));
+    `
+  );
+  assert.equal(result.after.status, "in_progress");
+});
+
+test("mapTaskStatusToIssueStatus exposes the task-to-issue status mapping", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      console.log(JSON.stringify({
+        open: store.mapTaskStatusToIssueStatus("open"),
+        in_progress: store.mapTaskStatusToIssueStatus("in_progress"),
+        in_review: store.mapTaskStatusToIssueStatus("in_review"),
+        merged: store.mapTaskStatusToIssueStatus("merged"),
+        closed: store.mapTaskStatusToIssueStatus("closed"),
+      }));
+    `
+  );
+  assert.deepEqual(result, {
+    open: "in_progress",
+    in_progress: "in_progress",
+    in_review: "in_progress",
+    merged: "done",
+    closed: "closed",
+  });
+});
+
+test("readIssues returns [] for missing, non-array, and unparseable issues.json", () => {
+  const workspace = createTempWorkspace();
+  const result = runScript(
+    workspace,
+    `
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const dir = path.join(process.cwd(), ".cortex");
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, "issues.json");
+
+      const empty = store.readIssues();
+      fs.writeFileSync(file, "not json");
+      const broken = store.readIssues();
+      fs.writeFileSync(file, JSON.stringify({ not: "array" }));
+      const wrongShape = store.readIssues();
+      console.log(JSON.stringify({ empty, broken, wrongShape }));
+    `
+  );
+  assert.deepEqual(result.empty, []);
+  assert.deepEqual(result.broken, []);
+  assert.deepEqual(result.wrongShape, []);
 });

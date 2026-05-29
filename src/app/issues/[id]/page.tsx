@@ -23,11 +23,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { Issue, IssueStatus, LinkedTaskSummary } from "@/lib/types";
+import type {
+  Issue,
+  IssuePriority,
+  IssueStatus,
+  LinkedTaskSummary,
+} from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 const ALL_STATUSES: IssueStatus[] = ["open", "in_progress", "done", "closed"];
+const PRIORITY_NONE = "__none__";
+const PRIORITY_COLORS: Record<IssuePriority, string> = {
+  high: "bg-red-500",
+  medium: "bg-yellow-500",
+  low: "bg-green-500",
+};
 
 type IssueDetail = Issue & { linked_task?: LinkedTaskSummary };
 
@@ -81,6 +92,16 @@ export default function IssueDetailPage({
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
+    });
+    mutate();
+  }
+
+  async function updatePriority(value: string) {
+    const priority = value === PRIORITY_NONE ? null : (value as IssuePriority);
+    await fetch(`/api/issues/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ priority }),
     });
     mutate();
   }
@@ -203,6 +224,30 @@ export default function IssueDetailPage({
                           {s.replace("_", " ")}
                         </SelectItem>
                       ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground">Priority:</span>
+                  {issue.priority && (
+                    <span
+                      aria-label={`priority ${issue.priority}`}
+                      className={`inline-block h-3 w-1.5 rounded-sm ${PRIORITY_COLORS[issue.priority]}`}
+                    />
+                  )}
+                  <Select
+                    value={issue.priority ?? PRIORITY_NONE}
+                    onValueChange={(v) => v && updatePriority(v)}
+                  >
+                    <SelectTrigger className="w-32">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={PRIORITY_NONE}>None</SelectItem>
+                      <SelectItem value="low">Low</SelectItem>
+                      <SelectItem value="medium">Medium</SelectItem>
+                      <SelectItem value="high">High</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

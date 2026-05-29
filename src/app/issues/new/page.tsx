@@ -12,13 +12,23 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import type { Issue } from "@/lib/types";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import type { Issue, IssuePriority } from "@/lib/types";
+
+const PRIORITY_NONE = "__none__";
 
 export default function NewIssuePage() {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [plan, setPlan] = useState("");
+  const [priority, setPriority] = useState<IssuePriority | "">("");
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -32,6 +42,7 @@ export default function NewIssuePage() {
         title,
         description,
         plan: plan || undefined,
+        priority: priority || undefined,
       }),
     });
     if (!res.ok) {
@@ -70,6 +81,31 @@ export default function NewIssuePage() {
                 placeholder="Describe the issue..."
                 rows={4}
               />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="priority">
+                Priority{" "}
+                <span className="text-muted-foreground font-normal">
+                  (optional)
+                </span>
+              </Label>
+              <Select
+                value={priority === "" ? PRIORITY_NONE : priority}
+                onValueChange={(v) =>
+                  setPriority(v === PRIORITY_NONE ? "" : (v as IssuePriority))
+                }
+              >
+                <SelectTrigger id="priority" className="w-48">
+                  <SelectValue placeholder="None" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={PRIORITY_NONE}>None</SelectItem>
+                  <SelectItem value="low">Low</SelectItem>
+                  <SelectItem value="medium">Medium</SelectItem>
+                  <SelectItem value="high">High</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-2">
