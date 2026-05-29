@@ -5,9 +5,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/deploy-ssh.sh user@host [app-dir]
 
-Deploy the current checkout to a remote Linux host over SSH, run `npm ci`,
-build the app on the remote machine, install the systemd unit files, and
-restart the Cortex City web and worker services.
+Deploy the current checkout to a remote Linux host over SSH. The script stages
+and builds a release while the current services keep running, then syncs the
+built release into place and restarts the Cortex City services.
 
 Environment overrides:
   APP_DIR=/opt/cortex-city/app
@@ -22,6 +22,7 @@ Environment overrides:
   WORKER_SERVICE_NAME=cortex-city-worker.service
   HOST_METRICS_SERVICE_NAME=cortex-city-host-metrics.service
   REMOTE_SYSTEMD_DIR=/etc/systemd/system
+  REMOTE_STAGING_BASE=/opt/cortex-city/app/.deploy/staging
   SSH_PORT=22
   SSH_KEY_PATH=~/.ssh/your-key.pem
   SSH_STRICT_HOST_KEY_CHECKING=accept-new
@@ -85,7 +86,7 @@ WEB_SERVICE_NAME="${WEB_SERVICE_NAME:-cortex-city-web.service}"
 WORKER_SERVICE_NAME="${WORKER_SERVICE_NAME:-cortex-city-worker.service}"
 HOST_METRICS_SERVICE_NAME="${HOST_METRICS_SERVICE_NAME:-cortex-city-host-metrics.service}"
 REMOTE_SYSTEMD_DIR="${REMOTE_SYSTEMD_DIR:-/etc/systemd/system}"
-REMOTE_RENDER_DIR="$APP_DIR/.deploy/systemd"
+REMOTE_STAGING_BASE="${REMOTE_STAGING_BASE:-$APP_DIR/.deploy/staging}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-}"
 SSH_STRICT_HOST_KEY_CHECKING="${SSH_STRICT_HOST_KEY_CHECKING:-accept-new}"
@@ -121,6 +122,11 @@ require_local_command mktemp
 if [[ -z "$BUILD_COMMIT_SHA" ]]; then
   BUILD_COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 fi
+RELEASE_SUFFIX="$(date -u +%Y%m%dT%H%M%SZ)"
+RELEASE_SHA="$(printf '%s' "$BUILD_COMMIT_SHA" | tr -c '[:alnum:]._-' '-' | cut -c1-24)"
+RELEASE_ID="${RELEASE_SHA:-release}-$RELEASE_SUFFIX"
+REMOTE_STAGING_DIR="$REMOTE_STAGING_BASE/$RELEASE_ID"
+REMOTE_RENDER_DIR="$REMOTE_STAGING_DIR/.deploy/systemd"
 
 ssh_cmd=(ssh -p "$SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking="$SSH_STRICT_HOST_KEY_CHECKING")
 if [[ -n "$SSH_KEY_PATH" ]]; then
@@ -156,18 +162,19 @@ for cmd in bash rsync npm systemctl install; do
 done
 "
 
-log "Preparing remote directories and stopping services"
+log "Preparing remote staging directories"
 run_remote "
 set -euo pipefail
 $SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$APP_DIR")
+$SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$REMOTE_STAGING_BASE")
+$SUDO rm -rf $(quote "$REMOTE_STAGING_DIR")
+$SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$REMOTE_STAGING_DIR")
 $SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$REMOTE_RENDER_DIR")
 $SUDO install -d -m 755 $(quote "$CONFIG_DIR")
-$SUDO systemctl stop $(quote "$HOST_METRICS_SERVICE_NAME") || true
-$SUDO systemctl stop $(quote "$WORKER_SERVICE_NAME") || true
-$SUDO systemctl stop $(quote "$WEB_SERVICE_NAME") || true
+$SUDO find $(quote "$REMOTE_STAGING_BASE") -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} +
 "
 
-log "Syncing application files"
+log "Syncing application files to staging release $RELEASE_ID"
 rsync -az --delete \
   --exclude='.git/' \
   --exclude='.next/' \
@@ -180,7 +187,7 @@ rsync -az --delete \
   --exclude='.DS_Store' \
   --rsync-path="$SUDO rsync" \
   -e "$rsync_rsh" \
-  "$REPO_ROOT/" "$REMOTE:$APP_DIR/"
+  "$REPO_ROOT/" "$REMOTE:$REMOTE_STAGING_DIR/"
 
 log "Uploading rendered systemd units"
 rsync -az --delete \
@@ -188,14 +195,14 @@ rsync -az --delete \
   -e "$rsync_rsh" \
   "$tmpdir/systemd/" "$REMOTE:$REMOTE_RENDER_DIR/"
 
-log "Installing dependencies and rebuilding on remote host"
+log "Installing dependencies and rebuilding staged release"
 run_remote "
 set -euo pipefail
-$SUDO chown -R $(quote "$SYSTEMD_USER:$SYSTEMD_GROUP") $(quote "$APP_DIR")
-$SUDO -u $(quote "$SYSTEMD_USER") -H env CORTEX_COMMIT_SHA=$(quote "$BUILD_COMMIT_SHA") sh -lc 'cd $(printf '%q' "$APP_DIR") && npm ci && npm run build'
+$SUDO chown -R $(quote "$SYSTEMD_USER:$SYSTEMD_GROUP") $(quote "$REMOTE_STAGING_DIR")
+$SUDO -u $(quote "$SYSTEMD_USER") -H env CORTEX_COMMIT_SHA=$(quote "$BUILD_COMMIT_SHA") sh -lc 'cd $(printf '%q' "$REMOTE_STAGING_DIR") && npm ci && npm run build'
 "
 
-log "Installing systemd units and restarting services"
+log "Publishing staged release and restarting services"
 run_remote "
 set -euo pipefail
 $SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$WEB_SERVICE_NAME") $(quote "$REMOTE_SYSTEMD_DIR/$WEB_SERVICE_NAME")
@@ -204,8 +211,17 @@ $SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$HOST_METRICS_SERVICE_NAME")
 $SUDO touch $(quote "$WEB_ENV_FILE") $(quote "$WORKER_ENV_FILE")
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
+$SUDO rsync -a --delete-delay --delay-updates \
+  --exclude='.cortex/' \
+  --exclude='.deploy/' \
+  --exclude='.env' \
+  --exclude='.env.*' \
+  --exclude='logs/' \
+  $(quote "$REMOTE_STAGING_DIR/") $(quote "$APP_DIR/")
+$SUDO chown -R $(quote "$SYSTEMD_USER:$SYSTEMD_GROUP") $(quote "$APP_DIR")
 $SUDO systemctl restart $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
 $SUDO systemctl --no-pager --full --lines=0 status $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
+$SUDO rm -rf $(quote "$REMOTE_STAGING_DIR")
 "
 
 log "Deploy complete"
