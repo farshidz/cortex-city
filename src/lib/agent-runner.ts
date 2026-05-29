@@ -215,6 +215,53 @@ async function branchExists(repoPath: string, branchName: string): Promise<boole
   }
 }
 
+async function remoteTrackingBranchExists(
+  repoPath: string,
+  branchName: string
+): Promise<boolean> {
+  try {
+    await execGit(repoPath, [
+      "show-ref",
+      "--verify",
+      "--quiet",
+      `refs/remotes/origin/${branchName}`,
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function remoteBranchExists(
+  repoPath: string,
+  branchName: string
+): Promise<boolean> {
+  try {
+    const output = await execGit(repoPath, [
+      "ls-remote",
+      "--heads",
+      "origin",
+      branchName,
+    ]);
+    return output
+      .split(/\r?\n/)
+      .some((line) => line.endsWith(`\trefs/heads/${branchName}`));
+  } catch {
+    return false;
+  }
+}
+
+async function branchNameIsTaken(
+  repoPath: string,
+  branchName: string
+): Promise<boolean> {
+  return (
+    (await branchExists(repoPath, branchName)) ||
+    (await remoteTrackingBranchExists(repoPath, branchName)) ||
+    (await remoteBranchExists(repoPath, branchName))
+  );
+}
+
 function isBranchCheckedOutError(error: unknown): boolean {
   return /already checked out|is already used by worktree/i.test(
     getExecErrorMessage(error)
@@ -226,10 +273,33 @@ async function findAvailableBranchName(
   branchName: string
 ): Promise<string> {
   let suffix = 2;
-  while (await branchExists(repoPath, `${branchName}-${suffix}`)) {
+  while (await branchNameIsTaken(repoPath, `${branchName}-${suffix}`)) {
     suffix++;
   }
   return `${branchName}-${suffix}`;
+}
+
+async function findAvailableDerivedWorktree(
+  repoPath: string,
+  worktreesBase: string,
+  slug: string
+): Promise<{ branchName: string; worktreePath: string }> {
+  let suffix: number | undefined;
+
+  while (true) {
+    const candidateSlug = suffix ? `${slug}-${suffix}` : slug;
+    const branchName = `agent/${candidateSlug}`;
+    const worktreePath = path.join(worktreesBase, candidateSlug);
+
+    if (
+      !existsSync(worktreePath) &&
+      !(await branchNameIsTaken(repoPath, branchName))
+    ) {
+      return { branchName, worktreePath };
+    }
+
+    suffix = suffix ? suffix + 1 : 2;
+  }
 }
 
 interface GitIdentity {
@@ -702,10 +772,16 @@ async function ensureWorktree(
 
   // Build a short, readable slug from the task title (max 20 chars total)
   const slug = slugify(task.title, 20) || task.id.slice(0, 10);
-  const worktreePath = path.join(worktreesBase, slug);
 
-  // Branch name: agent/<slug> (max 20 chars for the slug part)
-  let branchName = task.branch_name || `agent/${slug}`;
+  // New tasks derive branch/worktree names from the title. Allocate a fresh
+  // pair up front so a repeated title cannot push to an older task's branch.
+  const derivedNames = task.branch_name
+    ? {
+        branchName: task.branch_name,
+        worktreePath: path.join(worktreesBase, slug),
+      }
+    : await findAvailableDerivedWorktree(repoPath, worktreesBase, slug);
+  let { branchName, worktreePath } = derivedNames;
 
   try {
     if (existsSync(worktreePath)) {
