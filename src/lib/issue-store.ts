@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import path from "path";
 import { nanoid } from "nanoid";
-import type { Issue, IssueComment, IssueStatus, Task } from "./types";
+import type { Issue, IssueComment, IssuePriority, IssueStatus, Task } from "./types";
 import { snapshotCortex } from "./cortex-git";
 import { ensureCortexDir } from "./store";
 
@@ -28,6 +28,15 @@ export function readIssues(): Issue[] {
   }
 }
 
+const VALID_PRIORITIES: IssuePriority[] = ["low", "medium", "high"];
+
+function normalizePriority(value: unknown): IssuePriority | undefined {
+  if (typeof value !== "string") return undefined;
+  return VALID_PRIORITIES.includes(value as IssuePriority)
+    ? (value as IssuePriority)
+    : undefined;
+}
+
 function normalizeIssue(issue: Partial<Issue>): Issue {
   return {
     id: issue.id ?? nanoid(10),
@@ -35,6 +44,7 @@ function normalizeIssue(issue: Partial<Issue>): Issue {
     description: issue.description ?? "",
     plan: issue.plan,
     status: (issue.status as IssueStatus) ?? "open",
+    priority: normalizePriority(issue.priority),
     task_id: issue.task_id,
     comments: Array.isArray(issue.comments) ? issue.comments : [],
     created_at: issue.created_at ?? new Date().toISOString(),
@@ -56,6 +66,7 @@ export interface CreateIssueInput {
   title: string;
   description: string;
   plan?: string;
+  priority?: IssuePriority;
 }
 
 export async function createIssue(input: CreateIssueInput): Promise<Issue> {
@@ -67,6 +78,7 @@ export async function createIssue(input: CreateIssueInput): Promise<Issue> {
       description: input.description,
       plan: input.plan || undefined,
       status: "open",
+      priority: normalizePriority(input.priority),
       comments: [],
       created_at: now,
       updated_at: now,
@@ -78,19 +90,34 @@ export async function createIssue(input: CreateIssueInput): Promise<Issue> {
   });
 }
 
+export interface UpdateIssueInput {
+  title?: string;
+  description?: string;
+  plan?: string;
+  status?: IssueStatus;
+  priority?: IssuePriority | null;
+}
+
 export async function updateIssue(
   id: string,
-  updates: Partial<Pick<Issue, "title" | "description" | "plan" | "status">>
+  updates: UpdateIssueInput
 ): Promise<Issue> {
   return withWriteLock(() => {
     const issues = readIssues();
     const index = issues.findIndex((i) => i.id === id);
     if (index === -1) throw new Error(`Issue ${id} not found`);
-    issues[index] = {
+    const { priority: priorityUpdate, ...rest } = updates;
+    const next: Issue = {
       ...issues[index],
-      ...updates,
+      ...rest,
       updated_at: new Date().toISOString(),
     };
+    if (priorityUpdate === null) {
+      next.priority = undefined;
+    } else if (priorityUpdate !== undefined) {
+      next.priority = normalizePriority(priorityUpdate);
+    }
+    issues[index] = next;
     writeIssuesLocked(issues);
     return issues[index];
   });
@@ -193,6 +220,19 @@ export async function syncIssueFromTask(task: Task): Promise<void> {
     };
     writeIssuesLocked(issues);
   });
+}
+
+const PRIORITY_RANK: Record<IssuePriority, number> = {
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+export function compareIssues(a: Issue, b: Issue): number {
+  const aRank = a.priority ? PRIORITY_RANK[a.priority] : 0;
+  const bRank = b.priority ? PRIORITY_RANK[b.priority] : 0;
+  if (aRank !== bRank) return bRank - aRank;
+  return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
 }
 
 export function mapTaskStatusToIssueStatus(status: Task["status"]): IssueStatus {
