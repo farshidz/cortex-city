@@ -136,7 +136,6 @@ export function buildReviewerPrompt(task: Task): string {
     "GitHub reviewer protocol:",
     "- Only comment on GitHub when you found something actionable for the implementation owner to change or fix.",
     "- If there is nothing to change or fix, do not create GitHub comments and do not submit a PR review. Return the required JSON status only.",
-    "- When you do find actionable issues, submit exactly one GitHub PR review using the comment action only. Use `gh pr review --comment` or a GitHub API review action of `COMMENT`.",
     "- Do not approve or request changes. Never use `--approve`, `--request-changes`, `APPROVE`, or `REQUEST_CHANGES`, even when findings are blocking.",
     "- If there are blocking findings, describe them in the comment review body and set your final JSON `status` to `needs_review`.",
     `- Start every GitHub comment you create with \`${CORTEX_CITY_REVIEWER_SIGNATURE}\`. This includes top-level PR comments and inline review comments.`,
