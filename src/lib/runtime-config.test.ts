@@ -47,7 +47,7 @@ function sampleTask(overrides: Partial<Task> = {}): Task {
 test("getPermissionOptions returns runtime-specific permission values", () => {
   assert.deepEqual(
     getPermissionOptions("claude").map((option) => option.value),
-    ["bypassPermissions", "acceptEdits", "default"]
+    ["bypassPermissions", "acceptEdits", "auto", "default"]
   );
   assert.deepEqual(
     getPermissionOptions("codex").map((option) => option.value),
@@ -81,7 +81,7 @@ test("getEffortOptions and normalizeEffort keep runtimes isolated", () => {
 
   assert.deepEqual(
     getEffortOptions("claude").map((option) => option.value),
-    ["low", "medium", "high", "max"]
+    ["low", "medium", "high", "xhigh", "max"]
   );
   assert.deepEqual(
     getEffortOptions("codex").map((option) => option.value),
@@ -89,7 +89,7 @@ test("getEffortOptions and normalizeEffort keep runtimes isolated", () => {
   );
   assert.equal(normalizeEffort("codex", "xhigh", config), "xhigh");
   assert.equal(normalizeEffort("codex", "max", config), "medium");
-  assert.equal(normalizeEffort("claude", "xhigh", config), "high");
+  assert.equal(normalizeEffort("claude", "xhigh", config), "xhigh");
   assert.equal(normalizeEffort("claude", undefined, sampleConfig({ default_claude_effort: undefined })), undefined);
 });
 

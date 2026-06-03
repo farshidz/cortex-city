@@ -23,6 +23,10 @@ const CLAUDE_PERMISSION_OPTIONS: SelectOption<PermissionMode>[] = [
     label: "Accept Edits (auto-approve edits, prompt for bash)",
   },
   {
+    value: "auto",
+    label: "Auto (Claude decides when to ask)",
+  },
+  {
     value: "default",
     label: "Default (prompt for everything)",
   },
@@ -43,6 +47,7 @@ const CLAUDE_EFFORT_OPTIONS: SelectOption<ClaudeEffort>[] = [
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra High" },
   { value: "max", label: "Max" },
 ];
 

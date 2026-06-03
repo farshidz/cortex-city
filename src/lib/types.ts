@@ -132,7 +132,7 @@ export type ResumableTaskRunMode = Exclude<TaskRunMode, "cleanup">;
 
 export type AgentRuntime = "claude" | "codex";
 
-export type ClaudeEffort = "low" | "medium" | "high" | "max";
+export type ClaudeEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type CodexEffort = "none" | "low" | "medium" | "high" | "xhigh";
 
@@ -141,6 +141,7 @@ export type TaskEffort = ClaudeEffort | CodexEffort;
 export type PermissionMode =
   | "bypassPermissions"
   | "acceptEdits"
+  | "auto"
   | "default"
   | "yolo";
 
