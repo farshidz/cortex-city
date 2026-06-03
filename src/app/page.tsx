@@ -2,9 +2,9 @@
 
 import useSWR from "swr";
 import Link from "next/link";
-import { Play } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -37,6 +37,7 @@ function getRowClass(task: Task): string {
   if (task.status === "merged" || task.status === "closed") {
     return "bg-muted/40 opacity-60";
   }
+  if (task.paused) return "bg-muted/40 opacity-60";
   if (task.pr_status === "clean") return "bg-green-500/10";
   if (task.pr_status === "checks_failing" || task.pr_status === "conflicts")
     return "bg-red-500/10";
@@ -85,14 +86,12 @@ export default function TasksPage() {
     mutate();
   }
 
-  async function triggerAgent(task: Task) {
-    if (!task.session_id) {
-      await fetch(`/api/tasks/${task.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ last_review_gh_state: null }),
-      });
-    }
+  async function setPaused(task: Task, paused: boolean) {
+    await fetch(`/api/tasks/${task.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused }),
+    });
     mutate();
   }
 
@@ -215,15 +214,18 @@ export default function TasksPage() {
                       </Button>
                     </a>
                   )}
-                  {task.status === "in_review" && !task.current_run_pid && (
-                    <Button
+                  {task.status !== "merged" && task.status !== "closed" && (
+                    <Switch
                       size="sm"
-                      variant="outline"
-                      onClick={() => triggerAgent(task)}
-                      title={task.session_id ? "Resume agent session" : "Trigger agent review"}
-                    >
-                      <Play className="size-3.5" />
-                    </Button>
+                      checked={!task.paused}
+                      onCheckedChange={(checked) => setPaused(task, !checked)}
+                      aria-label={task.paused ? "Resume task" : "Pause task"}
+                      title={
+                        task.paused
+                          ? "Task paused — worker skips it in polls"
+                          : "Task active — toggle off to pause"
+                      }
+                    />
                   )}
                   <Button
                     size="sm"

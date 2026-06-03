@@ -367,6 +367,125 @@ test("pollOnce launches a pending reviewer run before feedback handling", async 
   assert.equal(tasks[0].current_run_mode, "reviewer");
 });
 
+test("pollOnce skips paused open tasks", async () => {
+  const tasks: Task[] = [
+    sample({
+      id: "task-1",
+      status: "open",
+      paused: true,
+      agent_runner: "codex",
+      permission_mode: "bypassPermissions",
+    }),
+  ];
+  const launchedModes: string[] = [];
+  const deps: WorkerRuntimeDeps = {
+    deleteReviewSummary: async () => {},
+    deleteTask: async () => {},
+    getPRStateHash: async () => "",
+    getPRStatus: async () => "unknown",
+    getReviewRequestedPRs: async () => [],
+    getTask: async (id) => tasks.find((task) => task.id === id),
+    isPRMergedOrClosed: async () => null,
+    isPidRunning: () => true,
+    logger: { log: () => {}, error: () => {} },
+    readConfig: () => ({
+      max_parallel_sessions: 1,
+      poll_interval_seconds: 30,
+      default_permission_mode: "bypassPermissions",
+      default_agent_runner: "codex",
+      agents: {},
+    }),
+    readReviewSummaries: () => [],
+    readReviewSummaryMap: () => ({}),
+    readTasks: () => tasks,
+    removeWorktree: async () => {},
+    spawnAgentSession: async (_task, mode) => {
+      launchedModes.push(mode);
+      return { pid: 202, child: {} as never };
+    },
+    spawnReviewSummary: async () => ({
+      pid: 303,
+      child: {} as never,
+      done: Promise.resolve({} as never),
+    }),
+    updateTask: async (id, updates) => {
+      const index = tasks.findIndex((task) => task.id === id);
+      assert.notEqual(index, -1);
+      tasks[index] = { ...tasks[index], ...updates };
+      return tasks[index];
+    },
+    upsertReviewSummary: async (summary) => summary as never,
+  };
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(launchedModes, []);
+  assert.equal(tasks[0].status, "open");
+});
+
+test("pollOnce skips paused in_review tasks entirely", async () => {
+  const tasks: Task[] = [
+    sample({
+      id: "task-1",
+      status: "in_review",
+      paused: true,
+      pr_url: "https://github.com/acme/widget/pull/1",
+      reviewer_run_pending: true,
+      agent_runner: "codex",
+      permission_mode: "bypassPermissions",
+    }),
+  ];
+  const launchedModes: string[] = [];
+  let prStateChecks = 0;
+  const deps: WorkerRuntimeDeps = {
+    deleteReviewSummary: async () => {},
+    deleteTask: async () => {},
+    getPRStateHash: async () => "new-hash",
+    getPRStatus: async () => "clean",
+    getReviewRequestedPRs: async () => [],
+    getTask: async (id) => tasks.find((task) => task.id === id),
+    isPRMergedOrClosed: async () => {
+      prStateChecks++;
+      return null;
+    },
+    isPidRunning: () => true,
+    logger: { log: () => {}, error: () => {} },
+    readConfig: () => ({
+      max_parallel_sessions: 1,
+      poll_interval_seconds: 30,
+      default_permission_mode: "bypassPermissions",
+      default_agent_runner: "codex",
+      agents: {},
+    }),
+    readReviewSummaries: () => [],
+    readReviewSummaryMap: () => ({}),
+    readTasks: () => tasks,
+    removeWorktree: async () => {},
+    spawnAgentSession: async (_task, mode) => {
+      launchedModes.push(mode);
+      return { pid: 202, child: {} as never };
+    },
+    spawnReviewSummary: async () => ({
+      pid: 303,
+      child: {} as never,
+      done: Promise.resolve({} as never),
+    }),
+    updateTask: async (id, updates) => {
+      const index = tasks.findIndex((task) => task.id === id);
+      assert.notEqual(index, -1);
+      tasks[index] = { ...tasks[index], ...updates };
+      return tasks[index];
+    },
+    upsertReviewSummary: async (summary) => summary as never,
+  };
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(launchedModes, []);
+  assert.equal(prStateChecks, 0);
+  assert.equal(tasks[0].reviewer_run_pending, true);
+});
+
 test("pollOnce skips pending reviewer runs when reviewer agent is disabled", async () => {
   const tasks: Task[] = [
     sample({
