@@ -317,6 +317,7 @@ export async function pollOnce(
   const resumableTasks = tasks
     .filter(
       (task) =>
+        !task.paused &&
         !activePids.has(task.id) &&
         shouldResumeTask(task) &&
         !shouldDeferBuilderRunForReviewer(task)
@@ -354,6 +355,7 @@ export async function pollOnce(
   const openTasks = tasks
     .filter(
       (task) =>
+        !task.paused &&
         !activePids.has(task.id) &&
         task.status === "open" &&
         (!task.session_id || Boolean(task.pending_manual_instruction))
@@ -386,7 +388,7 @@ export async function pollOnce(
   deps.logger.log("[worker] Poll phase: scan in_review tasks");
   const inReviewTasks = tasks.filter(
     (task): task is Task & { pr_url: string } =>
-      task.status === "in_review" && typeof task.pr_url === "string"
+      !task.paused && task.status === "in_review" && typeof task.pr_url === "string"
   );
   const tasksToRunReviewer: Array<Task & { pr_url: string }> = [];
   const tasksToReview: ReviewRunCandidate[] = [];

@@ -69,6 +69,7 @@ export interface Task {
   updated_at: string;
 
   // Orchestration metadata
+  paused?: boolean; // when true, the worker skips this task during polls
   session_id?: string;
   reviewer_session_id?: string;
   pr_url?: string;
