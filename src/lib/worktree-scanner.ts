@@ -1,4 +1,12 @@
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "fs";
+import { execFileSync } from "child_process";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "fs";
 import path from "path";
 import type { Task } from "./types";
 
@@ -15,6 +23,10 @@ export interface WorktreeScanResult {
   linkedWorktreeCount: number;
   orphanedWorktrees: OrphanWorktree[];
   errors: string[];
+}
+
+export interface WorktreeCleanupResult extends WorktreeScanResult {
+  cleanedWorktrees: OrphanWorktree[];
 }
 
 function isDirectory(target: string): boolean {
@@ -36,6 +48,13 @@ function normalizeWorktreePath(worktreePath: string): string {
   } catch {
     return resolved;
   }
+}
+
+function isPathWithin(parentPath: string, childPath: string): boolean {
+  const parent = normalizeWorktreePath(parentPath);
+  const child = normalizeWorktreePath(childPath);
+  const relative = path.relative(parent, child);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 function getWorktreeRoot(worktreePath: string): string | undefined {
@@ -129,5 +148,77 @@ export function scanOrphanWorktrees(): WorktreeScanResult {
     linkedWorktreeCount: linkedWorktrees.size,
     orphanedWorktrees,
     errors,
+  };
+}
+
+function getManagedRepoPath(worktree: OrphanWorktree): string | undefined {
+  const repoPath = path.resolve(worktree.root, "..", "repo");
+  if (isDirectory(repoPath) && existsSync(path.join(repoPath, ".git"))) {
+    return repoPath;
+  }
+  return undefined;
+}
+
+function runGitWorktreeRemove(cwd: string, worktreePath: string): boolean {
+  try {
+    execFileSync("git", ["-C", cwd, "worktree", "remove", "--force", worktreePath], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pruneWorktreeMetadata(cwd: string | undefined): void {
+  if (!cwd) return;
+  try {
+    execFileSync("git", ["-C", cwd, "worktree", "prune"], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch {}
+}
+
+function removeOrphanWorktree(worktree: OrphanWorktree): void {
+  if (!isPathWithin(worktree.root, worktree.path)) {
+    throw new Error(`Refusing to remove worktree outside managed root: ${worktree.path}`);
+  }
+
+  const repoPath = getManagedRepoPath(worktree);
+  if (
+    (repoPath && runGitWorktreeRemove(repoPath, worktree.path)) ||
+    runGitWorktreeRemove(worktree.path, worktree.path)
+  ) {
+    pruneWorktreeMetadata(repoPath);
+    return;
+  }
+
+  rmSync(worktree.path, { recursive: true, force: true });
+  pruneWorktreeMetadata(repoPath);
+}
+
+export function cleanupOrphanWorktrees(): WorktreeCleanupResult {
+  const initialScan = scanOrphanWorktrees();
+  const errors = [...initialScan.errors];
+  const cleanedWorktrees: OrphanWorktree[] = [];
+
+  for (const worktree of initialScan.orphanedWorktrees) {
+    try {
+      removeOrphanWorktree(worktree);
+      cleanedWorktrees.push(worktree);
+    } catch (error) {
+      errors.push(
+        error instanceof Error
+          ? `Failed to remove orphaned worktree ${worktree.path}: ${error.message}`
+          : `Failed to remove orphaned worktree ${worktree.path}`
+      );
+    }
+  }
+
+  const finalScan = scanOrphanWorktrees();
+  return {
+    ...finalScan,
+    errors: [...errors, ...finalScan.errors],
+    cleanedWorktrees,
   };
 }

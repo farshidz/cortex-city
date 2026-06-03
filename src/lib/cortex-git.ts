@@ -1,7 +1,7 @@
 import { existsSync, statSync, unlinkSync } from "fs";
 import { spawn, execFileSync } from "child_process";
 import path from "path";
-import { scanOrphanWorktrees, type OrphanWorktree } from "./worktree-scanner";
+import { cleanupOrphanWorktrees, type OrphanWorktree } from "./worktree-scanner";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const GIT_DIR = path.join(CORTEX_DIR, ".git");
@@ -78,7 +78,7 @@ function getWorktreeScanStatus(): Pick<
   "orphanedWorktreeCount" | "orphanedWorktrees" | "worktreeScanErrors"
 > {
   try {
-    const scan = scanOrphanWorktrees();
+    const scan = cleanupOrphanWorktrees();
     return {
       orphanedWorktreeCount: scan.orphanedWorktrees.length,
       orphanedWorktrees: scan.orphanedWorktrees,
