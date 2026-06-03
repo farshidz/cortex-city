@@ -50,6 +50,7 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const PERMISSION_LABELS: Record<PermissionMode, string> = {
   bypassPermissions: "Bypass Permissions",
   acceptEdits: "Accept Edits",
+  auto: "Auto",
   default: "Prompt for everything",
   yolo: "YOLO",
 };

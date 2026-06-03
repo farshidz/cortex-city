@@ -49,6 +49,10 @@ test("buildPermissionArgs maps Claude permission modes verbatim", () => {
     "--permission-mode",
     "default",
   ]);
+  assert.deepEqual(buildPermissionArgs("claude", "auto"), [
+    "--permission-mode",
+    "auto",
+  ]);
 });
 
 test("buildPermissionArgs translates yolo to bypassPermissions for Claude", () => {
@@ -80,6 +84,16 @@ test("buildModelArgs prefers explicit task values over config defaults", () => {
     config
   );
   assert.deepEqual(args, ["--model", "claude-opus-4-7", "--effort", "max"]);
+});
+
+test("buildModelArgs supports the Claude xhigh effort", () => {
+  const config = sampleConfig();
+  const args = buildModelArgs(
+    "claude",
+    { model: "claude-opus-4-8", effort: "xhigh" },
+    config
+  );
+  assert.deepEqual(args, ["--model", "claude-opus-4-8", "--effort", "xhigh"]);
 });
 
 test("buildModelArgs falls back to runtime-specific config defaults", () => {
