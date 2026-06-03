@@ -21,6 +21,16 @@ function createTempWorkspace(): string {
   return mkdtempSync(path.join(os.tmpdir(), "cortex-git-test-"));
 }
 
+function writeJson(filePath: string, value: unknown) {
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function createWorktree(worktreePath: string) {
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(path.join(worktreePath, ".git"), "gitdir: ../repo/.git/worktrees/test\n");
+}
+
 function runCortexGitScript(workspace: string, body: string) {
   const output = execFileSync(
     TSX_BIN,
@@ -102,6 +112,26 @@ test("getCortexGitStatus reports the configured remote when .cortex has one", ()
     remoteSlug: "farshidz/marqo-cortex-city",
     ...EMPTY_WORKTREE_SCAN,
   });
+});
+
+test("getCortexGitStatus removes orphaned worktrees before reporting status", () => {
+  const workspace = createTempWorkspace();
+  const worktreesRoot = path.join(workspace, ".cortex/repos/acme-widget/.worktrees");
+  const orphanedWorktree = path.join(worktreesRoot, "orphaned-task");
+  createWorktree(orphanedWorktree);
+  writeJson(path.join(workspace, ".cortex/tasks.json"), []);
+
+  const status = runCortexGitScript(
+    workspace,
+    "console.log(JSON.stringify(cortexGit.getCortexGitStatus()));"
+  );
+
+  assert.deepEqual(status, {
+    enabled: false,
+    pushing: false,
+    ...EMPTY_WORKTREE_SCAN,
+  });
+  assert.equal(existsSync(orphanedWorktree), false);
 });
 
 test("recoverStaleCortexGitIndexLock removes an old git index lock", () => {

@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -112,4 +118,39 @@ test("scanOrphanWorktrees scans legacy roots discovered from task paths", () => 
   assert.deepEqual(result.orphanedWorktrees, [
     { path: realpathSync(orphanedWorktree), root: realpathSync(legacyRoot) },
   ]);
+});
+
+test("cleanupOrphanWorktrees removes unlinked managed worktrees", () => {
+  const workspace = createTempWorkspace();
+  const worktreesRoot = path.join(workspace, ".cortex/repos/acme-widget/.worktrees");
+  const linkedWorktree = path.join(worktreesRoot, "linked-task");
+  const orphanedWorktree = path.join(worktreesRoot, "orphaned-task");
+  createWorktree(linkedWorktree);
+  createWorktree(orphanedWorktree);
+  const normalizedOrphan = realpathSync(orphanedWorktree);
+  const normalizedRoot = realpathSync(worktreesRoot);
+  writeJson(path.join(workspace, ".cortex/tasks.json"), [
+    {
+      id: "task-1",
+      title: "Linked task",
+      description: "",
+      status: "in_review",
+      agent: "agent",
+      created_at: "2026-05-01T00:00:00.000Z",
+      updated_at: "2026-05-01T00:00:00.000Z",
+      worktree_path: linkedWorktree,
+    },
+  ]);
+
+  const result = runWorktreeScannerScript(
+    workspace,
+    "console.log(JSON.stringify(scanner.cleanupOrphanWorktrees()));"
+  );
+
+  assert.deepEqual(result.cleanedWorktrees, [
+    { path: normalizedOrphan, root: normalizedRoot },
+  ]);
+  assert.deepEqual(result.orphanedWorktrees, []);
+  assert.equal(existsSync(orphanedWorktree), false);
+  assert.equal(existsSync(linkedWorktree), true);
 });
