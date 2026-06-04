@@ -11,6 +11,7 @@ const {
   isNoChecksError,
   serializeCheckStates,
   isCommentFromSubmittedReview,
+  isHashSignificantReview,
 } = github.__testUtils;
 
 test("github exports are reachable via module namespace", () => {
@@ -85,4 +86,17 @@ test("isCommentFromSubmittedReview matches only review-attached, non-pending ids
     ),
     false
   );
+});
+
+test("isHashSignificantReview ignores only empty approvals", () => {
+  assert.equal(isHashSignificantReview({ state: "APPROVED", body: "" }), false);
+  assert.equal(isHashSignificantReview({ state: "APPROVED" }), false);
+  assert.equal(isHashSignificantReview({ state: "APPROVED", body: "  " }), false);
+  assert.equal(
+    isHashSignificantReview({ state: "APPROVED", body: "Looks good after fix" }),
+    true
+  );
+  assert.equal(isHashSignificantReview({ state: "COMMENTED", body: "" }), true);
+  assert.equal(isHashSignificantReview({ state: "CHANGES_REQUESTED", body: "" }), true);
+  assert.equal(isHashSignificantReview({ state: "PENDING", body: "draft" }), false);
 });

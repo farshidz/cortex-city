@@ -314,3 +314,54 @@ test("getPRStateHash ignores pending inline review comments", () => {
     .slice(0, 16);
   assert.equal(hash, expected);
 });
+
+test("getPRStateHash ignores empty approvals but keeps their inline comments", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const responses = {
+    [prViewKey(prUrl)]: {
+      stdout: JSON.stringify({
+        headRefOid: "abc123",
+        statusCheckRollup: [],
+      }),
+    },
+    [reviewsKey()]: {
+      stdout: JSON.stringify([
+        [
+          { id: 10, state: "APPROVED", body: "" },
+          { id: 11, state: "APPROVED", body: "LGTM after the fix" },
+          { id: 12, state: "COMMENTED", body: "" },
+          { id: 13, state: "PENDING", body: "draft" },
+        ],
+      ]),
+    },
+    [reviewCommentsKey()]: {
+      stdout: JSON.stringify([
+        [
+          { id: 100, pull_request_review_id: 10 },
+          { id: 101, pull_request_review_id: 13 },
+          { id: 102, pull_request_review_id: null },
+        ],
+      ]),
+    },
+    [issueCommentsKey()]: { stdout: JSON.stringify([[]]) },
+    [checksKey(prUrl)]: { stdout: "" },
+  };
+
+  const hash = runGithubScript(
+    workspace,
+    responses,
+    `
+      const hash = await getPRStateHash(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify(hash));
+    `
+  );
+
+  const expected = createHash("sha256")
+    .update(
+      'abc123|[100]|[]|[{"id":11,"state":"APPROVED"},{"id":12,"state":"COMMENTED"}]|'
+    )
+    .digest("hex")
+    .slice(0, 16);
+  assert.equal(hash, expected);
+});
