@@ -24,6 +24,12 @@ interface ReviewCommentItem {
   pull_request_review_id: number | null;
 }
 
+interface ReviewItem {
+  id: number;
+  state?: string;
+  body?: string | null;
+}
+
 function parsePRUrl(url: string): PRInfo | null {
   const match = url.match(
     /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/
@@ -121,6 +127,12 @@ function isCommentFromSubmittedReview(
     typeof comment.pull_request_review_id === "number" &&
     submittedReviewIds.has(comment.pull_request_review_id)
   );
+}
+
+function isHashSignificantReview(review: Pick<ReviewItem, "state" | "body">): boolean {
+  const state = (review.state || "").toUpperCase();
+  if (state === "PENDING") return false;
+  return state !== "APPROVED" || Boolean((review.body || "").trim());
 }
 
 export async function getCIStatus(prUrl: string): Promise<string> {
@@ -287,7 +299,7 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
     }>(
       `gh pr view ${prUrl} --json headRefOid,statusCheckRollup`
     ),
-    execPaginatedArrayStrict<{ id: number; state?: string }>(
+    execPaginatedArrayStrict<ReviewItem>(
       `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
     ),
     execPaginatedArrayStrict<ReviewCommentItem>(
@@ -341,7 +353,7 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
   );
   const reviewIds = JSON.stringify(
     reviews
-      .filter((review) => review.state !== "PENDING")
+      .filter(isHashSignificantReview)
       .map((review) => ({ id: review.id, state: review.state ?? "" }))
       .sort((a, b) => a.id - b.id)
   );
@@ -537,6 +549,7 @@ export const __testUtils = {
   isNoChecksError,
   serializeCheckStates,
   isCommentFromSubmittedReview,
+  isHashSignificantReview,
 };
 
 export async function submitPRReview(
