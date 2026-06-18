@@ -345,7 +345,7 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
   assert.equal(updatedTask.total_output_tokens, 2);
 });
 
-test("spawnAgentSession uses the review prompt and creates follow-up tasks from tool calls", () => {
+test("spawnAgentSession uses the review prompt but does not create follow-up tasks", () => {
   const workspace = setupWorkspace();
   const argsFile = path.join(workspace, "review-args.json");
   const worktreePath = path.join(workspace, "worktree");
@@ -432,27 +432,88 @@ test("spawnAgentSession uses the review prompt and creates follow-up tasks from 
     /^REVIEW https:\/\/github.com\/farshidz\/cortex-city\/pull\/9 \| main \| Waiting on approvals, but code can merge cleanly\. \| Cortex City SWE$/
   );
 
-  assert.equal(result.tasks.length, 2);
-  const [parentTask, followupTask] = result.tasks;
+  // The review run records what the agent asked for but must NOT act on it:
+  // re-emitting the same create_task on every PR wake is what piled up
+  // duplicate subtasks.
+  assert.equal(result.tasks.length, 1);
+  const [parentTask] = result.tasks;
   assert.equal(parentTask.status, "in_review");
   assert.equal(parentTask.pr_url, "https://github.com/farshidz/cortex-city/pull/9");
   assert.equal(parentTask.branch_name, "agent/review-pass");
   assert.equal(parentTask.session_id, "thread-review");
   assert.equal(parentTask.last_agent_report.summary, "Opened the PR and delegated docs follow-up");
+  // The request is still captured on the report; it just isn't turned into tasks.
   assert.equal(parentTask.last_agent_report.tool_calls.create_task.length, 2);
   assert.equal(parentTask.run_count, 1);
   assert.equal(parentTask.total_input_tokens, 11);
   assert.equal(parentTask.total_cached_input_tokens, 1);
   assert.equal(parentTask.total_output_tokens, 5);
+  assert.equal(
+    result.tasks.some((task: Task) => task.parent_task_id === "task-1"),
+    false
+  );
+});
 
-  assert.equal(followupTask.title, "Document the follow-up");
-  assert.equal(followupTask.description, "Add release notes for the worker change");
-  assert.equal(followupTask.plan, "Update the changelog");
-  assert.equal(followupTask.parent_task_id, "task-1");
-  assert.equal(followupTask.agent_runner, "codex");
-  assert.equal(followupTask.permission_mode, "bypassPermissions");
-  assert.equal(followupTask.model, "gpt-5.5-codex");
-  assert.equal(followupTask.effort, "medium");
+test("spawnAgentSession still creates follow-up tasks on an initial run", () => {
+  const workspace = setupWorkspace();
+  const worktreePath = path.join(workspace, "worktree");
+  const report = {
+    status: "completed",
+    summary: "Implemented and delegated a follow-up",
+    pr_url: "https://github.com/farshidz/cortex-city/pull/10",
+    branch_name: "agent/initial-pass",
+    files_changed: ["src/lib/agent-runner.ts"],
+    assumptions: [],
+    blockers: [],
+    next_steps: [],
+    tool_calls: {
+      create_task: [
+        {
+          title: "Document the follow-up",
+          description: "Add release notes for the worker change",
+          agent: "cortex-city-swe",
+          plan: "Update the changelog",
+        },
+      ],
+    },
+  };
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          status: "in_progress",
+          worktree_path: worktreePath,
+        })
+      )};
+      await createTask(task);
+      process.env.FAKE_AGENT_STDOUT = ${JSON.stringify(
+        [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-initial" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: JSON.stringify(report) },
+          }),
+          JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: 3, cached_input_tokens: 0, output_tokens: 2 },
+          }),
+        ].join("\n")
+      )};
+
+      await new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined)).catch(reject);
+      });
+
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `
+  );
+
+  assert.equal(result.tasks.length, 2);
+  const followup = result.tasks.find((task: Task) => task.parent_task_id === "task-1");
+  assert.ok(followup);
+  assert.equal(followup.title, "Document the follow-up");
 });
 
 test("spawnAgentSession uses the configured default branch in the initial prompt", () => {
