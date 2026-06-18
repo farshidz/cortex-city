@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import path from "path";
 import type { Task, AgentConfig, OrchestratorConfig } from "./types";
-import { readConfig } from "./store";
+import { readConfig, readTasks } from "./store";
 import { resolvePromptPath } from "./agent-files";
 
 const PROMPTS_DIR = path.join(process.cwd(), "prompts");
@@ -32,6 +32,34 @@ function loadPromptFile(absolutePath: string): string | undefined {
 function buildPromptContextSection(title: string, content?: string): string {
   if (!content) return "";
   return `## ${title}\n${content}\n`;
+}
+
+// Agents run a task repeatedly, but each run's structured report is fire-and-
+// forget: a `create_task` request never echoes back into the agent's context,
+// so on a later run the agent doesn't recall it already asked for, say,
+// "Fix failing CI" and requests it again — piling up identical subtasks.
+// Surfacing the follow-up tasks that already exist for this task gives the
+// agent the memory it lacks so it can avoid the duplicate request. Merged and
+// closed children are omitted so a genuinely recurring follow-up can still be
+// raised once the previous one is resolved.
+function buildExistingFollowupTasksSection(task: Task): string {
+  const existing = readTasks().filter(
+    (candidate) =>
+      candidate.parent_task_id === task.id &&
+      candidate.status !== "merged" &&
+      candidate.status !== "closed"
+  );
+  if (existing.length === 0) {
+    return "None yet — you have not created any follow-up tasks for this task.";
+  }
+  const lines = existing.map(
+    (child) =>
+      `- "${child.title}" — status: ${child.status}, owner agent: \`${child.agent}\``
+  );
+  return [
+    "You have already created the following follow-up tasks for this task. Do NOT request another follow-up that duplicates any of them — assume the earlier request succeeded:",
+    ...lines,
+  ].join("\n");
 }
 
 export function buildContinuePrompt(): string {
@@ -87,6 +115,7 @@ export function buildInitialPrompt(task: Task, options?: InitialPromptOptions): 
         repoContext || "No agent-specific context configured."
       )
     )
+    .replace("{{EXISTING_SUBTASKS}}", buildExistingFollowupTasksSection(task))
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 
@@ -110,6 +139,7 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
       "{{REPO_CONTEXT_SECTION}}",
       buildPromptContextSection("Agent Review Context", reviewContext)
     )
+    .replace("{{EXISTING_SUBTASKS}}", buildExistingFollowupTasksSection(task))
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 

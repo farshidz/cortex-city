@@ -54,6 +54,7 @@ function writeTestTemplates(workspace: string) {
       "Again={{BASE_BRANCH}}",
       "Agent={{AGENT_NAME}}",
       "{{REPO_CONTEXT_SECTION}}",
+      "Subtasks={{EXISTING_SUBTASKS}}",
       "Directory={{AGENT_DIRECTORY}}",
     ].join("\n")
   );
@@ -66,6 +67,7 @@ function writeTestTemplates(workspace: string) {
       "Base={{BASE_BRANCH}}",
       "Again={{BASE_BRANCH}}",
       "{{REPO_CONTEXT_SECTION}}",
+      "Subtasks={{EXISTING_SUBTASKS}}",
       "Directory={{AGENT_DIRECTORY}}",
     ].join("\n")
   );
@@ -197,6 +199,80 @@ test("buildInitialPrompt falls back when the task plan or agent prompt file is m
   assert.match(result, /## Repository Context\nNo agent-specific context configured\./);
 });
 
+test("buildInitialPrompt notes when the task has no follow-up tasks yet", () => {
+  const workspace = createTempWorkspace();
+  writeTestTemplates(workspace);
+  writeConfig(workspace);
+
+  const result = runPromptScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask())};
+      console.log(JSON.stringify(prompts.buildInitialPrompt(task)));
+    `
+  );
+
+  assert.match(result, /Subtasks=None yet — you have not created any follow-up tasks/);
+});
+
+test("buildInitialPrompt surfaces existing follow-up tasks so the agent avoids duplicates", () => {
+  const workspace = createTempWorkspace();
+  writeTestTemplates(workspace);
+  writeConfig(workspace);
+  // Parent + two active children + one closed child. The closed child must be
+  // omitted so a genuinely recurring follow-up can still be raised later.
+  writeFileSync(
+    path.join(workspace, ".cortex", "tasks.json"),
+    JSON.stringify([
+      sampleTask(),
+      sampleTask({
+        id: "child-ci",
+        title: "Fix failing CI",
+        status: "in_progress",
+        parent_task_id: "task-1",
+        agent: "cortex-city-swe",
+      }),
+      sampleTask({
+        id: "child-docs",
+        title: "Update changelog",
+        status: "open",
+        parent_task_id: "task-1",
+        agent: "marqo-documentation-agent",
+      }),
+      sampleTask({
+        id: "child-old",
+        title: "Abandoned cleanup",
+        status: "closed",
+        parent_task_id: "task-1",
+      }),
+    ])
+  );
+
+  const result = runPromptScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask())};
+      console.log(JSON.stringify(prompts.buildInitialPrompt(task)));
+    `
+  );
+
+  assert.match(result, /Do NOT request another follow-up that duplicates any of them/);
+  assert.match(result, /"Fix failing CI" — status: in_progress, owner agent: `cortex-city-swe`/);
+  assert.match(result, /"Update changelog" — status: open, owner agent: `marqo-documentation-agent`/);
+  assert.doesNotMatch(result, /Abandoned cleanup/);
+});
+
+test("shared initial and review templates surface the existing follow-up task list", () => {
+  for (const name of ["initial.md", "review.md"]) {
+    const template = readFileSync(
+      path.join(REPO_ROOT, "prompts", "templates", name),
+      "utf-8"
+    );
+    assert.match(template, /## Existing Follow-up Tasks/);
+    assert.match(template, /\{\{EXISTING_SUBTASKS\}\}/);
+  }
+});
+
 test("buildReviewPrompt maps PR states and replaces every base-branch placeholder", () => {
   const workspace = createTempWorkspace();
   writeTestTemplates(workspace);
@@ -255,6 +331,7 @@ test("buildReviewPrompt uses sensible defaults for unknown mergeability", () => 
   );
   assert.match(result, /Base=trunk/);
   assert.doesNotMatch(result, /Agent Review Context/);
+  assert.match(result, /Subtasks=None yet/);
 });
 
 test("buildReviewerPrompt keeps reviewer instructions separate from feedback prompts", () => {
