@@ -465,7 +465,7 @@ export async function spawnAgentSession(
     prompt = buildManualInstructionPrompt(task);
     promptMode = "manual";
   } else if (isResumeAfterKill) {
-    prompt = buildContinuePrompt();
+    prompt = buildContinuePrompt(task);
     promptMode = "resume";
   } else if (mode === "initial") {
     prompt = buildInitialPrompt(task);

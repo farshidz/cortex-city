@@ -42,10 +42,6 @@ Your response MUST conform to the required JSON schema. Provide:
   - `description` *(required, string)*: Detailed instructions for the follow-up work
   - `agent` *(required, string)*: Agent ID from the Available Agents list below
   - `plan` *(optional, string)*: Execution plan or checklist for the assignee
-- This task may run several times. A follow-up task you request is created once and persists across runs, but it will not reappear in your conversation history — so on a later run you will not remember requesting it. Before adding a `create_task` entry, check the **Existing Follow-up Tasks** list below: if an equivalent task is already there, do not request it again (assume your earlier request succeeded). Only request follow-ups that are genuinely new.
-
-## Existing Follow-up Tasks
-{{EXISTING_SUBTASKS}}
 
 ## Available Agents
 {{AGENT_DIRECTORY}}

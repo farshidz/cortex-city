@@ -42,32 +42,62 @@ function buildPromptContextSection(title: string, content?: string): string {
 // agent the memory it lacks so it can avoid the duplicate request. Merged and
 // closed children are omitted so a genuinely recurring follow-up can still be
 // raised once the previous one is resolved.
-function buildExistingFollowupTasksSection(task: Task): string {
-  const existing = readTasks().filter(
+function getActiveFollowupTasks(task: Task): Task[] {
+  return readTasks().filter(
     (candidate) =>
       candidate.parent_task_id === task.id &&
       candidate.status !== "merged" &&
       candidate.status !== "closed"
   );
-  if (existing.length === 0) {
+}
+
+function formatFollowupTaskList(children: Task[]): string {
+  return children
+    .map(
+      (child) =>
+        `- "${child.title}" — status: ${child.status}, owner agent: \`${child.agent}\``
+    )
+    .join("\n");
+}
+
+// Rendered into the `{{EXISTING_SUBTASKS}}` slot of the review template, which
+// is re-sent on every PR-state wake. Always returns text so the section reads
+// sensibly even before anything has been created.
+function buildExistingFollowupTasksSection(task: Task): string {
+  const children = getActiveFollowupTasks(task);
+  if (children.length === 0) {
     return "None yet — you have not created any follow-up tasks for this task.";
   }
-  const lines = existing.map(
-    (child) =>
-      `- "${child.title}" — status: ${child.status}, owner agent: \`${child.agent}\``
-  );
   return [
     "You have already created the following follow-up tasks for this task. Do NOT request another follow-up that duplicates any of them — assume the earlier request succeeded:",
-    ...lines,
+    formatFollowupTaskList(children),
   ].join("\n");
 }
 
-export function buildContinuePrompt(): string {
-  return "continue";
+// Appended to the string-built prompts (`continue`, manual instruction) that
+// wake a long-running session. Those never re-render a template, so without
+// this the agent would never see its existing subtasks on a resume. Returns ""
+// when there is nothing to warn about so the prompt stays minimal.
+function buildFollowupReminder(task: Task): string {
+  const children = getActiveFollowupTasks(task);
+  if (children.length === 0) return "";
+  return [
+    "",
+    "",
+    "## Existing Follow-up Tasks",
+    "You have already created the following follow-up tasks for this task. Before adding any `create_task` entry to your final report, do NOT request another that duplicates one of them — assume the earlier request succeeded:",
+    formatFollowupTaskList(children),
+  ].join("\n");
+}
+
+export function buildContinuePrompt(task: Task): string {
+  return `continue${buildFollowupReminder(task)}`;
 }
 
 export function buildManualInstructionPrompt(task: Task): string {
-  return task.pending_manual_instruction?.trim() || "";
+  const instruction = task.pending_manual_instruction?.trim();
+  if (!instruction) return "";
+  return `${instruction}${buildFollowupReminder(task)}`;
 }
 
 function describeMergeStatus(status: string | undefined, baseBranch: string): string {
@@ -115,7 +145,6 @@ export function buildInitialPrompt(task: Task, options?: InitialPromptOptions): 
         repoContext || "No agent-specific context configured."
       )
     )
-    .replace("{{EXISTING_SUBTASKS}}", buildExistingFollowupTasksSection(task))
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 

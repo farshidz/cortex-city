@@ -54,7 +54,6 @@ function writeTestTemplates(workspace: string) {
       "Again={{BASE_BRANCH}}",
       "Agent={{AGENT_NAME}}",
       "{{REPO_CONTEXT_SECTION}}",
-      "Subtasks={{EXISTING_SUBTASKS}}",
       "Directory={{AGENT_DIRECTORY}}",
     ].join("\n")
   );
@@ -199,23 +198,9 @@ test("buildInitialPrompt falls back when the task plan or agent prompt file is m
   assert.match(result, /## Repository Context\nNo agent-specific context configured\./);
 });
 
-test("buildInitialPrompt notes when the task has no follow-up tasks yet", () => {
-  const workspace = createTempWorkspace();
-  writeTestTemplates(workspace);
-  writeConfig(workspace);
-
-  const result = runPromptScript(
-    workspace,
-    `
-      const task = ${JSON.stringify(sampleTask())};
-      console.log(JSON.stringify(prompts.buildInitialPrompt(task)));
-    `
-  );
-
-  assert.match(result, /Subtasks=None yet — you have not created any follow-up tasks/);
-});
-
-test("buildInitialPrompt surfaces existing follow-up tasks so the agent avoids duplicates", () => {
+// A PR-state "wake" re-renders review.md, so this is where surfacing the
+// existing follow-up tasks actually reaches a long-running session.
+test("buildReviewPrompt surfaces existing follow-up tasks so the agent avoids duplicates on wake", () => {
   const workspace = createTempWorkspace();
   writeTestTemplates(workspace);
   writeConfig(workspace);
@@ -224,7 +209,7 @@ test("buildInitialPrompt surfaces existing follow-up tasks so the agent avoids d
   writeFileSync(
     path.join(workspace, ".cortex", "tasks.json"),
     JSON.stringify([
-      sampleTask(),
+      sampleTask({ pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/7" }),
       sampleTask({
         id: "child-ci",
         title: "Fix failing CI",
@@ -251,8 +236,10 @@ test("buildInitialPrompt surfaces existing follow-up tasks so the agent avoids d
   const result = runPromptScript(
     workspace,
     `
-      const task = ${JSON.stringify(sampleTask())};
-      console.log(JSON.stringify(prompts.buildInitialPrompt(task)));
+      const task = ${JSON.stringify(
+        sampleTask({ pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/7" })
+      )};
+      console.log(JSON.stringify(prompts.buildReviewPrompt(task)));
     `
   );
 
@@ -262,15 +249,70 @@ test("buildInitialPrompt surfaces existing follow-up tasks so the agent avoids d
   assert.doesNotMatch(result, /Abandoned cleanup/);
 });
 
-test("shared initial and review templates surface the existing follow-up task list", () => {
-  for (const name of ["initial.md", "review.md"]) {
-    const template = readFileSync(
-      path.join(REPO_ROOT, "prompts", "templates", name),
-      "utf-8"
-    );
-    assert.match(template, /## Existing Follow-up Tasks/);
-    assert.match(template, /\{\{EXISTING_SUBTASKS\}\}/);
-  }
+// The other wake paths (resume-after-kill and manual instructions) send plain
+// strings, not templates, so the reminder is appended to them directly.
+test("buildContinuePrompt and manual instructions remind a woken session of existing follow-up tasks", () => {
+  const workspace = createTempWorkspace();
+  writeTestTemplates(workspace);
+  writeConfig(workspace);
+  writeFileSync(
+    path.join(workspace, ".cortex", "tasks.json"),
+    JSON.stringify([
+      sampleTask(),
+      sampleTask({
+        id: "child-ci",
+        title: "Fix failing CI",
+        status: "in_progress",
+        parent_task_id: "task-1",
+        agent: "cortex-city-swe",
+      }),
+      sampleTask({
+        id: "child-old",
+        title: "Abandoned cleanup",
+        status: "closed",
+        parent_task_id: "task-1",
+      }),
+    ])
+  );
+
+  const result = runPromptScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask())};
+      console.log(
+        JSON.stringify({
+          resume: prompts.buildContinuePrompt(task),
+          manual: prompts.buildManualInstructionPrompt({
+            ...task,
+            pending_manual_instruction: "address the review",
+          }),
+        })
+      );
+    `
+  );
+
+  assert.match(result.resume, /^continue/);
+  assert.match(result.resume, /## Existing Follow-up Tasks/);
+  assert.match(result.resume, /"Fix failing CI" — status: in_progress/);
+  assert.doesNotMatch(result.resume, /Abandoned cleanup/);
+  assert.match(result.manual, /^address the review/);
+  assert.match(result.manual, /## Existing Follow-up Tasks/);
+  assert.match(result.manual, /"Fix failing CI"/);
+});
+
+test("review template surfaces the existing follow-up list while the initial template no longer does", () => {
+  const reviewTemplate = readFileSync(
+    path.join(REPO_ROOT, "prompts", "templates", "review.md"),
+    "utf-8"
+  );
+  assert.match(reviewTemplate, /## Existing Follow-up Tasks/);
+  assert.match(reviewTemplate, /\{\{EXISTING_SUBTASKS\}\}/);
+
+  const initialTemplate = readFileSync(
+    path.join(REPO_ROOT, "prompts", "templates", "initial.md"),
+    "utf-8"
+  );
+  assert.doesNotMatch(initialTemplate, /\{\{EXISTING_SUBTASKS\}\}/);
 });
 
 test("buildReviewPrompt maps PR states and replaces every base-branch placeholder", () => {
@@ -419,7 +461,7 @@ test("buildCleanupPrompt and manual helpers provide the expected fallbacks", () 
         JSON.stringify({
           cleanup: prompts.buildCleanupPrompt(task),
           manual: prompts.buildManualInstructionPrompt(task),
-          resume: prompts.buildContinuePrompt(),
+          resume: prompts.buildContinuePrompt(task),
           emptyManual: prompts.buildManualInstructionPrompt({
             ...task,
             pending_manual_instruction: "   ",
