@@ -1376,12 +1376,9 @@ async function handleRunComplete(
       updates.run_count = (currentTask.run_count || 0) + 1;
 
       const followups = report?.tool_calls?.create_task;
-      // Follow-up tasks belong to the initial implementation phase. Review and
-      // reviewer runs re-examine the same PR and re-emit the same create_task
-      // entries on every wake, which piles up duplicate subtasks, so only honor
-      // them outside the review phase.
-      const isReviewPhaseRun = runReason === "review" || isReviewerRun;
-      if (followups?.length && shouldApplySuccessSideEffects && !isReviewPhaseRun) {
+      // The separate reviewer agent is read-only; builder runs, including
+      // PR-feedback review runs, can request follow-up tasks.
+      if (followups?.length && shouldApplySuccessSideEffects && !isReviewerRun) {
         await createFollowupTasks(currentTask, followups);
       }
     }

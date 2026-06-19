@@ -33,6 +33,16 @@ Your response MUST conform to the required JSON schema. Provide:
 - **assumptions**: Decisions made without explicit guidance
 - **blockers**: Issues preventing full resolution (empty array if none)
 - **next_steps**: Any remaining items for the task owner
-- **tool_calls**: Set this to `null`. Review runs cannot create follow-up tasks — address the feedback on this PR directly instead of delegating new work.
+- **tool_calls**: Optional object for orchestrator follow-up task requests. If you need a follow-up task, include it in your final JSON response under `tool_calls.create_task`; otherwise set this to `null`. Do not attempt to invoke `create_task` as an interactive session tool.
+
+## Follow-up Task Requests
+- `create_task` (include this request in your final JSON as `tool_calls.create_task`)
+  - `title` *(required, string)*: Short identifier for the new task
+  - `description` *(required, string)*: Detailed instructions for the follow-up work
+  - `agent` *(required, string)*: Agent ID from the Available Agents list below
+  - `plan` *(optional, string)*: Execution plan or checklist for the assignee
+
+## Available Agents
+{{AGENT_DIRECTORY}}
 
 {{REPO_CONTEXT_SECTION}}
