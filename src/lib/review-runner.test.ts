@@ -130,6 +130,73 @@ test("resolveReviewPrompt prefers the configured prompt and falls back to the de
   assert.equal(resolveReviewPrompt(blank), DEFAULT_REVIEW_PROMPT);
 });
 
+test("buildReviewWrapperPrompt injects review learnings when enabled and non-empty", () => {
+  const workspace = setupRunnerWorkspace("review-runner-learnings-");
+  const request = sampleRequest();
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { buildReviewWrapperPrompt } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+    ],
+    `
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const cortexDir = path.join(process.cwd(), ".cortex");
+      fs.mkdirSync(cortexDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(cortexDir, "review-learnings.md"),
+        "- Check repo-tagged lessons only for matching repositories.\\n"
+      );
+      const prompt = buildReviewWrapperPrompt(
+        ${JSON.stringify(baseConfig({ review_learning_enabled: true }))},
+        ${JSON.stringify(request)}
+      );
+      console.log(JSON.stringify({ prompt }));
+    `,
+    prependBinToPath(workspace)
+  );
+
+  assert.match(result.prompt, /## Lessons from past reviews/);
+  assert.match(result.prompt, /Check repo-tagged lessons/);
+  assert.ok(
+    result.prompt.indexOf("## Lessons from past reviews") <
+      result.prompt.indexOf(`Review this PR: ${request.pr_url}`)
+  );
+});
+
+test("buildReviewWrapperPrompt omits review learnings when disabled or empty", () => {
+  const workspace = setupRunnerWorkspace("review-runner-learnings-disabled-");
+  const request = sampleRequest();
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { buildReviewWrapperPrompt } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+    ],
+    `
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const cortexDir = path.join(process.cwd(), ".cortex");
+      fs.mkdirSync(cortexDir, { recursive: true });
+      fs.writeFileSync(path.join(cortexDir, "review-learnings.md"), "- Keep this hidden.\\n");
+      const disabled = buildReviewWrapperPrompt(
+        ${JSON.stringify(baseConfig({ review_learning_enabled: false }))},
+        ${JSON.stringify(request)}
+      );
+      fs.writeFileSync(path.join(cortexDir, "review-learnings.md"), "");
+      const empty = buildReviewWrapperPrompt(
+        ${JSON.stringify(baseConfig({ review_learning_enabled: true }))},
+        ${JSON.stringify(request)}
+      );
+      console.log(JSON.stringify({ disabled, empty }));
+    `,
+    prependBinToPath(workspace)
+  );
+
+  assert.doesNotMatch(result.disabled, /## Lessons from past reviews/);
+  assert.doesNotMatch(result.disabled, /Keep this hidden/);
+  assert.doesNotMatch(result.empty, /## Lessons from past reviews/);
+});
+
 test("parseReviewAgentStatus reads the exact agent status marker", () => {
   assert.equal(
     parseReviewAgentStatus("## Agent Status\nAgent status: `ready_for_human_approval`"),

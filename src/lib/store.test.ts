@@ -72,6 +72,7 @@ test("readConfig creates defaults when no config file exists", () => {
     task_run_timeout_ms: 7200000,
     default_permission_mode: "bypassPermissions",
     default_agent_runner: "claude",
+    review_learning_enabled: true,
     agents: {},
   });
 
@@ -126,6 +127,7 @@ test("readConfig migrates legacy runner and permission fields", () => {
     task_run_timeout_ms: 7200000,
     default_permission_mode: "acceptEdits",
     default_agent_runner: "codex",
+    review_learning_enabled: true,
     agents: {},
     permission_mode: "acceptEdits",
   });
@@ -205,18 +207,19 @@ test("writeConfig persists the supplied configuration", () => {
     task_run_timeout_ms: 300000,
     default_permission_mode: "yolo",
     default_agent_runner: "codex",
-      agents: {
-        "cortex-city-swe": {
-          name: "Cortex City SWE",
-          repo_slug: "farshidz/marqo-cortex-city",
-          repo_path: "/tmp/repo",
-          prompt_file: "prompts/agents/cortex-city-swe.md",
-          review_prompt_file: "prompts/agents/cortex-city-swe.review.md",
-          cleanup_prompt_file: "prompts/agents/cortex-city-swe.cleanup.md",
-          default_branch: "main",
-          description: "Owns the control panel and orchestrator worker.",
-        },
+    review_learning_enabled: true,
+    agents: {
+      "cortex-city-swe": {
+        name: "Cortex City SWE",
+        repo_slug: "farshidz/marqo-cortex-city",
+        repo_path: "/tmp/repo",
+        prompt_file: "prompts/agents/cortex-city-swe.md",
+        review_prompt_file: "prompts/agents/cortex-city-swe.review.md",
+        cleanup_prompt_file: "prompts/agents/cortex-city-swe.cleanup.md",
+        default_branch: "main",
+        description: "Owns the control panel and orchestrator worker.",
       },
+    },
   };
 
   const persisted = runStoreScript(
@@ -239,6 +242,7 @@ test("writeConfig persists runtime-specific model and effort defaults", () => {
     task_run_timeout_ms: 120000,
     default_permission_mode: "default",
     default_agent_runner: "claude",
+    review_learning_enabled: true,
     default_claude_model: "claude-sonnet-4-6",
     default_claude_effort: "high",
     default_codex_model: "gpt-5.4",

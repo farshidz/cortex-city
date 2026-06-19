@@ -193,6 +193,41 @@ test("config route reads and updates Cortex config", () => {
   );
 });
 
+test("review learnings route reads and writes the learnings file", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const learningsRoute = await loadRoute("./src/app/api/reviews/learnings/route.ts");
+      fs.writeFileSync(
+        path.join(cortexDir, "review-learnings.md"),
+        "# Review learnings\\n"
+      );
+      const initial = await json(await learningsRoute.GET());
+      assert.deepEqual(initial.body, {
+        content: "# Review learnings\\n",
+        enabled: true,
+      });
+
+      const updated = await json(
+        await learningsRoute.PUT(
+          request("http://localhost/api/reviews/learnings", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ content: "- Manual lesson\\n" }),
+          })
+        )
+      );
+      assert.deepEqual(updated.body, {
+        content: "- Manual lesson\\n",
+        enabled: true,
+      });
+      assert.equal(
+        fs.readFileSync(path.join(cortexDir, "review-learnings.md"), "utf-8"),
+        "- Manual lesson\\n"
+      );
+    `)
+  );
+});
+
 test("prompts route returns templates with missing cleanup fallback", () => {
   runRouteAssertions(
     withCortexState(`

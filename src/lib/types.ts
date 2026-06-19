@@ -163,6 +163,7 @@ export interface OrchestratorConfig {
   review_effort?: TaskEffort;
   review_model?: string;
   max_parallel_reviews?: number;
+  review_learning_enabled?: boolean;
 }
 
 export type PRStatus =
@@ -219,6 +220,11 @@ export interface ReviewSummary extends ReviewRequest {
   agent_review_status?: ReviewAgentStatus;
   followups?: ReviewFollowup[];
   final_at?: string;
+  final_state?: "merged" | "closed";
+  retro_status?: "pending" | "done" | "error";
+  retro_done_at?: string;
+  retro_run_pid?: number;
+  retro_error?: string;
   current_run_pid?: number;
 }
 

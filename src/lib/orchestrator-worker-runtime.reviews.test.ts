@@ -17,14 +17,17 @@ interface HarnessOptions {
   config?: Partial<OrchestratorConfig>;
   reviews?: Record<string, ReviewSummary>;
   openReviewRequests?: ReviewRequest[];
+  prFinalStates?: Record<string, "merged" | "closed" | null>;
   isPidRunning?: (pid: number) => boolean;
   spawnPid?: () => number;
+  learnings?: string;
 }
 
 interface Harness {
   deps: WorkerRuntimeDeps;
   reviews: Record<string, ReviewSummary>;
   spawnCalls: ReviewRequest[];
+  retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }>;
   deletedPrUrls: string[];
   activeReviewPids: Map<string, number>;
 }
@@ -72,6 +75,7 @@ function makeSummary(
 function makeHarness(options: HarnessOptions = {}): Harness {
   const reviews: Record<string, ReviewSummary> = { ...(options.reviews || {}) };
   const spawnCalls: ReviewRequest[] = [];
+  const retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }> = [];
   const deletedPrUrls: string[] = [];
   let nextPid = 50_000;
   const spawnPid = options.spawnPid || (() => nextPid++);
@@ -82,10 +86,14 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     getPRStatus: async () => "unknown",
     getReviewRequestedPRs: async () => options.openReviewRequests || [],
     getTask: async () => undefined,
-    isPRMergedOrClosed: async () => null,
+    isPRMergedOrClosed: async (prUrl) =>
+      options.prFinalStates && prUrl in options.prFinalStates
+        ? options.prFinalStates[prUrl]
+        : null,
     isPidRunning: options.isPidRunning || (() => true),
     logger: { log: () => {}, error: () => {} },
     readConfig: () => makeConfig(options.config),
+    readReviewLearnings: () => options.learnings || "",
     readReviewSummaries: () => Object.values(reviews),
     readReviewSummaryMap: () => ({ ...reviews }),
     readTasks: () => [],
@@ -114,6 +122,22 @@ function makeHarness(options: HarnessOptions = {}): Harness {
         })(),
       };
     },
+    spawnReviewRetro: async (review, learningsBefore) => {
+      retroCalls.push({ review, learningsBefore });
+      const pid = spawnPid();
+      reviews[review.pr_url] = {
+        ...withReviewStatus({
+          ...(reviews[review.pr_url] || review),
+          retro_status: "pending",
+          retro_run_pid: pid,
+        }),
+      };
+      return {
+        pid,
+        child: {} as never,
+        done: new Promise<void>(() => {}),
+      };
+    },
     updateTask: async () => ({}) as never,
     upsertReviewSummary: async (entry) => {
       reviews[entry.pr_url] = withReviewStatus(entry) as ReviewSummary;
@@ -129,6 +153,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     deps,
     reviews,
     spawnCalls,
+    retroCalls,
     deletedPrUrls,
     activeReviewPids: new Map(),
   };
@@ -276,6 +301,154 @@ test("pollOnce stamps final_at when a PR drops out of the live list", async () =
   // Summary is preserved during the 24h grace period.
   assert.equal(stored.summary, "old summary");
   assert.equal(h.deletedPrUrls.length, 0);
+});
+
+test("pollOnce marks merged reviews pending and spawns one retro", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    agent_review_status: "needs_author_changes",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: "merged" },
+    learnings: "existing lessons",
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_state, "merged");
+  assert.equal(stored.retro_status, "pending");
+  assert.equal(stored.retro_run_pid, 50_000);
+  assert.equal(h.retroCalls.length, 1);
+  assert.equal(h.retroCalls[0].review.pr_url, pr.pr_url);
+  assert.equal(h.retroCalls[0].learningsBefore, "existing lessons");
+});
+
+test("pollOnce stamps closed reviews without spawning retros", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: "closed" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_state, "closed");
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(stored.retro_run_pid, undefined);
+  assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce skips retros when merge classification fails", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: null },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.ok(stored.final_at);
+  assert.equal(stored.final_state, undefined);
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce does not spawn retros when learning is disabled", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    config: { review_learning_enabled: false },
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: "merged" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_state, "merged");
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce serializes pending retros", async () => {
+  const a = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const b = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const finalAt = "2026-05-01T00:00:00.000Z";
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: {
+      [a.pr_url]: makeSummary(a, {
+        summary: "summary a",
+        generated_at: finalAt,
+        final_at: finalAt,
+        final_state: "merged",
+        retro_status: "pending",
+      }),
+      [b.pr_url]: makeSummary(b, {
+        summary: "summary b",
+        generated_at: finalAt,
+        final_at: "2026-05-01T00:01:00.000Z",
+        final_state: "merged",
+        retro_status: "pending",
+      }),
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.retroCalls.length, 1);
+  assert.equal(h.retroCalls[0].review.pr_url, a.pr_url);
+});
+
+test("pollOnce keeps in-flight retros through the review GC window", async () => {
+  const pr = makeRequest();
+  const aged = new Date(Date.now() - (PRUNE_AGE_MS + 60_000)).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_at: aged,
+    final_state: "merged",
+    retro_status: "pending",
+    retro_run_pid: 60_000,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPidRunning: (pid) => pid === 60_000,
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.deletedPrUrls, []);
+  assert.ok(h.reviews[pr.pr_url]);
 });
 
 test("pollOnce deletes review entries whose final_at is older than the prune age", async () => {
