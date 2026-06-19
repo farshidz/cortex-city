@@ -907,6 +907,47 @@ test("review detail submit success navigates back to reviews", () => {
   assert.ok(result.mutateCount >= result.pushes.length);
 });
 
+test("review detail allows followups on stale visible summaries", () => {
+  const output = runRenderScript(`
+    const staleSummaryReview = {
+      ...review,
+      pr_url: "https://github.com/acme/widget/pull/42",
+      pr_number: 42,
+      title: "Stale summary",
+      head_sha: "new-head",
+      summary_head_sha: "old-head",
+      my_last_review_sha: undefined,
+      review_status: "needs_review",
+    };
+    globalThis.__SWR_DATA__ = {
+      ...globalThis.__SWR_DATA__,
+      "/api/reviews": [staleSummaryReview],
+    };
+    const html = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from(staleSummaryReview.pr_url, "utf-8").toString("base64url"),
+        }),
+      },
+      ["Can I still ask?", false, false, "", "", null]
+    );
+    const sendButton =
+      [...html.matchAll(/<button\\b[^>]*>[\\s\\S]*?<\\/button>/g)]
+        .map((match) => match[0])
+        .find((button) => button.includes("Send")) || "";
+    console.log(JSON.stringify({
+      sendButton,
+      staleFooter: html.includes("based on older commits"),
+    }));
+  `);
+
+  const result = JSON.parse(output[0]);
+  assert.equal(result.staleFooter, true);
+  assert.match(result.sendButton, /Send/);
+  assert.doesNotMatch(result.sendButton, /\\sdisabled(?:=|\\s|>|$)/);
+});
+
 test("review detail covers alternate submit and summary states", () => {
   const output = runRenderScript(`
     const originalData = globalThis.__SWR_DATA__;

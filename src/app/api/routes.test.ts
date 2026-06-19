@@ -980,6 +980,7 @@ function withReviewState(body: string) {
           created_at: "2026-05-01T00:00:00.000Z",
           updated_at: "2026-05-01T00:00:00.000Z",
           summary: "older",
+          summary_head_sha: "old-summary-sha",
           generated_at: "2026-05-01T00:00:00.000Z",
         },
         [prUrl]: {
@@ -1117,6 +1118,32 @@ test("review followup route reads existing followups", () => {
         )
       );
       assert.equal(followups.body.followups[0].answer, "Tests changed.");
+    `)
+  );
+});
+
+test("review followup route allows stale cached summaries", () => {
+  runRouteAssertions(
+    withReviewState(`
+      const followupRoute = await loadRoute("./src/app/api/reviews/followup/route.ts");
+      const response = await json(
+        await followupRoute.POST(
+          request("http://localhost/api/reviews/followup", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pr_url: staleUrl,
+              question: "Can I still ask?",
+            }),
+          })
+        )
+      );
+      assert.equal(response.status, 200);
+      assert.equal(response.body.answer, "Fresh summary");
+      assert.equal(response.body.resumed, false);
+
+      const stored = readJson(path.join(cortexDir, "reviews.json"))[staleUrl];
+      assert.equal(stored.followups.at(-1).question, "Can I still ask?");
     `)
   );
 });

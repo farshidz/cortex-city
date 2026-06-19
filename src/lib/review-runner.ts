@@ -404,9 +404,6 @@ export async function askFollowup(
   if (cached.current_run_pid != null) {
     throw new Error("Summary is being refreshed for this PR.");
   }
-  if (cached.summary_head_sha && cached.summary_head_sha !== cached.head_sha) {
-    throw new Error("Summary is stale; regenerate it before asking follow-up.");
-  }
   const config = readConfig();
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);
   const runtime: AgentRuntime =
@@ -416,11 +413,22 @@ export async function askFollowup(
   const opts: SpawnOpts = { runtime, effort, model };
 
   const askedAt = new Date().toISOString();
+  const isSummaryStale =
+    Boolean(cached.summary_head_sha) && cached.summary_head_sha !== cached.head_sha;
+  const followupPrompt = [
+    `PR URL: ${prUrl}`,
+    isSummaryStale
+      ? `The cached summary was generated for ${cached.summary_head_sha}, but the current head is ${cached.head_sha}. Answer against the current PR state when the latest code matters.`
+      : "",
+    `Question: ${question}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   if (cached.session_id) {
     const resumed = spawnRuntime(
       runtime,
-      question,
+      followupPrompt,
       opts,
       cached.session_id,
       runTimeoutMs
@@ -440,14 +448,22 @@ export async function askFollowup(
 
   const seededPrompt = [
     "You previously produced the following review summary for this PR:",
+    `PR URL: ${prUrl}`,
+    cached.summary_head_sha ? `Summary head SHA: ${cached.summary_head_sha}` : "",
+    `Current head SHA: ${cached.head_sha}`,
+    isSummaryStale
+      ? "The summary may be stale. Use it as context, and inspect the current PR with tools if the question depends on latest code."
+      : "",
     "<summary>",
     cached.summary,
     "</summary>",
     "",
-    "The user is asking a follow-up question. Use only the summary plus any tools you have to answer.",
+    "The user is asking a follow-up question. Use the summary plus any tools you have to answer.",
     "",
     `Question: ${question}`,
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const fresh = spawnRuntime(runtime, seededPrompt, opts, undefined, runTimeoutMs);
   const result = await fresh.done;

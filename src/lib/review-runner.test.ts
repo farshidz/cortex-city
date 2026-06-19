@@ -368,9 +368,10 @@ test("askFollowup throws when the cached entry has no summary yet", () => {
   assert.equal(result.error, "Summary is not yet available for this PR.");
 });
 
-test("askFollowup throws for stale summaries and active refreshes", () => {
+test("askFollowup allows stale summaries but still throws for active refreshes", () => {
   const workspace = setupRunnerWorkspace("review-runner-followup-refreshing-");
   const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  const argsFile = path.join(workspace, "agent-args.json");
   mkdirSync(path.dirname(reviewsFile), { recursive: true });
   const request = sampleRequest({ head_sha: "new-head" });
   writeFileSync(
@@ -382,6 +383,7 @@ test("askFollowup throws for stale summaries and active refreshes", () => {
           summary: "old text",
           summary_head_sha: "old-head",
           generated_at: "2026-05-01T00:00:00.000Z",
+          runtime: "claude",
         },
       },
       null,
@@ -396,12 +398,7 @@ test("askFollowup throws for stale summaries and active refreshes", () => {
       `import { patchReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
     ],
     `
-      let staleError = null;
-      try {
-        await askFollowup(${JSON.stringify(request.pr_url)}, "ping");
-      } catch (err) {
-        staleError = err.message;
-      }
+      const staleFollowup = await askFollowup(${JSON.stringify(request.pr_url)}, "ping");
 
       await patchReviewSummary(${JSON.stringify(request.pr_url)}, {
         summary_head_sha: ${JSON.stringify(request.head_sha)},
@@ -413,16 +410,28 @@ test("askFollowup throws for stale summaries and active refreshes", () => {
       } catch (err) {
         runningError = err.message;
       }
-      console.log(JSON.stringify({ staleError, runningError }));
+      console.log(JSON.stringify({ staleFollowup, runningError }));
     `,
-    prependBinToPath(workspace)
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_ARGS_FILE: argsFile,
+      FAKE_AGENT_STDOUT: JSON.stringify({
+        session_id: "followup-session",
+        result: "Answered stale.",
+        is_error: false,
+        duration_ms: 200,
+      }),
+    }
   );
 
-  assert.equal(
-    result.staleError,
-    "Summary is stale; regenerate it before asking follow-up."
-  );
+  assert.equal(result.staleFollowup.answer, "Answered stale.");
+  assert.equal(result.staleFollowup.resumed, false);
   assert.equal(result.runningError, "Summary is being refreshed for this PR.");
+
+  const argsPayload = JSON.parse(readFileSync(argsFile, "utf-8"));
+  const promptIndex = argsPayload.args.indexOf("-p") + 1;
+  assert.match(argsPayload.args[promptIndex], /Summary head SHA: old-head/);
+  assert.match(argsPayload.args[promptIndex], /Current head SHA: new-head/);
 });
 
 test("askFollowup throws when the PR has no cached summary", () => {
