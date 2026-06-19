@@ -257,6 +257,7 @@ export interface ChildTaskSummary {
 
 export interface ActiveSession {
   kind: "task" | "review";
+  run_kind?: "review" | "review_retro";
   // For tasks this is the task id; for reviews it's the PR URL (used as the
   // stable key in .cortex/reviews.json).
   task_id: string;

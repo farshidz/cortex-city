@@ -1,9 +1,6 @@
 import type { ChildProcess } from "child_process";
 import { patchReviewSummary } from "./review-store";
-import {
-  readReviewLearnings,
-  writeReviewLearnings,
-} from "./review-learnings-store";
+import { compareAndWriteReviewLearnings } from "./review-learnings-store";
 import {
   resolveReviewOpts,
   resolveReviewRunTimeoutMs,
@@ -118,7 +115,11 @@ export async function spawnReviewRetro(
         return;
       }
 
-      if (readReviewLearnings() !== learningsBefore) {
+      const wroteLearnings = await compareAndWriteReviewLearnings(
+        learningsBefore,
+        `${rewritten}\n`
+      );
+      if (!wroteLearnings) {
         await patchReviewSummary(review.pr_url, {
           retro_status: "error",
           retro_error:
@@ -128,7 +129,6 @@ export async function spawnReviewRetro(
         return;
       }
 
-      await writeReviewLearnings(`${rewritten}\n`);
       await patchReviewSummary(review.pr_url, {
         retro_status: "done",
         retro_done_at: new Date().toISOString(),

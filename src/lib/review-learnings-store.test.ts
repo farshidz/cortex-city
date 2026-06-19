@@ -49,6 +49,36 @@ test("writeReviewLearnings round-trips Markdown content", () => {
   assert.equal(readFileSync(file, "utf-8"), content);
 });
 
+test("compareAndWriteReviewLearnings refuses stale expected content", () => {
+  const workspace = createTempWorkspace("review-learnings-store-compare-");
+  const original = "# Review learnings\n\n- Original guidance.\n";
+  const manualEdit = "# Review learnings\n\n- Manual guidance.\n";
+  const retroRewrite = "# Review learnings\n\n- Retro guidance.\n";
+  const result = runStoreScript(
+    workspace,
+    `
+      await store.writeReviewLearnings(${JSON.stringify(original)});
+      const firstWrite = await store.compareAndWriteReviewLearnings(
+        ${JSON.stringify(original)},
+        ${JSON.stringify(manualEdit)}
+      );
+      const staleWrite = await store.compareAndWriteReviewLearnings(
+        ${JSON.stringify(original)},
+        ${JSON.stringify(retroRewrite)}
+      );
+      console.log(JSON.stringify({
+        firstWrite,
+        staleWrite,
+        content: store.readReviewLearnings(),
+      }));
+    `
+  );
+
+  assert.equal(result.firstWrite, true);
+  assert.equal(result.staleWrite, false);
+  assert.equal(result.content, manualEdit);
+});
+
 test("concurrent writes serialize without leaving temp files", () => {
   const workspace = createTempWorkspace("review-learnings-store-concurrent-");
   const result = runStoreScript(

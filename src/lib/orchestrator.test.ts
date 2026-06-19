@@ -277,6 +277,57 @@ test("getActiveSessions includes in-flight review summaries tagged as review kin
   assert.match(byKind.review.task_title, /acme\/widget#42/);
 });
 
+test("getActiveSessions includes in-flight review retros", () => {
+  const workspace = createTempWorkspace();
+  writeConfig(workspace);
+  writeTasks(workspace, []);
+  const reviewPrUrl = "https://github.com/acme/widget/pull/42";
+  writeReviews(workspace, {
+    [reviewPrUrl]: {
+      pr_url: reviewPrUrl,
+      pr_number: 42,
+      repo_slug: "acme/widget",
+      title: "Fix the thing",
+      author: "octocat",
+      head_sha: "abc123",
+      created_at: "2026-05-01T00:00:00.000Z",
+      updated_at: "2026-05-01T00:00:00.000Z",
+      summary: "",
+      generated_at: "",
+      final_at: "2026-05-01T00:05:00.000Z",
+      retro_run_pid: process.pid,
+      runtime: "codex",
+    },
+  });
+  writeWorkerState(workspace, {
+    running: true,
+    active_sessions: 0,
+    last_poll_at: null,
+    last_heartbeat_at: null,
+    started_at: null,
+    poll_started_at: null,
+    poll_finished_at: null,
+    poll_in_progress: false,
+    pid: process.pid,
+  });
+
+  const result = runOrchestratorScript(
+    workspace,
+    `
+      const orchestrator = getOrchestrator();
+      console.log(JSON.stringify(orchestrator.getActiveSessions()));
+    `
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].kind, "review");
+  assert.equal(result[0].run_kind, "review_retro");
+  assert.equal(result[0].task_id, reviewPrUrl);
+  assert.equal(result[0].pid, process.pid);
+  assert.equal(result[0].agent, "codex retro");
+  assert.match(result[0].task_title, /review retro/);
+});
+
 test("killReviewSession clears current_run_pid on the cached review", () => {
   const workspace = createTempWorkspace();
   writeConfig(workspace);
@@ -332,6 +383,58 @@ test("killReviewSession clears current_run_pid on the cached review", () => {
   // Dead pid — kill returns false but the entry is still cleared on disk.
   assert.equal(result.killed, false);
   assert.equal(result.currentRunPid, null);
+});
+
+test("killReviewSession clears retro_run_pid and prevents automatic retry", () => {
+  const workspace = createTempWorkspace();
+  writeConfig(workspace);
+  writeTasks(workspace, []);
+  const reviewPrUrl = "https://github.com/acme/widget/pull/42";
+  writeReviews(workspace, {
+    [reviewPrUrl]: {
+      pr_url: reviewPrUrl,
+      pr_number: 42,
+      repo_slug: "acme/widget",
+      title: "Fix the thing",
+      author: "octocat",
+      head_sha: "abc123",
+      created_at: "2026-05-01T00:00:00.000Z",
+      updated_at: "2026-05-01T00:00:00.000Z",
+      summary: "",
+      generated_at: "",
+      retro_status: "pending",
+      retro_run_pid: 999999, // dead pid — kill should fail but still clear
+    },
+  });
+
+  const result = runOrchestratorScript(
+    workspace,
+    `
+      const orchestrator = getOrchestrator();
+      const killed = orchestrator.killReviewSession(
+        ${JSON.stringify(reviewPrUrl)},
+        "review_retro"
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const cached = JSON.parse(fs.readFileSync(
+        path.join(process.cwd(), ".cortex", "reviews.json"),
+        "utf-8"
+      ));
+      console.log(JSON.stringify({
+        killed,
+        retroRunPid: cached[${JSON.stringify(reviewPrUrl)}].retro_run_pid ?? null,
+        retroStatus: cached[${JSON.stringify(reviewPrUrl)}].retro_status,
+        retroError: cached[${JSON.stringify(reviewPrUrl)}].retro_error,
+      }));
+    `
+  );
+
+  assert.equal(result.killed, false);
+  assert.equal(result.retroRunPid, null);
+  assert.equal(result.retroStatus, "error");
+  assert.match(result.retroError, /stopped by user/);
 });
 
 test("killReviewSession returns false when no review has the given pr_url", () => {
