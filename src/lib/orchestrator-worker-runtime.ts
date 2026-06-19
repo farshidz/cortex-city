@@ -605,6 +605,7 @@ async function runReviewPhases(
         error: undefined,
         final_at: undefined,
         final_state_lookup_started_at: undefined,
+        final_state_lookup_error_started_at: undefined,
         final_state_lookup_error: undefined,
       });
       continue;
@@ -622,6 +623,7 @@ async function runReviewPhases(
         final_at: undefined,
         final_state: undefined,
         final_state_lookup_started_at: undefined,
+        final_state_lookup_error_started_at: undefined,
         final_state_lookup_error: undefined,
       });
     }
@@ -679,11 +681,17 @@ async function runReviewPhases(
       const now = Date.now();
       const lookupStartedAt =
         review.final_state_lookup_started_at || new Date(now).toISOString();
-      const lookupStartedMs = new Date(lookupStartedAt).getTime();
+      const errorStartedAt = lookupError
+        ? review.final_state_lookup_error_started_at ||
+          new Date(now).toISOString()
+        : undefined;
+      const errorStartedMs = errorStartedAt
+        ? new Date(errorStartedAt).getTime()
+        : NaN;
       const retryExpired =
         Boolean(lookupError) &&
-        Number.isFinite(lookupStartedMs) &&
-        now - lookupStartedMs >= FINAL_CLASSIFICATION_RETRY_MS;
+        Number.isFinite(errorStartedMs) &&
+        now - errorStartedMs >= FINAL_CLASSIFICATION_RETRY_MS;
       const lookupMessage = lookupError
         ? errorMessage(lookupError)
         : "GitHub did not return merged or closed state.";
@@ -693,6 +701,9 @@ async function runReviewPhases(
         final_state_lookup_started_at: retryExpired
           ? undefined
           : lookupStartedAt,
+        final_state_lookup_error_started_at: retryExpired
+          ? undefined
+          : errorStartedAt,
         final_state_lookup_error: retryExpired
           ? `Final-state lookup timed out after ${Math.round(
               FINAL_CLASSIFICATION_RETRY_MS / 60000
@@ -706,6 +717,7 @@ async function runReviewPhases(
       final_at: new Date().toISOString(),
       final_state: finalState,
       final_state_lookup_started_at: undefined,
+      final_state_lookup_error_started_at: undefined,
       final_state_lookup_error: undefined,
       retro_status:
         finalState === "merged" &&

@@ -222,6 +222,7 @@ export interface ReviewSummary extends ReviewRequest {
   final_at?: string;
   final_state?: "merged" | "closed";
   final_state_lookup_started_at?: string;
+  final_state_lookup_error_started_at?: string;
   final_state_lookup_error?: string;
   retro_status?: "pending" | "done" | "error";
   retro_done_at?: string;
