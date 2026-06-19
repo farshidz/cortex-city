@@ -333,6 +333,53 @@ test("pollOnce marks merged reviews pending and spawns one retro", async () => {
   assert.equal(h.retroCalls[0].learningsBefore, "existing lessons");
 });
 
+test("pollOnce preserves terminal retro status when refinalizing merged reviews", async () => {
+  const done = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const errored = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: {
+      [done.pr_url]: makeSummary(done, {
+        summary: "done summary",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        retro_status: "done",
+        retro_done_at: "2026-05-01T00:20:00.000Z",
+      }),
+      [errored.pr_url]: makeSummary(errored, {
+        summary: "errored summary",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        retro_status: "error",
+        retro_error: "Retro failed.",
+      }),
+    },
+    prFinalStates: {
+      [done.pr_url]: "merged",
+      [errored.pr_url]: "merged",
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.ok(h.reviews[done.pr_url].final_at);
+  assert.equal(h.reviews[done.pr_url].final_state, "merged");
+  assert.equal(h.reviews[done.pr_url].retro_status, "done");
+  assert.equal(
+    h.reviews[done.pr_url].retro_done_at,
+    "2026-05-01T00:20:00.000Z"
+  );
+  assert.ok(h.reviews[errored.pr_url].final_at);
+  assert.equal(h.reviews[errored.pr_url].final_state, "merged");
+  assert.equal(h.reviews[errored.pr_url].retro_status, "error");
+  assert.equal(h.reviews[errored.pr_url].retro_error, "Retro failed.");
+  assert.equal(h.retroCalls.length, 0);
+});
+
 test("pollOnce stamps closed reviews without spawning retros", async () => {
   const pr = makeRequest();
   const cached = makeSummary(pr, {

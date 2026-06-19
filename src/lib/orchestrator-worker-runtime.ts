@@ -722,6 +722,7 @@ async function runReviewPhases(
       retro_status:
         finalState === "merged" &&
         learningEnabled &&
+        review.retro_status == null &&
         review.summary?.trim()
           ? "pending"
           : review.retro_status,
