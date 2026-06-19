@@ -345,7 +345,7 @@ test("spawnAgentSession prioritizes manual instructions on resumed runs and merg
   assert.equal(updatedTask.total_output_tokens, 2);
 });
 
-test("spawnAgentSession uses the review prompt but does not create follow-up tasks", () => {
+test("spawnAgentSession uses the review prompt and creates follow-up tasks from tool calls", () => {
   const workspace = setupWorkspace();
   const argsFile = path.join(workspace, "review-args.json");
   const worktreePath = path.join(workspace, "worktree");
@@ -432,26 +432,27 @@ test("spawnAgentSession uses the review prompt but does not create follow-up tas
     /^REVIEW https:\/\/github.com\/farshidz\/cortex-city\/pull\/9 \| main \| Waiting on approvals, but code can merge cleanly\. \| Cortex City SWE$/
   );
 
-  // The review run records what the agent asked for but must NOT act on it:
-  // re-emitting the same create_task on every PR wake is what piled up
-  // duplicate subtasks.
-  assert.equal(result.tasks.length, 1);
-  const [parentTask] = result.tasks;
+  assert.equal(result.tasks.length, 2);
+  const [parentTask, followupTask] = result.tasks;
   assert.equal(parentTask.status, "in_review");
   assert.equal(parentTask.pr_url, "https://github.com/farshidz/cortex-city/pull/9");
   assert.equal(parentTask.branch_name, "agent/review-pass");
   assert.equal(parentTask.session_id, "thread-review");
   assert.equal(parentTask.last_agent_report.summary, "Opened the PR and delegated docs follow-up");
-  // The request is still captured on the report; it just isn't turned into tasks.
   assert.equal(parentTask.last_agent_report.tool_calls.create_task.length, 2);
   assert.equal(parentTask.run_count, 1);
   assert.equal(parentTask.total_input_tokens, 11);
   assert.equal(parentTask.total_cached_input_tokens, 1);
   assert.equal(parentTask.total_output_tokens, 5);
-  assert.equal(
-    result.tasks.some((task: Task) => task.parent_task_id === "task-1"),
-    false
-  );
+
+  assert.equal(followupTask.title, "Document the follow-up");
+  assert.equal(followupTask.description, "Add release notes for the worker change");
+  assert.equal(followupTask.plan, "Update the changelog");
+  assert.equal(followupTask.parent_task_id, "task-1");
+  assert.equal(followupTask.agent_runner, "codex");
+  assert.equal(followupTask.permission_mode, "bypassPermissions");
+  assert.equal(followupTask.model, "gpt-5.5-codex");
+  assert.equal(followupTask.effort, "medium");
 });
 
 test("spawnAgentSession still creates follow-up tasks on an initial run", () => {

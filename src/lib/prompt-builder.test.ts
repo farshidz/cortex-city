@@ -299,6 +299,10 @@ test("buildReviewerPrompt keeps reviewer instructions separate from feedback pro
     /first line and final line exactly `🤖\[Cortex City Reviewer\]`/
   );
   assert.doesNotMatch(result, /approve when the implementation is sound/);
+  assert.doesNotMatch(result, /create_task/);
+  assert.doesNotMatch(result, /tool_calls/);
+  assert.doesNotMatch(result, /Follow-up Task Requests/);
+  assert.doesNotMatch(result, /Available Agents/);
 });
 
 test("shared review template requires the robot prefix in GitHub replies", () => {
