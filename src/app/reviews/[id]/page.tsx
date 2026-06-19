@@ -87,8 +87,7 @@ export default function ReviewDetailPage({
       review?.summary_head_sha && review.summary_head_sha !== review.head_sha
     );
   const isSummaryRefreshing = Boolean(review?.current_run_pid);
-  const canAskFollowup =
-    hasVisibleSummary && !isSummaryRefreshing && !isSummaryStale;
+  const canAskFollowup = hasVisibleSummary && !isSummaryRefreshing;
 
   async function regenerate() {
     if (!review) return;
