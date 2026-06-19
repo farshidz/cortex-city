@@ -197,6 +197,12 @@ export type ReviewStatus =
   | "summary_error"
   | "final";
 
+export type ReviewAgentStatus =
+  | "ready_for_human_approval"
+  | "needs_author_changes"
+  | "needs_human_decision"
+  | "blocked";
+
 export interface ReviewSummary extends ReviewRequest {
   summary: string;
   summary_head_sha?: string;
@@ -210,6 +216,7 @@ export interface ReviewSummary extends ReviewRequest {
   input_tokens?: number;
   output_tokens?: number;
   error?: string;
+  agent_review_status?: ReviewAgentStatus;
   followups?: ReviewFollowup[];
   final_at?: string;
   current_run_pid?: number;

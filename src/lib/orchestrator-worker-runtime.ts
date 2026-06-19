@@ -584,8 +584,7 @@ async function runReviewPhases(
         ...cached,
         ...prFieldsFromRequest(pr),
         summary_head_sha: staleSummaryHeadSha,
-        session_id: undefined,
-        followups: [],
+        agent_review_status: undefined,
         error: undefined,
         final_at: undefined,
       });
@@ -611,7 +610,10 @@ async function runReviewPhases(
       if (reviewSlots <= 0) break;
       if (activeReviewPids.has(pr.pr_url)) continue;
       const cached = refreshed[pr.pr_url];
-      const needsSummary = !cached?.summary;
+      const needsSummary =
+        !cached ||
+        !cached.summary ||
+        summaryHeadShaFor(cached) !== cached.head_sha;
       if (!needsSummary) continue;
       try {
         const { pid } = await deps.spawnReviewSummary(pr, {}, async () => {

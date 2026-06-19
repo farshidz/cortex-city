@@ -1,4 +1,4 @@
-import type { ReviewStatus } from "./types";
+import type { ReviewAgentStatus, ReviewStatus } from "./types";
 
 export interface ReviewStatusInput {
   summary?: string;
@@ -18,6 +18,13 @@ const REVIEW_STATUS_SORT_GROUP: Record<ReviewStatus, number> = {
   summary_error: 1,
   up_to_date: 1,
   final: 2,
+};
+
+const REVIEW_AGENT_STATUS_SORT_GROUP: Record<ReviewAgentStatus, number> = {
+  ready_for_human_approval: 0,
+  needs_human_decision: 1,
+  needs_author_changes: 2,
+  blocked: 3,
 };
 
 export function deriveReviewStatus(review: ReviewStatusInput): ReviewStatus {
@@ -43,4 +50,9 @@ export function withReviewStatus<T extends ReviewStatusInput>(
 
 export function getReviewStatusSortGroup(status: ReviewStatus): number {
   return REVIEW_STATUS_SORT_GROUP[status];
+}
+
+export function getReviewAgentStatusSortGroup(status?: ReviewAgentStatus): number {
+  if (!status) return 4;
+  return REVIEW_AGENT_STATUS_SORT_GROUP[status];
 }
