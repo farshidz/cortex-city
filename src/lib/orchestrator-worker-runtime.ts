@@ -681,6 +681,7 @@ async function runReviewPhases(
         review.final_state_lookup_started_at || new Date(now).toISOString();
       const lookupStartedMs = new Date(lookupStartedAt).getTime();
       const retryExpired =
+        Boolean(lookupError) &&
         Number.isFinite(lookupStartedMs) &&
         now - lookupStartedMs >= FINAL_CLASSIFICATION_RETRY_MS;
       const lookupMessage = lookupError

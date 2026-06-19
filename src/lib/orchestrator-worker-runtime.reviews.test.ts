@@ -380,7 +380,7 @@ test("pollOnce leaves unknown final review state retryable", async () => {
   assert.equal(h.retroCalls.length, 0);
 });
 
-test("pollOnce finalizes unknown final review state after retry window", async () => {
+test("pollOnce keeps unknown final review state retryable after retry window", async () => {
   const pr = makeRequest();
   const retryStartedAt = new Date(
     Date.now() - (FINAL_CLASSIFICATION_RETRY_MS + 60_000)
@@ -399,12 +399,45 @@ test("pollOnce finalizes unknown final review state after retry window", async (
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
   const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_at, undefined);
+  assert.equal(stored.final_state, undefined);
+  assert.equal(stored.final_state_lookup_started_at, retryStartedAt);
+  assert.equal(
+    stored.final_state_lookup_error,
+    "GitHub did not return merged or closed state."
+  );
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(h.retroCalls.length, 0);
+  assert.deepEqual(h.deletedPrUrls, []);
+});
+
+test("pollOnce finalizes repeated final-state lookup errors after retry window", async () => {
+  const pr = makeRequest();
+  const retryStartedAt = new Date(
+    Date.now() - (FINAL_CLASSIFICATION_RETRY_MS + 60_000)
+  ).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_state_lookup_started_at: retryStartedAt,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPRMergedOrClosed: async () => {
+      throw new Error("GitHub unavailable");
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
   assert.ok(stored.final_at);
   assert.equal(stored.final_state, undefined);
   assert.equal(stored.final_state_lookup_started_at, undefined);
   assert.match(
     stored.final_state_lookup_error || "",
-    /Final-state lookup timed out/
+    /Final-state lookup timed out.*GitHub unavailable/
   );
   assert.equal(stored.retro_status, undefined);
   assert.equal(h.retroCalls.length, 0);
