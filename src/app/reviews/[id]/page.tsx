@@ -26,10 +26,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { decodeReviewId } from "@/lib/review-id";
 import { getEffortOptions } from "@/lib/runtime-config";
 import {
-  getReviewAgentStatusBadgeClass,
-  getReviewAgentStatusLabel,
-  getReviewStatusBadgeClass,
-  getReviewStatusLabel,
+  getReviewStateBadgeClass,
+  getReviewStateLabel,
 } from "@/lib/review-status-presentation";
 import type {
   AgentRuntime,
@@ -209,17 +207,10 @@ export default function ReviewDetailPage({
             {review.repo_slug} #{review.pr_number}
           </span>
           <span
-            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getReviewStatusBadgeClass(review.review_status)}`}
+            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getReviewStateBadgeClass(review.review_state)}`}
           >
-            {getReviewStatusLabel(review.review_status)}
+            {getReviewStateLabel(review.review_state)}
           </span>
-          {review.agent_review_status && (
-            <span
-              className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getReviewAgentStatusBadgeClass(review.agent_review_status)}`}
-            >
-              {getReviewAgentStatusLabel(review.agent_review_status)}
-            </span>
-          )}
           <Badge variant="outline">{review.author || "—"}</Badge>
         </div>
         <h1 className="text-2xl font-bold leading-tight">{review.title}</h1>

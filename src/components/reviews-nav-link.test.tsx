@@ -18,43 +18,60 @@ function review(overrides: Partial<ReviewSummary> = {}): ReviewSummary {
     summary: "Ready summary",
     generated_at: now,
     review_status: "needs_review",
+    review_state: "needs_review",
     ...overrides,
   };
 }
 
-test("countReadyActionableReviews only counts ready review work", () => {
+test("countReadyActionableReviews only counts actionable merged states", () => {
   assert.equal(
     countReadyActionableReviews([
       review({
         pr_url: "https://github.com/acme/widget/pull/1",
-        review_status: "needs_review",
+        review_state: "blocked",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/2",
-        review_status: "new_commits",
+        review_state: "needs_author_changes",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/3",
-        review_status: "pending_summary",
+        review_state: "needs_decision",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/4",
-        review_status: "summarizing",
+        review_state: "ready_to_approve",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/5",
-        review_status: "summary_error",
+        review_state: "needs_review",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/6",
-        review_status: "up_to_date",
+        review_state: "generating",
       }),
       review({
         pr_url: "https://github.com/acme/widget/pull/7",
-        review_status: "final",
+        review_state: "re_reviewing",
+      }),
+      review({
+        pr_url: "https://github.com/acme/widget/pull/8",
+        review_state: "generation_failed",
+      }),
+      review({
+        pr_url: "https://github.com/acme/widget/pull/9",
+        review_state: "queued",
+      }),
+      review({
+        pr_url: "https://github.com/acme/widget/pull/10",
+        review_state: "reviewed",
+      }),
+      review({
+        pr_url: "https://github.com/acme/widget/pull/11",
+        review_state: "archived",
       }),
     ]),
-    2
+    5
   );
 });
 

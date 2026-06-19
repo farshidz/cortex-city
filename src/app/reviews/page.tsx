@@ -14,11 +14,9 @@ import {
 } from "@/components/ui/table";
 import { encodeReviewId } from "@/lib/review-id";
 import {
-  getReviewAgentStatusBadgeClass,
-  getReviewAgentStatusLabel,
-  getReviewStatusBadgeClass,
-  getReviewStatusLabel,
-  getReviewStatusRowClass,
+  getReviewStateBadgeClass,
+  getReviewStateLabel,
+  getReviewStateRowClass,
 } from "@/lib/review-status-presentation";
 import type { ReviewSummary } from "@/lib/types";
 
@@ -51,7 +49,6 @@ export default function ReviewsPage() {
             <TableHead>Title</TableHead>
             <TableHead>Author</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>Agent</TableHead>
             <TableHead className="text-right w-[80px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -59,7 +56,7 @@ export default function ReviewsPage() {
           {reviews?.map((review) => (
             <TableRow
               key={review.pr_url}
-              className={`${getReviewStatusRowClass(review.review_status)} cursor-pointer`}
+              className={`${getReviewStateRowClass(review.review_state)} cursor-pointer`}
               onClick={() => openReview(review)}
             >
               <TableCell className="font-mono text-xs">
@@ -76,21 +73,10 @@ export default function ReviewsPage() {
               </TableCell>
               <TableCell>
                 <span
-                  className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getReviewStatusBadgeClass(review.review_status)}`}
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getReviewStateBadgeClass(review.review_state)}`}
                 >
-                  {getReviewStatusLabel(review.review_status)}
+                  {getReviewStateLabel(review.review_state)}
                 </span>
-              </TableCell>
-              <TableCell>
-                {review.agent_review_status ? (
-                  <span
-                    className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getReviewAgentStatusBadgeClass(review.agent_review_status)}`}
-                  >
-                    {getReviewAgentStatusLabel(review.agent_review_status)}
-                  </span>
-                ) : (
-                  <span className="text-xs text-muted-foreground">—</span>
-                )}
               </TableCell>
               <TableCell
                 className="text-right"
@@ -111,7 +97,7 @@ export default function ReviewsPage() {
           {(!reviews || reviews.length === 0) && (
             <TableRow>
               <TableCell
-                colSpan={7}
+                colSpan={6}
                 className="text-center text-muted-foreground py-8"
               >
                 No review requests right now.
@@ -124,7 +110,7 @@ export default function ReviewsPage() {
       <div className="flex gap-4 mt-3 text-xs text-muted-foreground">
         <span className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm bg-green-500/20 border border-green-500/30 animate-pulse" />
-          Summary being generated
+          Generating
         </span>
         <span className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm bg-yellow-500/20 border border-yellow-500/30" />
@@ -133,10 +119,6 @@ export default function ReviewsPage() {
         <span className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm bg-green-500/20 border border-green-500/30" />
           Up to date
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm bg-green-500/20 border border-green-500/30" />
-          Agent ready
         </span>
         <span className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm bg-red-500/20 border border-red-500/30" />
