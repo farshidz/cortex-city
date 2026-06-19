@@ -257,6 +257,78 @@ test("summarizePR persists Claude output as a ReviewSummary", () => {
   assert.equal(result.persisted.session_id, "claude-session-1");
 });
 
+test("spawnReviewSummary preserves retro state during summary refreshes", () => {
+  const workspace = setupRunnerWorkspace("review-runner-retro-preserve-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-session-retro",
+        result: "## Summary\nUpdated.",
+        is_error: false,
+      }),
+      sleepMs: 100,
+    },
+  });
+
+  const request = sampleRequest();
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify(
+      {
+        [request.pr_url]: {
+          ...request,
+          summary: "old summary",
+          summary_head_sha: request.head_sha,
+          generated_at: "2026-05-01T00:00:00.000Z",
+          retro_status: "pending",
+          retro_run_pid: 60_000,
+        },
+      },
+      null,
+      2
+    )
+  );
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary, readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const spawned = await spawnReviewSummary(${JSON.stringify(request)}, { runtime: "claude" });
+      const during = readReviewSummaryMap()[${JSON.stringify(request.pr_url)}];
+      await patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+        retro_status: "done",
+        retro_done_at: "2026-05-01T00:20:00.000Z",
+        retro_run_pid: undefined,
+        retro_error: undefined,
+      });
+      const summary = await spawned.done;
+      console.log(JSON.stringify({
+        during,
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  assert.equal(result.during.retro_status, "pending");
+  assert.equal(result.during.retro_run_pid, 60_000);
+  assert.equal(result.summary.summary, "## Summary\nUpdated.");
+  assert.equal(result.persisted.retro_status, "done");
+  assert.equal(result.persisted.retro_done_at, "2026-05-01T00:20:00.000Z");
+  assert.equal(result.persisted.retro_run_pid, undefined);
+  assert.equal(result.persisted.retro_error, undefined);
+});
+
 test("summarizePR resumes cached review sessions for changed PRs", () => {
   const workspace = setupRunnerWorkspace("review-runner-stale-resume-");
   const scenarioFile = path.join(workspace, "scenario.json");

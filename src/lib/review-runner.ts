@@ -106,6 +106,15 @@ function isFollowupReview(
   );
 }
 
+function retroFields(review?: ReviewSummary) {
+  return {
+    retro_status: review?.retro_status,
+    retro_done_at: review?.retro_done_at,
+    retro_run_pid: review?.retro_run_pid,
+    retro_error: review?.retro_error,
+  };
+}
+
 export function buildReviewWrapperPrompt(
   config: OrchestratorConfig,
   request: ReviewRequest,
@@ -473,6 +482,7 @@ export async function spawnReviewSummary(
     followups: cachedBefore?.followups,
     final_at: cachedBefore?.final_at,
     error: cachedBefore?.error,
+    ...retroFields(cachedBefore),
   };
 
   const { pid, child, done } = spawnRuntime(
@@ -513,6 +523,7 @@ export async function spawnReviewSummary(
 
     const generatedAt = new Date().toISOString();
     const successful = !finalOutput.error;
+    const latestBeforeSave = getReviewSummary(request.pr_url) || cachedBefore;
     const next = {
       ...request,
       summary: successful
@@ -538,6 +549,7 @@ export async function spawnReviewSummary(
         followupReview || finalOutput.error ? cachedBefore?.followups || [] : [],
       final_at: undefined,
       current_run_pid: undefined,
+      ...retroFields(latestBeforeSave),
     };
     const saved = await upsertReviewSummary(next);
     if (onComplete) {
