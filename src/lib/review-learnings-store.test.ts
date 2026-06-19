@@ -95,12 +95,14 @@ test("concurrent writes serialize without leaving temp files", () => {
       console.log(JSON.stringify({
         content: store.readReviewLearnings(),
         tempFiles: fs.readdirSync(cortexDir).filter((name) => name.includes(".tmp")),
+        lockFiles: fs.readdirSync(cortexDir).filter((name) => name.includes(".lock")),
       }));
     `
   );
 
   assert.match(result.content, /^(first|second|third)\n$/);
   assert.deepEqual(result.tempFiles, []);
+  assert.deepEqual(result.lockFiles, []);
   assert.equal(
     existsSync(path.join(workspace, ".cortex", "review-learnings.md")),
     true

@@ -7,6 +7,8 @@ import {
   statSync,
   writeFileSync,
 } from "fs";
+import { createHash } from "crypto";
+import { tmpdir } from "os";
 import path from "path";
 import { snapshotCortex } from "./cortex-git";
 import { ensureCortexDir, getCortexPath } from "./store";
@@ -21,7 +23,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 function getLockDir(): string {
-  return `${getLearningsFile()}.lock`;
+  const hash = createHash("sha256").update(getLearningsFile()).digest("hex");
+  return path.join(tmpdir(), "cortex-city-review-learnings-locks", `${hash}.lock`);
 }
 
 async function acquireFileLock(): Promise<() => void> {
@@ -33,6 +36,7 @@ async function acquireFileLock(): Promise<() => void> {
 
   for (;;) {
     try {
+      mkdirSync(path.dirname(lockDir), { recursive: true });
       mkdirSync(lockDir);
       writeFileSync(ownerFile, token);
       return () => {
