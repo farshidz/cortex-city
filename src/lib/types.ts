@@ -221,6 +221,8 @@ export interface ReviewSummary extends ReviewRequest {
   followups?: ReviewFollowup[];
   final_at?: string;
   final_state?: "merged" | "closed";
+  final_state_lookup_started_at?: string;
+  final_state_lookup_error?: string;
   retro_status?: "pending" | "done" | "error";
   retro_done_at?: string;
   retro_run_pid?: number;

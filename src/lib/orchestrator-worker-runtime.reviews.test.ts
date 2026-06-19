@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  FINAL_CLASSIFICATION_RETRY_MS,
   PRUNE_AGE_MS,
   pollOnce,
   type WorkerRuntimeDeps,
@@ -370,8 +371,44 @@ test("pollOnce leaves unknown final review state retryable", async () => {
   const stored = h.reviews[pr.pr_url];
   assert.equal(stored.final_at, undefined);
   assert.equal(stored.final_state, undefined);
+  assert.ok(stored.final_state_lookup_started_at);
+  assert.equal(
+    stored.final_state_lookup_error,
+    "GitHub did not return merged or closed state."
+  );
   assert.equal(stored.retro_status, undefined);
   assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce finalizes unknown final review state after retry window", async () => {
+  const pr = makeRequest();
+  const retryStartedAt = new Date(
+    Date.now() - (FINAL_CLASSIFICATION_RETRY_MS + 60_000)
+  ).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_state_lookup_started_at: retryStartedAt,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: null },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.ok(stored.final_at);
+  assert.equal(stored.final_state, undefined);
+  assert.equal(stored.final_state_lookup_started_at, undefined);
+  assert.match(
+    stored.final_state_lookup_error || "",
+    /Final-state lookup timed out/
+  );
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(h.retroCalls.length, 0);
+  assert.deepEqual(h.deletedPrUrls, []);
 });
 
 test("pollOnce continues finalizing reviews when classification throws", async () => {
@@ -404,6 +441,10 @@ test("pollOnce continues finalizing reviews when classification throws", async (
 
   assert.equal(h.reviews[a.pr_url].final_at, undefined);
   assert.equal(h.reviews[a.pr_url].final_state, undefined);
+  assert.equal(
+    h.reviews[a.pr_url].final_state_lookup_error,
+    "GitHub unavailable"
+  );
   assert.equal(h.reviews[a.pr_url].retro_status, undefined);
   assert.equal(h.reviews[b.pr_url].final_state, "merged");
   assert.equal(h.reviews[b.pr_url].retro_status, "pending");
@@ -595,6 +636,29 @@ test("pollOnce keeps queued pending retros through the review GC window", async 
 
   assert.deepEqual(h.deletedPrUrls, []);
   assert.ok(h.reviews[queued.pr_url]);
+  assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce prunes queued pending retros when learning is disabled", async () => {
+  const pr = makeRequest();
+  const aged = new Date(Date.now() - (PRUNE_AGE_MS + 60_000)).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "queued",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_at: aged,
+    final_state: "merged",
+    retro_status: "pending",
+  });
+  const h = makeHarness({
+    config: { review_learning_enabled: false },
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.deletedPrUrls, [pr.pr_url]);
+  assert.equal(h.reviews[pr.pr_url], undefined);
   assert.equal(h.retroCalls.length, 0);
 });
 

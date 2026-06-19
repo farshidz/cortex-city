@@ -31,6 +31,7 @@ import type { ReviewRequest, ReviewSummary, Task, TaskRunMode } from "./types";
 
 export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 export const DEAD_OWNED_PID_GRACE_MS = 10_000;
+export const FINAL_CLASSIFICATION_RETRY_MS = 15 * 60 * 1000;
 
 export interface DeadOwnedPid {
   pid: number;
@@ -75,6 +76,12 @@ export function shouldWaitForDeadOwnedPid(
   }
 
   return now - existing.firstSeenAt < DEAD_OWNED_PID_GRACE_MS;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "Unknown error";
 }
 
 interface WorkerLogger {
@@ -597,18 +604,25 @@ async function runReviewPhases(
         agent_review_status: undefined,
         error: undefined,
         final_at: undefined,
+        final_state_lookup_started_at: undefined,
+        final_state_lookup_error: undefined,
       });
       continue;
     }
     const wasFinal = Boolean(cached.final_at);
+    const hadFinalLookup = Boolean(
+      cached.final_state_lookup_started_at || cached.final_state_lookup_error
+    );
     const reviewShaChanged =
       cached.my_last_review_sha !== pr.my_last_review_sha;
-    if (wasFinal || reviewShaChanged) {
+    if (wasFinal || reviewShaChanged || hadFinalLookup) {
       await deps.upsertReviewSummary({
         ...cached,
         ...prFieldsFromRequest(pr),
         final_at: undefined,
         final_state: undefined,
+        final_state_lookup_started_at: undefined,
+        final_state_lookup_error: undefined,
       });
     }
   }
@@ -651,21 +665,47 @@ async function runReviewPhases(
     if (activeReviewPids.has(review.pr_url)) continue;
     if (review.final_at || openSet.has(review.pr_url)) continue;
     let finalState: "merged" | "closed" | null = null;
+    let lookupError: unknown;
     try {
       finalState = await deps.isPRMergedOrClosed(review.pr_url);
     } catch (error) {
+      lookupError = error;
       deps.logger.error(
         `[worker] Failed to classify final review ${review.pr_url}:`,
         error
       );
     }
     if (!finalState) {
+      const now = Date.now();
+      const lookupStartedAt =
+        review.final_state_lookup_started_at || new Date(now).toISOString();
+      const lookupStartedMs = new Date(lookupStartedAt).getTime();
+      const retryExpired =
+        Number.isFinite(lookupStartedMs) &&
+        now - lookupStartedMs >= FINAL_CLASSIFICATION_RETRY_MS;
+      const lookupMessage = lookupError
+        ? errorMessage(lookupError)
+        : "GitHub did not return merged or closed state.";
+      await deps.upsertReviewSummary({
+        ...review,
+        final_at: retryExpired ? new Date(now).toISOString() : undefined,
+        final_state_lookup_started_at: retryExpired
+          ? undefined
+          : lookupStartedAt,
+        final_state_lookup_error: retryExpired
+          ? `Final-state lookup timed out after ${Math.round(
+              FINAL_CLASSIFICATION_RETRY_MS / 60000
+            )} minutes: ${lookupMessage}`
+          : lookupMessage,
+      });
       continue;
     }
     await deps.upsertReviewSummary({
       ...review,
       final_at: new Date().toISOString(),
       final_state: finalState,
+      final_state_lookup_started_at: undefined,
+      final_state_lookup_error: undefined,
       retro_status:
         finalState === "merged" &&
         learningEnabled &&
@@ -766,7 +806,7 @@ async function runReviewPhases(
   const reviewsForGC: ReviewSummary[] = Object.values(deps.readReviewSummaryMap());
   for (const review of reviewsForGC) {
     if (activeReviewPids.has(review.pr_url)) continue;
-    if (review.retro_status === "pending") continue;
+    if (learningEnabled && review.retro_status === "pending") continue;
     if (review.retro_run_pid != null) {
       try {
         if (deps.isPidRunning(review.retro_run_pid)) continue;
