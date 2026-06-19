@@ -659,10 +659,13 @@ async function runReviewPhases(
         error
       );
     }
+    if (!finalState) {
+      continue;
+    }
     await deps.upsertReviewSummary({
       ...review,
       final_at: new Date().toISOString(),
-      final_state: finalState ?? undefined,
+      final_state: finalState,
       retro_status:
         finalState === "merged" &&
         learningEnabled &&
@@ -763,6 +766,7 @@ async function runReviewPhases(
   const reviewsForGC: ReviewSummary[] = Object.values(deps.readReviewSummaryMap());
   for (const review of reviewsForGC) {
     if (activeReviewPids.has(review.pr_url)) continue;
+    if (review.retro_status === "pending") continue;
     if (review.retro_run_pid != null) {
       try {
         if (deps.isPidRunning(review.retro_run_pid)) continue;

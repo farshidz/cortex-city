@@ -295,6 +295,7 @@ test("pollOnce stamps final_at when a PR drops out of the live list", async () =
   const h = makeHarness({
     openReviewRequests: [],
     reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: "closed" },
   });
 
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
@@ -352,7 +353,7 @@ test("pollOnce stamps closed reviews without spawning retros", async () => {
   assert.equal(h.retroCalls.length, 0);
 });
 
-test("pollOnce skips retros when merge classification fails", async () => {
+test("pollOnce leaves unknown final review state retryable", async () => {
   const pr = makeRequest();
   const cached = makeSummary(pr, {
     summary: "old summary",
@@ -367,7 +368,7 @@ test("pollOnce skips retros when merge classification fails", async () => {
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
   const stored = h.reviews[pr.pr_url];
-  assert.ok(stored.final_at);
+  assert.equal(stored.final_at, undefined);
   assert.equal(stored.final_state, undefined);
   assert.equal(stored.retro_status, undefined);
   assert.equal(h.retroCalls.length, 0);
@@ -401,7 +402,7 @@ test("pollOnce continues finalizing reviews when classification throws", async (
 
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
-  assert.ok(h.reviews[a.pr_url].final_at);
+  assert.equal(h.reviews[a.pr_url].final_at, undefined);
   assert.equal(h.reviews[a.pr_url].final_state, undefined);
   assert.equal(h.reviews[a.pr_url].retro_status, undefined);
   assert.equal(h.reviews[b.pr_url].final_state, "merged");
@@ -556,6 +557,45 @@ test("pollOnce keeps in-flight retros through the review GC window", async () =>
 
   assert.deepEqual(h.deletedPrUrls, []);
   assert.ok(h.reviews[pr.pr_url]);
+});
+
+test("pollOnce keeps queued pending retros through the review GC window", async () => {
+  const inFlight = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const queued = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const aged = new Date(Date.now() - (PRUNE_AGE_MS + 60_000)).toISOString();
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: {
+      [inFlight.pr_url]: makeSummary(inFlight, {
+        summary: "in flight",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        final_at: aged,
+        final_state: "merged",
+        retro_status: "pending",
+        retro_run_pid: 60_000,
+      }),
+      [queued.pr_url]: makeSummary(queued, {
+        summary: "queued",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        final_at: aged,
+        final_state: "merged",
+        retro_status: "pending",
+      }),
+    },
+    isPidRunning: (pid) => pid === 60_000,
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.deletedPrUrls, []);
+  assert.ok(h.reviews[queued.pr_url]);
+  assert.equal(h.retroCalls.length, 0);
 });
 
 test("pollOnce deletes review entries whose final_at is older than the prune age", async () => {

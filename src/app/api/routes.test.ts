@@ -228,6 +228,73 @@ test("review learnings route reads and writes the learnings file", () => {
   );
 });
 
+test("review learnings route rejects malformed content", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const learningsRoute = await loadRoute("./src/app/api/reviews/learnings/route.ts");
+      fs.writeFileSync(
+        path.join(cortexDir, "review-learnings.md"),
+        "# Keep me\\n"
+      );
+
+      const missing = await json(
+        await learningsRoute.PUT(
+          request("http://localhost/api/reviews/learnings", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({}),
+          })
+        )
+      );
+
+      assert.equal(missing.status, 400);
+      assert.deepEqual(missing.body, {
+        error: "content must be a string",
+      });
+      assert.equal(
+        fs.readFileSync(path.join(cortexDir, "review-learnings.md"), "utf-8"),
+        "# Keep me\\n"
+      );
+
+      const numeric = await json(
+        await learningsRoute.PUT(
+          request("http://localhost/api/reviews/learnings", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ content: 123 }),
+          })
+        )
+      );
+
+      assert.equal(numeric.status, 400);
+      assert.deepEqual(numeric.body, {
+        error: "content must be a string",
+      });
+      assert.equal(
+        fs.readFileSync(path.join(cortexDir, "review-learnings.md"), "utf-8"),
+        "# Keep me\\n"
+      );
+
+      const cleared = await json(
+        await learningsRoute.PUT(
+          request("http://localhost/api/reviews/learnings", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ content: "" }),
+          })
+        )
+      );
+
+      assert.equal(cleared.status, 200);
+      assert.equal(cleared.body.content, "");
+      assert.equal(
+        fs.readFileSync(path.join(cortexDir, "review-learnings.md"), "utf-8"),
+        ""
+      );
+    `)
+  );
+});
+
 test("prompts route returns templates with missing cleanup fallback", () => {
   runRouteAssertions(
     withCortexState(`

@@ -15,7 +15,13 @@ export async function GET() {
 
 export async function PUT(request: NextRequest) {
   const body = await request.json();
-  const content = typeof body?.content === "string" ? body.content : "";
+  if (typeof body?.content !== "string") {
+    return NextResponse.json(
+      { error: "content must be a string" },
+      { status: 400 }
+    );
+  }
+  const content = body.content;
   await writeReviewLearnings(content);
   const config = readConfig();
   return NextResponse.json({
