@@ -10,6 +10,7 @@ import path from "node:path";
 
 import {
   DEFAULT_REVIEW_PROMPT,
+  parseReviewAgentStatus,
   resolveReviewOpts,
   resolveReviewPrompt,
 } from "./review-runner";
@@ -129,6 +130,18 @@ test("resolveReviewPrompt prefers the configured prompt and falls back to the de
   assert.equal(resolveReviewPrompt(blank), DEFAULT_REVIEW_PROMPT);
 });
 
+test("parseReviewAgentStatus reads the exact agent status marker", () => {
+  assert.equal(
+    parseReviewAgentStatus("## Agent Status\nAgent status: `ready_for_human_approval`"),
+    "ready_for_human_approval"
+  );
+  assert.equal(
+    parseReviewAgentStatus("Agent readiness - needs author changes"),
+    "needs_author_changes"
+  );
+  assert.equal(parseReviewAgentStatus("No marker here"), undefined);
+});
+
 test("summarizePR persists Claude output as a ReviewSummary", () => {
   const workspace = setupRunnerWorkspace("review-runner-claude-");
   const scenarioFile = path.join(workspace, "scenario.json");
@@ -175,6 +188,86 @@ test("summarizePR persists Claude output as a ReviewSummary", () => {
   assert.equal(result.persisted.summary, "## Summary\nLooks fine.");
   assert.equal(result.persisted.summary_head_sha, request.head_sha);
   assert.equal(result.persisted.session_id, "claude-session-1");
+});
+
+test("summarizePR resumes cached review sessions for changed PRs", () => {
+  const workspace = setupRunnerWorkspace("review-runner-stale-resume-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const argsFile = path.join(workspace, "agent-args.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-session-2",
+        result:
+          "## Summary\nFollow-up review.\n\n## Agent Status\nAgent status: needs_author_changes",
+        is_error: false,
+        duration_ms: 123,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ head_sha: "new-head" });
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify(
+      {
+        [request.pr_url]: {
+          ...sampleRequest({ head_sha: "old-head" }),
+          summary: "old summary",
+          summary_head_sha: "old-head",
+          generated_at: "2026-05-01T00:00:00.000Z",
+          runtime: "claude",
+          session_id: "claude-session-1",
+          agent_review_status: "ready_for_human_approval",
+          followups: [
+            {
+              asked_at: "2026-05-01T00:00:00.000Z",
+              question: "What changed?",
+              answered_at: "2026-05-01T00:00:01.000Z",
+              answer: "Old answer",
+              resumed: true,
+            },
+          ],
+        },
+      },
+      null,
+      2
+    )
+  );
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      const args = JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8"));
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+        args,
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_AGENT_ARGS_FILE: argsFile,
+    }
+  );
+
+  assert.equal(result.args.args.includes("--resume"), true);
+  assert.equal(result.args.args.includes("claude-session-1"), true);
+  assert.match(result.args.args.join("\n"), /follow-up review/i);
+  assert.match(result.args.args.join("\n"), /prior agent-authored comments/i);
+  assert.equal(result.summary.summary_head_sha, "new-head");
+  assert.equal(result.summary.session_id, "claude-session-2");
+  assert.equal(result.summary.agent_review_status, "needs_author_changes");
+  assert.equal(result.summary.followups.length, 1);
+  assert.equal(result.persisted.agent_review_status, "needs_author_changes");
 });
 
 test("summarizePR persists Codex output as a ReviewSummary", () => {

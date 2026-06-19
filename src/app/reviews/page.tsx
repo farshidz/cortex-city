@@ -14,6 +14,8 @@ import {
 } from "@/components/ui/table";
 import { encodeReviewId } from "@/lib/review-id";
 import {
+  getReviewAgentStatusBadgeClass,
+  getReviewAgentStatusLabel,
   getReviewStatusBadgeClass,
   getReviewStatusLabel,
   getReviewStatusRowClass,
@@ -49,6 +51,7 @@ export default function ReviewsPage() {
             <TableHead>Title</TableHead>
             <TableHead>Author</TableHead>
             <TableHead>Status</TableHead>
+            <TableHead>Agent</TableHead>
             <TableHead className="text-right w-[80px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -78,6 +81,17 @@ export default function ReviewsPage() {
                   {getReviewStatusLabel(review.review_status)}
                 </span>
               </TableCell>
+              <TableCell>
+                {review.agent_review_status ? (
+                  <span
+                    className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getReviewAgentStatusBadgeClass(review.agent_review_status)}`}
+                  >
+                    {getReviewAgentStatusLabel(review.agent_review_status)}
+                  </span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">—</span>
+                )}
+              </TableCell>
               <TableCell
                 className="text-right"
                 onClick={(e) => e.stopPropagation()}
@@ -97,7 +111,7 @@ export default function ReviewsPage() {
           {(!reviews || reviews.length === 0) && (
             <TableRow>
               <TableCell
-                colSpan={6}
+                colSpan={7}
                 className="text-center text-muted-foreground py-8"
               >
                 No review requests right now.
@@ -119,6 +133,10 @@ export default function ReviewsPage() {
         <span className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm bg-green-500/20 border border-green-500/30" />
           Up to date
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-sm bg-green-500/20 border border-green-500/30" />
+          Agent ready
         </span>
         <span className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm bg-red-500/20 border border-red-500/30" />

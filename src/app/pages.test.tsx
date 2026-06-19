@@ -269,6 +269,7 @@ function runRenderScript(body: string): string[] {
             runtime: "codex",
             effort: "medium",
             review_status: "new_commits",
+            agent_review_status: "needs_author_changes",
             followups: [
               {
                 asked_at: now,
@@ -287,6 +288,7 @@ function runRenderScript(body: string): string[] {
             head_sha: "same-sha",
             my_last_review_sha: "same-sha",
             review_status: "up_to_date",
+            agent_review_status: "ready_for_human_approval",
           };
           const runningReview = {
             ...review,
@@ -840,6 +842,8 @@ test("reviews page renders final reviews and backend status labels", () => {
       pendingSummary: html.includes("No summary yet"),
       summarizing: html.includes("Summary being generated"),
       summaryError: html.includes("Summary error"),
+      agentNeedsChanges: html.includes("Agent needs changes"),
+      agentReady: html.includes("Agent ready"),
       summaryErrorLegend: html.includes("Summary errors"),
       summaryErrorLegendSwatch: html.includes(
         "bg-red-500/20 border border-red-500/30"
@@ -856,6 +860,8 @@ test("reviews page renders final reviews and backend status labels", () => {
     pendingSummary: true,
     summarizing: true,
     summaryError: true,
+    agentNeedsChanges: true,
+    agentReady: true,
     summaryErrorLegend: true,
     summaryErrorLegendSwatch: true,
     finalLabel: true,

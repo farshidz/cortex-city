@@ -13,15 +13,25 @@ import {
 import type {
   AgentRuntime,
   OrchestratorConfig,
+  ReviewAgentStatus,
   ReviewFollowup,
   ReviewRequest,
   ReviewSummary,
   TaskEffort,
 } from "./types";
 
+const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
+  "ready_for_human_approval",
+  "needs_author_changes",
+  "needs_human_decision",
+  "blocked",
+];
+
 export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request that the signed-in user has been asked to review.
 
-Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused summary as **GitHub-flavored Markdown**.`;
+Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused review as **GitHub-flavored Markdown**. Keep the existing review standard: surface the findings you would normally surface, but leave GitHub comments yourself when a finding requires the PR author to make a change. If you are unsure whether something should be posted as a PR comment, keep it in the generated review instead.
+
+Do not approve or request changes on GitHub.`;
 export const DEFAULT_REVIEW_PROMPT = DEFAULT_REVIEW_SUMMARY_PROMPT;
 
 interface SpawnOpts {
@@ -73,9 +83,114 @@ export function resolveReviewRunTimeoutMs(
   return resolveTaskRunTimeoutMs(config);
 }
 
-function buildReviewWrapperPrompt(config: OrchestratorConfig, prUrl: string): string {
+function summaryHeadShaFor(
+  review?: Pick<ReviewSummary, "head_sha" | "summary" | "summary_head_sha">
+): string | undefined {
+  if (!review) return undefined;
+  return (
+    review.summary_head_sha ||
+    (review.summary?.trim() ? review.head_sha : undefined)
+  );
+}
+
+function isFollowupReview(
+  request: ReviewRequest,
+  cached?: ReviewSummary
+): boolean {
+  const reviewedHeadSha = summaryHeadShaFor(cached);
+  return Boolean(
+    cached?.summary?.trim() &&
+      reviewedHeadSha &&
+      reviewedHeadSha !== request.head_sha
+  );
+}
+
+function buildReviewWrapperPrompt(
+  config: OrchestratorConfig,
+  request: ReviewRequest,
+  cached?: ReviewSummary
+): string {
   const base = resolveReviewPrompt(config);
-  return `${base}\n\nReview this PR: ${prUrl}`;
+  const reviewedHeadSha = summaryHeadShaFor(cached);
+  const followup = isFollowupReview(request, cached);
+  const sections = [
+    base,
+    "",
+    "Cortex City review protocol:",
+    "- Start the generated review with `## Summary` and put the summary before any findings.",
+    "- Then include `## Agent Status` with one exact line: `Agent status: <status>`.",
+    `- The status must be one of: ${REVIEW_AGENT_STATUSES.join(", ")}.`,
+    [
+      "- Use `ready_for_human_approval` only when you have no required",
+      "author changes and no unresolved issue that should block the human reviewer.",
+    ].join(" "),
+    "- Use `needs_author_changes` when the author still needs to change code.",
+    [
+      "- Use `needs_human_decision` when the PR may be acceptable but you found",
+      "uncertain or advisory points the human should decide.",
+    ].join(" "),
+    "- Use `blocked` when you could not complete the review.",
+    "- Leave GitHub comments yourself for findings that require author changes.",
+    [
+      "- Put uncertain or advisory points in the generated review instead of",
+      "posting them to GitHub.",
+    ].join(" "),
+    "- Do not approve, request changes, or submit a GitHub PR review decision.",
+  ];
+
+  if (followup) {
+    sections.push(
+      "",
+      "This is a follow-up review because the PR changed since your previous review.",
+      `Previously reviewed head SHA: ${reviewedHeadSha}`,
+      `Current head SHA: ${request.head_sha}`,
+      [
+        "Use GitHub tooling to inspect the current PR, your prior",
+        "agent-authored comments, and any relevant review threads.",
+      ].join(" "),
+      [
+        "If a prior required-change comment has been addressed, leave a",
+        "follow-up GitHub comment saying so.",
+      ].join(" "),
+      [
+        "If a prior required-change comment is still unresolved, do not duplicate",
+        "the same comment; reflect that in the generated review and status.",
+      ].join(" "),
+      [
+        "Review the current PR fresh as well, and leave new GitHub comments for",
+        "new required author changes.",
+      ].join(" ")
+    );
+  } else {
+    sections.push(
+      "",
+      "This is an initial review of the current PR state.",
+      `Current head SHA: ${request.head_sha}`
+    );
+  }
+
+  sections.push("", `Review this PR: ${request.pr_url}`);
+  return sections.join("\n");
+}
+
+export function parseReviewAgentStatus(
+  text: string
+): ReviewAgentStatus | undefined {
+  const statusLine = text.match(
+    /\bagent\s+(?:status|readiness|verdict)\b\s*[:\-]\s*`?([a-zA-Z0-9 _-]+)`?/i
+  );
+  const candidates = statusLine ? [statusLine[1], text] : [text];
+  for (const candidate of candidates) {
+    const normalized = candidate
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_")
+      .replace(/[^a-z_]/g, "");
+    const exact = REVIEW_AGENT_STATUSES.find((status) =>
+      normalized.includes(status)
+    );
+    if (exact) return exact;
+  }
+  return undefined;
 }
 
 function buildClaudeArgs(
@@ -317,12 +432,15 @@ export async function spawnReviewSummary(
   const config = readConfig();
   const opts = resolveReviewOpts(config, options);
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);
-  const prompt = buildReviewWrapperPrompt(config, request.pr_url);
 
   const cachedBefore = getReviewSummary(request.pr_url);
-  const cachedSummaryHeadSha =
-    cachedBefore?.summary_head_sha ||
-    (cachedBefore?.summary?.trim() ? cachedBefore.head_sha : undefined);
+  const cachedSummaryHeadSha = summaryHeadShaFor(cachedBefore);
+  const followupReview = isFollowupReview(request, cachedBefore);
+  const prompt = buildReviewWrapperPrompt(config, request, cachedBefore);
+  const resumeSessionId =
+    followupReview && cachedBefore?.session_id
+      ? cachedBefore.session_id
+      : undefined;
   const baseEntry = {
     ...request,
     summary: cachedBefore?.summary ?? "",
@@ -335,6 +453,9 @@ export async function spawnReviewSummary(
     duration_ms: cachedBefore?.duration_ms,
     input_tokens: cachedBefore?.input_tokens,
     output_tokens: cachedBefore?.output_tokens,
+    agent_review_status: followupReview
+      ? undefined
+      : cachedBefore?.agent_review_status,
     followups: cachedBefore?.followups,
     final_at: cachedBefore?.final_at,
     error: cachedBefore?.error,
@@ -344,7 +465,7 @@ export async function spawnReviewSummary(
     opts.runtime,
     prompt,
     opts,
-    undefined,
+    resumeSessionId,
     runTimeoutMs
   );
 
@@ -354,21 +475,53 @@ export async function spawnReviewSummary(
   });
 
   const completion = done.then(async (output) => {
+    let finalOutput = output;
+    if (output.error && resumeSessionId) {
+      const fallbackPrompt = [
+        "The previous review session could not be resumed.",
+        [
+          "Start a fresh session and reconstruct context from GitHub comments,",
+          "review threads, and the current PR state.",
+        ].join(" "),
+        "",
+        prompt,
+      ].join("\n");
+      const fallback = spawnRuntime(
+        opts.runtime,
+        fallbackPrompt,
+        opts,
+        undefined,
+        runTimeoutMs
+      );
+      await patchReviewSummary(request.pr_url, { current_run_pid: fallback.pid });
+      finalOutput = await fallback.done;
+    }
+
     const generatedAt = new Date().toISOString();
+    const successful = !finalOutput.error;
     const next = {
       ...request,
-      summary: output.error ? cachedBefore?.summary ?? "" : output.result_text.trim(),
-      summary_head_sha: output.error ? cachedSummaryHeadSha : request.head_sha,
-      generated_at: output.error ? cachedBefore?.generated_at ?? "" : generatedAt,
+      summary: successful
+        ? finalOutput.result_text.trim()
+        : (cachedBefore?.summary ?? ""),
+      summary_head_sha: successful ? request.head_sha : cachedSummaryHeadSha,
+      generated_at: successful ? generatedAt : cachedBefore?.generated_at ?? "",
       runtime: opts.runtime,
       effort: opts.effort,
       model: opts.model,
-      session_id: output.session_id || undefined,
-      duration_ms: output.duration_ms,
-      input_tokens: output.usage?.input_tokens,
-      output_tokens: output.usage?.output_tokens,
-      error: output.error,
-      followups: [],
+      session_id:
+        finalOutput.session_id ||
+        (successful ? resumeSessionId : cachedBefore?.session_id) ||
+        undefined,
+      duration_ms: finalOutput.duration_ms,
+      input_tokens: finalOutput.usage?.input_tokens,
+      output_tokens: finalOutput.usage?.output_tokens,
+      error: finalOutput.error,
+      agent_review_status: successful
+        ? parseReviewAgentStatus(finalOutput.result_text)
+        : cachedBefore?.agent_review_status,
+      followups:
+        followupReview || finalOutput.error ? cachedBefore?.followups || [] : [],
       final_at: undefined,
       current_run_pid: undefined,
     };
