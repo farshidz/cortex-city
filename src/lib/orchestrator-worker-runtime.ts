@@ -650,7 +650,15 @@ async function runReviewPhases(
   for (const review of reviewsForFinalization) {
     if (activeReviewPids.has(review.pr_url)) continue;
     if (review.final_at || openSet.has(review.pr_url)) continue;
-    const finalState = await deps.isPRMergedOrClosed(review.pr_url);
+    let finalState: "merged" | "closed" | null = null;
+    try {
+      finalState = await deps.isPRMergedOrClosed(review.pr_url);
+    } catch (error) {
+      deps.logger.error(
+        `[worker] Failed to classify final review ${review.pr_url}:`,
+        error
+      );
+    }
     await deps.upsertReviewSummary({
       ...review,
       final_at: new Date().toISOString(),

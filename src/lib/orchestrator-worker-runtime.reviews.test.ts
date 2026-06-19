@@ -18,6 +18,7 @@ interface HarnessOptions {
   reviews?: Record<string, ReviewSummary>;
   openReviewRequests?: ReviewRequest[];
   prFinalStates?: Record<string, "merged" | "closed" | null>;
+  isPRMergedOrClosed?: (prUrl: string) => Promise<"merged" | "closed" | null>;
   isPidRunning?: (pid: number) => boolean;
   spawnPid?: () => number;
   learnings?: string;
@@ -86,10 +87,12 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     getPRStatus: async () => "unknown",
     getReviewRequestedPRs: async () => options.openReviewRequests || [],
     getTask: async () => undefined,
-    isPRMergedOrClosed: async (prUrl) =>
-      options.prFinalStates && prUrl in options.prFinalStates
-        ? options.prFinalStates[prUrl]
-        : null,
+    isPRMergedOrClosed:
+      options.isPRMergedOrClosed ||
+      (async (prUrl) =>
+        options.prFinalStates && prUrl in options.prFinalStates
+          ? options.prFinalStates[prUrl]
+          : null),
     isPidRunning: options.isPidRunning || (() => true),
     logger: { log: () => {}, error: () => {} },
     readConfig: () => makeConfig(options.config),
@@ -368,6 +371,43 @@ test("pollOnce skips retros when merge classification fails", async () => {
   assert.equal(stored.final_state, undefined);
   assert.equal(stored.retro_status, undefined);
   assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce continues finalizing reviews when classification throws", async () => {
+  const a = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const b = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const cachedA = makeSummary(a, {
+    summary: "old summary a",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const cachedB = makeSummary(b, {
+    summary: "old summary b",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [a.pr_url]: cachedA, [b.pr_url]: cachedB },
+    isPRMergedOrClosed: async (prUrl) => {
+      if (prUrl === a.pr_url) throw new Error("GitHub unavailable");
+      return "merged";
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.ok(h.reviews[a.pr_url].final_at);
+  assert.equal(h.reviews[a.pr_url].final_state, undefined);
+  assert.equal(h.reviews[a.pr_url].retro_status, undefined);
+  assert.equal(h.reviews[b.pr_url].final_state, "merged");
+  assert.equal(h.reviews[b.pr_url].retro_status, "pending");
+  assert.equal(h.retroCalls.length, 1);
+  assert.equal(h.retroCalls[0].review.pr_url, b.pr_url);
 });
 
 test("pollOnce does not spawn retros when learning is disabled", async () => {

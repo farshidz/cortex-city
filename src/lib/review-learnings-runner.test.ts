@@ -140,6 +140,54 @@ test("spawnReviewRetro leaves learnings untouched and stamps error on failure", 
   assert.equal(result.persisted.retro_run_pid, undefined);
 });
 
+test("spawnReviewRetro does not overwrite learnings changed during the run", () => {
+  const workspace = setupRetroWorkspace("review-retro-manual-edit-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const review = sampleReview();
+  const learningsBefore = "# Review learnings\n\n- Original.\n";
+  const manualEdit = "# Review learnings\n\n- Manual edit.\n";
+  const rewritten = "# Review learnings\n\n- Retro rewrite.\n";
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        result: rewritten,
+        is_error: false,
+      }),
+      sleepMs: 100,
+    },
+  });
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { spawnReviewRetro } from ${JSON.stringify(RETRO_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+      `import { readReviewLearnings, writeReviewLearnings } from ${JSON.stringify(LEARNINGS_STORE_MODULE_URL)};`,
+    ],
+    `
+      const review = ${JSON.stringify(review)};
+      await upsertReviewSummary(review);
+      await writeReviewLearnings(${JSON.stringify(learningsBefore)});
+      const spawned = await spawnReviewRetro(review, ${JSON.stringify(learningsBefore)});
+      await writeReviewLearnings(${JSON.stringify(manualEdit)});
+      await spawned.done;
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[review.pr_url],
+        learnings: readReviewLearnings(),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  assert.equal(result.learnings, manualEdit);
+  assert.equal(result.persisted.retro_status, "error");
+  assert.match(result.persisted.retro_error, /changed during retro/);
+  assert.equal(result.persisted.retro_run_pid, undefined);
+});
+
 test("spawnReviewRetro treats empty output as an error", () => {
   const workspace = setupRetroWorkspace("review-retro-empty-");
   const scenarioFile = path.join(workspace, "scenario.json");

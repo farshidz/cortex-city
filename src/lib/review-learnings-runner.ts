@@ -1,6 +1,9 @@
 import type { ChildProcess } from "child_process";
 import { patchReviewSummary } from "./review-store";
-import { writeReviewLearnings } from "./review-learnings-store";
+import {
+  readReviewLearnings,
+  writeReviewLearnings,
+} from "./review-learnings-store";
 import {
   resolveReviewOpts,
   resolveReviewRunTimeoutMs,
@@ -110,6 +113,16 @@ export async function spawnReviewRetro(
         await patchReviewSummary(review.pr_url, {
           retro_status: "error",
           retro_error: retroErrorMessage(output.error, output.result_text),
+          retro_run_pid: undefined,
+        });
+        return;
+      }
+
+      if (readReviewLearnings() !== learningsBefore) {
+        await patchReviewSummary(review.pr_url, {
+          retro_status: "error",
+          retro_error:
+            "Review learnings changed during retro; leaving the current file untouched.",
           retro_run_pid: undefined,
         });
         return;
