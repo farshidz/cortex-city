@@ -665,14 +665,48 @@ async function runReviewPhases(
   }
 
   deps.logger.log("[worker] Poll phase: run review retros");
+  const reviewsForRetroReconcile: ReviewSummary[] = Object.values(
+    deps.readReviewSummaryMap()
+  );
   if (activeRetroPid != null) {
-    const tracked = Object.values(deps.readReviewSummaryMap()).some(
+    const tracked = reviewsForRetroReconcile.some(
       (review) => review.retro_run_pid === activeRetroPid
     );
     if (!tracked) {
       activeRetroPid = undefined;
     }
   }
+
+  for (const review of reviewsForRetroReconcile) {
+    if (review.retro_run_pid == null) continue;
+    const retroPid = review.retro_run_pid;
+    let retroRunning = false;
+    try {
+      retroRunning = deps.isPidRunning(retroPid);
+    } catch {
+      retroRunning = false;
+    }
+
+    if (retroRunning) {
+      activeRetroPid ??= retroPid;
+      continue;
+    }
+
+    if (activeRetroPid === retroPid) {
+      activeRetroPid = undefined;
+    }
+    await deps.upsertReviewSummary({
+      ...review,
+      retro_status:
+        review.retro_status === "pending" ? "error" : review.retro_status,
+      retro_error:
+        review.retro_status === "pending"
+          ? "Retro process exited before completion."
+          : review.retro_error,
+      retro_run_pid: undefined,
+    });
+  }
+
   if (activeRetroPid != null) {
     try {
       if (!deps.isPidRunning(activeRetroPid)) {

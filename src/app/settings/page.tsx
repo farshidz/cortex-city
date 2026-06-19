@@ -108,6 +108,17 @@ export default function SettingsPage() {
     setLearningsSaving(false);
   }
 
+  function toggleLearningsEditing() {
+    if (learningsEditing) {
+      setLearningsContent(learnings?.content ?? "");
+      setLearningsEditing(false);
+      return;
+    }
+    if (!learnings) return;
+    setLearningsContent(learnings.content);
+    setLearningsEditing(true);
+  }
+
   if (!form) return <div className="text-muted-foreground">Loading...</div>;
 
   return (
@@ -393,7 +404,8 @@ export default function SettingsPage() {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => setLearningsEditing((value) => !value)}
+              onClick={toggleLearningsEditing}
+              disabled={!learnings && !learningsEditing}
             >
               {learningsEditing ? "Cancel" : "Edit"}
             </Button>

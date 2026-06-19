@@ -400,7 +400,7 @@ test("pollOnce serializes pending retros", async () => {
     pr_url: "https://github.com/acme/widget/pull/2",
     pr_number: 2,
   });
-  const finalAt = "2026-05-01T00:00:00.000Z";
+  const finalAt = new Date().toISOString();
   const h = makeHarness({
     openReviewRequests: [],
     reviews: {
@@ -414,7 +414,7 @@ test("pollOnce serializes pending retros", async () => {
       [b.pr_url]: makeSummary(b, {
         summary: "summary b",
         generated_at: finalAt,
-        final_at: "2026-05-01T00:01:00.000Z",
+        final_at: finalAt,
         final_state: "merged",
         retro_status: "pending",
       }),
@@ -426,6 +426,73 @@ test("pollOnce serializes pending retros", async () => {
 
   assert.equal(h.retroCalls.length, 1);
   assert.equal(h.retroCalls[0].review.pr_url, a.pr_url);
+});
+
+test("pollOnce rehydrates a running persisted retro pid before scheduling", async () => {
+  const a = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const b = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const finalAt = new Date().toISOString();
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: {
+      [a.pr_url]: makeSummary(a, {
+        summary: "summary a",
+        generated_at: finalAt,
+        final_at: finalAt,
+        final_state: "merged",
+        retro_status: "pending",
+        retro_run_pid: 60_000,
+      }),
+      [b.pr_url]: makeSummary(b, {
+        summary: "summary b",
+        generated_at: finalAt,
+        final_at: finalAt,
+        final_state: "merged",
+        retro_status: "pending",
+      }),
+    },
+    isPidRunning: (pid) => pid === 60_000,
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.retroCalls.length, 0);
+  assert.equal(h.reviews[a.pr_url].retro_run_pid, 60_000);
+  assert.equal(h.reviews[b.pr_url].retro_run_pid, undefined);
+});
+
+test("pollOnce marks dead persisted retro pids as errors", async () => {
+  const pr = makeRequest();
+  const finalAt = new Date().toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_at: finalAt,
+    final_state: "merged",
+    retro_status: "pending",
+    retro_run_pid: 60_000,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPidRunning: () => false,
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.retroCalls.length, 0);
+  assert.equal(h.reviews[pr.pr_url].retro_status, "error");
+  assert.match(
+    h.reviews[pr.pr_url].retro_error || "",
+    /exited before completion/
+  );
+  assert.equal(h.reviews[pr.pr_url].retro_run_pid, undefined);
 });
 
 test("pollOnce keeps in-flight retros through the review GC window", async () => {
