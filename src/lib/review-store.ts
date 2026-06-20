@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import path from "path";
-import { withReviewStatus } from "./review-status";
-import type { ReviewStatus, ReviewSummary } from "./types";
+import { withReviewState, withReviewStatus } from "./review-status";
+import type { ReviewState, ReviewStatus, ReviewSummary } from "./types";
 import { snapshotCortex } from "./cortex-git";
 import { ensureCortexDir } from "./store";
 
@@ -15,24 +15,21 @@ function withWriteLock<T>(fn: () => T): Promise<T> {
   return result;
 }
 
-type ReviewSummaryInput = Omit<ReviewSummary, "review_status"> & {
+type ReviewSummaryInput = Omit<ReviewSummary, "review_status" | "review_state"> & {
   review_status?: ReviewStatus;
+  review_state?: ReviewState;
 };
 type ReviewMap = Record<string, ReviewSummary>;
 type RawReviewMap = Record<string, ReviewSummaryInput>;
 
 function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
-  const withoutLegacyState = { ...review } as ReviewSummaryInput & {
-    review_state?: unknown;
-  };
-  delete withoutLegacyState.review_state;
-  if (
-    withoutLegacyState.summary?.trim() &&
-    !withoutLegacyState.summary_head_sha
-  ) {
-    withoutLegacyState.summary_head_sha = withoutLegacyState.head_sha;
+  const normalized = { ...review };
+  if (normalized.summary?.trim() && !normalized.summary_head_sha) {
+    normalized.summary_head_sha = normalized.head_sha;
   }
-  return withReviewStatus(withoutLegacyState) as ReviewSummary;
+  // Re-derive both the legacy status and the merged state so old records
+  // (and any persisted derived fields) backfill from the current inputs.
+  return withReviewState(withReviewStatus(normalized)) as ReviewSummary;
 }
 
 function normalizeMap(map: RawReviewMap): ReviewMap {

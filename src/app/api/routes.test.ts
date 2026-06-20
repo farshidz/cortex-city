@@ -1175,24 +1175,26 @@ function withReviewState(body: string) {
     `;
 }
 
-test("reviews route lists cached reviews by status group then recency", () => {
+test("reviews route lists cached reviews by merged state group then recency", () => {
   runRouteAssertions(
     withReviewState(`
       const reviewsRoute = await loadRoute("./src/app/api/reviews/route.ts");
       const reviews = await json(await reviewsRoute.GET());
+      // Group 0 (needs_review), then group 1 by recency desc (running 05-05
+      // before stale 05-01), then group 2 (reviewed), then group 3 (archived).
       assert.deepEqual(reviews.body.map((review) => review.pr_url), [
         needsReviewUrl,
-        staleUrl,
         runningUrl,
+        staleUrl,
         prUrl,
         finalUrl,
       ]);
-      assert.deepEqual(reviews.body.map((review) => review.review_status), [
+      assert.deepEqual(reviews.body.map((review) => review.review_state), [
         "needs_review",
-        "new_commits",
-        "summarizing",
-        "up_to_date",
-        "final",
+        "generating",
+        "re_reviewing",
+        "reviewed",
+        "archived",
       ]);
     `)
   );

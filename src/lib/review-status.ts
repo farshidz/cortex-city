@@ -1,4 +1,4 @@
-import type { ReviewAgentStatus, ReviewStatus } from "./types";
+import type { ReviewAgentStatus, ReviewState, ReviewStatus } from "./types";
 
 export interface ReviewStatusInput {
   summary?: string;
@@ -10,21 +10,31 @@ export interface ReviewStatusInput {
   head_sha: string;
 }
 
-const REVIEW_STATUS_SORT_GROUP: Record<ReviewStatus, number> = {
+export interface ReviewStateInput extends ReviewStatusInput {
+  agent_review_status?: ReviewAgentStatus;
+}
+
+// Attention ordering for the merged state (lower sorts higher in the list).
+// 0: actionable for you, 1: in-flight / no usable summary, 2: handled, 3: archived.
+const REVIEW_STATE_SORT_GROUP: Record<ReviewState, number> = {
+  blocked: 0,
+  needs_author_changes: 0,
+  needs_decision: 0,
+  ready_to_approve: 0,
   needs_review: 0,
-  new_commits: 0,
-  pending_summary: 1,
-  summarizing: 1,
-  summary_error: 1,
-  up_to_date: 1,
-  final: 2,
+  generating: 1,
+  re_reviewing: 1,
+  generation_failed: 1,
+  queued: 1,
+  reviewed: 2,
+  archived: 3,
 };
 
-const REVIEW_AGENT_STATUS_SORT_GROUP: Record<ReviewAgentStatus, number> = {
-  ready_for_human_approval: 0,
-  needs_human_decision: 1,
-  needs_author_changes: 2,
-  blocked: 3,
+const AGENT_STATUS_TO_STATE: Record<ReviewAgentStatus, ReviewState> = {
+  blocked: "blocked",
+  needs_author_changes: "needs_author_changes",
+  needs_human_decision: "needs_decision",
+  ready_for_human_approval: "ready_to_approve",
 };
 
 export function deriveReviewStatus(review: ReviewStatusInput): ReviewStatus {
@@ -39,6 +49,31 @@ export function deriveReviewStatus(review: ReviewStatusInput): ReviewStatus {
   return "up_to_date";
 }
 
+// Merge the pipeline/freshness axis and the agent verdict axis into one state.
+// Precedence (top wins): archived > generating > generation_failed > queued >
+// re_reviewing > verdict > reviewed/needs_review. "Verdict wins" means a current
+// agent verdict beats the (signature-blind, unreliable) "you've reviewed" signal,
+// which only ever surfaces as `reviewed` when no verdict is present.
+export function deriveReviewState(review: ReviewStateInput): ReviewState {
+  const hasSummary = Boolean(review.summary?.trim());
+
+  if (review.final_at) return "archived";
+  if (review.current_run_pid != null) return "generating";
+  if (review.error) return "generation_failed";
+  if (!hasSummary) return "queued";
+
+  // Summary present: a stale summary means HEAD moved (verdict already cleared).
+  const summaryHeadSha = review.summary_head_sha || review.head_sha;
+  if (summaryHeadSha !== review.head_sha) return "re_reviewing";
+
+  if (review.agent_review_status) {
+    return AGENT_STATUS_TO_STATE[review.agent_review_status];
+  }
+
+  if (review.my_last_review_sha === review.head_sha) return "reviewed";
+  return "needs_review";
+}
+
 export function withReviewStatus<T extends ReviewStatusInput>(
   review: T
 ): T & { review_status: ReviewStatus } {
@@ -48,11 +83,15 @@ export function withReviewStatus<T extends ReviewStatusInput>(
   };
 }
 
-export function getReviewStatusSortGroup(status: ReviewStatus): number {
-  return REVIEW_STATUS_SORT_GROUP[status];
+export function withReviewState<T extends ReviewStateInput>(
+  review: T
+): T & { review_state: ReviewState } {
+  return {
+    ...review,
+    review_state: deriveReviewState(review),
+  };
 }
 
-export function getReviewAgentStatusSortGroup(status?: ReviewAgentStatus): number {
-  if (!status) return 4;
-  return REVIEW_AGENT_STATUS_SORT_GROUP[status];
+export function getReviewStateSortGroup(state: ReviewState): number {
+  return REVIEW_STATE_SORT_GROUP[state];
 }

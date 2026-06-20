@@ -11,8 +11,11 @@ export function countReadyActionableReviews(
 ): number | undefined {
   return reviews?.filter(
     (r) =>
-      r.review_status === "needs_review" ||
-      r.review_status === "new_commits"
+      r.review_state === "blocked" ||
+      r.review_state === "needs_author_changes" ||
+      r.review_state === "needs_decision" ||
+      r.review_state === "ready_to_approve" ||
+      r.review_state === "needs_review"
   ).length;
 }
 

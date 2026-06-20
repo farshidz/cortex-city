@@ -204,11 +204,29 @@ export type ReviewAgentStatus =
   | "needs_human_decision"
   | "blocked";
 
+// Single backend-derived state that merges the pipeline/freshness axis
+// (ReviewStatus) with the agent verdict axis (ReviewAgentStatus). The verdict
+// wins whenever it is present; otherwise the pipeline/freshness state shows.
+// The frontend reads only this field and does no state derivation of its own.
+export type ReviewState =
+  | "archived" // final_at set
+  | "generating" // a review run is in progress (current_run_pid set)
+  | "generation_failed" // error set
+  | "queued" // no summary yet, no active run, no error
+  | "re_reviewing" // summary stale vs HEAD (new commits; verdict already cleared)
+  | "blocked" // verdict: agent could not complete the review
+  | "needs_author_changes" // verdict: agent found required changes
+  | "needs_decision" // verdict: agent flagged advisory/uncertain points for you
+  | "ready_to_approve" // verdict: agent found nothing blocking
+  | "reviewed" // no verdict, summary current, you've reviewed this HEAD
+  | "needs_review"; // no verdict, summary current, you haven't reviewed (fallback)
+
 export interface ReviewSummary extends ReviewRequest {
   summary: string;
   summary_head_sha?: string;
   generated_at: string;
   review_status: ReviewStatus;
+  review_state: ReviewState;
   runtime?: AgentRuntime;
   effort?: TaskEffort;
   model?: string;

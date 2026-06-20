@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import {
-  REVIEW_STATUS_BADGE_CLASSES,
-  REVIEW_STATUS_LABELS,
-  REVIEW_STATUS_ROW_CLASSES,
+  REVIEW_STATE_BADGE_CLASSES,
+  REVIEW_STATE_LABELS,
+  REVIEW_STATE_ROW_CLASSES,
 } from "../lib/review-status-presentation";
 
 const REPO_ROOT = process.cwd();
@@ -269,6 +269,7 @@ function runRenderScript(body: string): string[] {
             runtime: "codex",
             effort: "medium",
             review_status: "new_commits",
+            review_state: "needs_author_changes",
             agent_review_status: "needs_author_changes",
             followups: [
               {
@@ -288,6 +289,7 @@ function runRenderScript(body: string): string[] {
             head_sha: "same-sha",
             my_last_review_sha: "same-sha",
             review_status: "up_to_date",
+            review_state: "ready_to_approve",
             agent_review_status: "ready_for_human_approval",
           };
           const runningReview = {
@@ -298,6 +300,8 @@ function runRenderScript(body: string): string[] {
             summary: "",
             current_run_pid: 789,
             review_status: "summarizing",
+            review_state: "generating",
+            agent_review_status: undefined,
           };
           const errorReview = {
             ...review,
@@ -307,6 +311,8 @@ function runRenderScript(body: string): string[] {
             summary: "",
             error: "Unable to summarize",
             review_status: "summary_error",
+            review_state: "generation_failed",
+            agent_review_status: undefined,
             followups: [
               {
                 asked_at: now,
@@ -326,6 +332,8 @@ function runRenderScript(body: string): string[] {
             summary: "",
             generated_at: "",
             review_status: "pending_summary",
+            review_state: "queued",
+            agent_review_status: undefined,
             followups: [
               {
                 asked_at: now,
@@ -343,6 +351,8 @@ function runRenderScript(body: string): string[] {
             title: "Needs review",
             my_last_review_sha: undefined,
             review_status: "needs_review",
+            review_state: "needs_review",
+            agent_review_status: undefined,
           };
           const finalReview = {
             ...review,
@@ -351,6 +361,7 @@ function runRenderScript(body: string): string[] {
             title: "Final review",
             final_at: now,
             review_status: "final",
+            review_state: "archived",
           };
           const closedTask = {
             ...task,
@@ -802,70 +813,80 @@ test("app pages render loading, empty, and detail variants", () => {
   }
 });
 
-test("review status presentation matches expected labels and classes", () => {
-  assert.deepEqual(REVIEW_STATUS_LABELS, {
+test("merged review state presentation matches expected labels and classes", () => {
+  assert.deepEqual(REVIEW_STATE_LABELS, {
+    blocked: "Blocked",
+    needs_author_changes: "Needs author changes",
+    needs_decision: "Needs your decision",
+    ready_to_approve: "Ready to approve",
     needs_review: "Awaiting your review",
-    new_commits: "New commits since your review",
-    up_to_date: "Up to date with your review",
-    pending_summary: "No summary yet",
-    summarizing: "Summary being generated",
-    summary_error: "Summary error",
-    final: "No longer live",
+    generating: "Generating…",
+    re_reviewing: "Re-reviewing (new commits)",
+    generation_failed: "Summary error",
+    queued: "No summary yet",
+    reviewed: "Up to date with your review",
+    archived: "No longer live",
   });
-  assert.deepEqual(REVIEW_STATUS_ROW_CLASSES, {
+  assert.deepEqual(REVIEW_STATE_ROW_CLASSES, {
+    blocked: "bg-red-500/10",
+    needs_author_changes: "bg-yellow-500/10",
+    needs_decision: "bg-yellow-500/10",
+    ready_to_approve: "bg-green-500/10",
     needs_review: "bg-yellow-500/10",
-    new_commits: "bg-yellow-500/10",
-    up_to_date: "bg-green-500/10",
-    pending_summary: "",
-    summarizing: "animate-pulse-green",
-    summary_error: "bg-red-500/10",
-    final: "bg-muted/40 opacity-60",
+    generating: "animate-pulse-green",
+    re_reviewing: "animate-pulse-green",
+    generation_failed: "bg-red-500/10",
+    queued: "",
+    reviewed: "bg-green-500/10",
+    archived: "bg-muted/40 opacity-60",
   });
-  assert.deepEqual(REVIEW_STATUS_BADGE_CLASSES, {
+  assert.deepEqual(REVIEW_STATE_BADGE_CLASSES, {
+    blocked: "bg-red-100 text-red-800",
+    needs_author_changes: "bg-yellow-100 text-yellow-800",
+    needs_decision: "bg-blue-100 text-blue-800",
+    ready_to_approve: "bg-green-100 text-green-800",
     needs_review: "bg-yellow-100 text-yellow-800",
-    new_commits: "bg-yellow-100 text-yellow-800",
-    up_to_date: "bg-green-100 text-green-800",
-    pending_summary: "bg-blue-100 text-blue-800",
-    summarizing: "bg-green-100 text-green-800",
-    summary_error: "bg-red-100 text-red-800",
-    final: "bg-gray-100 text-gray-800",
+    generating: "bg-green-100 text-green-800",
+    re_reviewing: "bg-blue-100 text-blue-800",
+    generation_failed: "bg-red-100 text-red-800",
+    queued: "bg-blue-100 text-blue-800",
+    reviewed: "bg-green-100 text-green-800",
+    archived: "bg-gray-100 text-gray-800",
   });
 });
 
-test("reviews page renders final reviews and backend status labels", () => {
+test("reviews page renders a single merged status column", () => {
   const output = runRenderScript(`
     const html = await renderPage("./src/app/reviews/page.tsx");
     console.log(JSON.stringify({
+      needsAuthorChanges: html.includes("Needs author changes"),
+      readyToApprove: html.includes("Ready to approve"),
+      generating: html.includes("Generating"),
+      generationFailed: html.includes("Summary error"),
+      queued: html.includes("No summary yet"),
       needsReview: html.includes("Awaiting your review"),
-      newCommits: html.includes("New commits since your review"),
-      upToDate: html.includes("Up to date with your review"),
-      pendingSummary: html.includes("No summary yet"),
-      summarizing: html.includes("Summary being generated"),
-      summaryError: html.includes("Summary error"),
-      agentNeedsChanges: html.includes("Agent needs changes"),
-      agentReady: html.includes("Agent ready"),
+      archivedLabel: html.includes("No longer live"),
+      finalRow: html.includes("Final review"),
+      hasAgentHeader: html.includes(">Agent</th>"),
       summaryErrorLegend: html.includes("Summary errors"),
       summaryErrorLegendSwatch: html.includes(
         "bg-red-500/20 border border-red-500/30"
       ),
-      finalLabel: html.includes("No longer live"),
-      finalRow: html.includes("Final review"),
     }));
   `);
 
   assert.deepEqual(JSON.parse(output[0]), {
+    needsAuthorChanges: true,
+    readyToApprove: true,
+    generating: true,
+    generationFailed: true,
+    queued: true,
     needsReview: true,
-    newCommits: true,
-    upToDate: true,
-    pendingSummary: true,
-    summarizing: true,
-    summaryError: true,
-    agentNeedsChanges: true,
-    agentReady: true,
+    archivedLabel: true,
+    finalRow: true,
+    hasAgentHeader: false,
     summaryErrorLegend: true,
     summaryErrorLegendSwatch: true,
-    finalLabel: true,
-    finalRow: true,
   });
 });
 
@@ -924,6 +945,8 @@ test("review detail allows followups on stale visible summaries", () => {
       summary_head_sha: "old-head",
       my_last_review_sha: undefined,
       review_status: "needs_review",
+      review_state: "re_reviewing",
+      agent_review_status: undefined,
     };
     globalThis.__SWR_DATA__ = {
       ...globalThis.__SWR_DATA__,
@@ -965,6 +988,8 @@ test("review detail covers alternate submit and summary states", () => {
       author: "",
       error: undefined,
       review_status: "summary_error",
+      review_state: "generation_failed",
+      agent_review_status: undefined,
       runtime: undefined,
       effort: undefined,
       followups: undefined,
