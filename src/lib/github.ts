@@ -231,9 +231,13 @@ export async function isPRMergedOrClosed(prUrl: string): Promise<"merged" | "clo
   const pr = parsePRUrl(prUrl);
   if (!pr) return null;
 
-  const state = await exec(
+  const result = await execResult(
     `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number} --jq '.state + "|" + (.merged | tostring)'`
   );
+  if (!result.ok) {
+    throw new Error(result.error || "Failed to inspect pull request state.");
+  }
+  const state = result.output;
   if (state.includes("|true")) return "merged";
   if (state.startsWith("closed")) return "closed";
   return null;

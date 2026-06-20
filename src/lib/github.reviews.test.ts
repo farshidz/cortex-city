@@ -619,6 +619,32 @@ test("isPRMergedOrClosed returns null for open PRs", () => {
   assert.equal(result, null);
 });
 
+test("isPRMergedOrClosed throws when gh cannot inspect the PR", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  const responses: Record<string, FakeGhResponse> = {
+    [`api repos/acme/widget/pulls/1 --jq .state + "|" + (.merged | tostring)`]:
+      { stderr: "gh unavailable", exitCode: 1 },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { isPRMergedOrClosed } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      try {
+        await isPRMergedOrClosed(${JSON.stringify(prUrl)});
+        console.log(JSON.stringify({ threw: false }));
+      } catch (error) {
+        console.log(JSON.stringify({
+          threw: true,
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      }
+    `
+  );
+  assert.deepEqual(result, { threw: true, message: "gh unavailable" });
+});
+
 test("getPRStatus reports clean / conflicts / unstable", () => {
   const workspace = setupWorkspace();
   const prUrl = "https://github.com/acme/widget/pull/1";
