@@ -22,6 +22,8 @@ import {
   readReviewSummaryMap,
   upsertReviewSummary,
 } from "./review-store";
+import { readReviewLearnings } from "./review-learnings-store";
+import { spawnReviewRetro } from "./review-learnings-runner";
 import { spawnReviewSummary } from "./review-runner";
 import { unlinkTask as unlinkIssueTask } from "./issue-store";
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
@@ -29,6 +31,7 @@ import type { ReviewRequest, ReviewSummary, Task, TaskRunMode } from "./types";
 
 export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 export const DEAD_OWNED_PID_GRACE_MS = 10_000;
+export const FINAL_CLASSIFICATION_RETRY_MS = 15 * 60 * 1000;
 
 export interface DeadOwnedPid {
   pid: number;
@@ -75,6 +78,12 @@ export function shouldWaitForDeadOwnedPid(
   return now - existing.firstSeenAt < DEAD_OWNED_PID_GRACE_MS;
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "Unknown error";
+}
+
 interface WorkerLogger {
   log: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
@@ -92,8 +101,10 @@ export interface WorkerRuntimeDeps {
   readConfig: typeof readConfig;
   readReviewSummaries: typeof readReviewSummaries;
   readReviewSummaryMap: typeof readReviewSummaryMap;
+  readReviewLearnings: typeof readReviewLearnings;
   readTasks: typeof readTasks;
   removeWorktree: typeof removeWorktree;
+  spawnReviewRetro: typeof spawnReviewRetro;
   spawnAgentSession: typeof spawnAgentSession;
   spawnReviewSummary: typeof spawnReviewSummary;
   updateTask: typeof updateTask;
@@ -114,11 +125,13 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   },
   logger: console,
   readConfig,
+  readReviewLearnings,
   readReviewSummaries,
   readReviewSummaryMap,
   readTasks,
   removeWorktree,
   spawnAgentSession,
+  spawnReviewRetro,
   spawnReviewSummary,
   updateTask,
   upsertReviewSummary,
@@ -138,6 +151,8 @@ interface ReviewRunCandidate {
   ghState: string;
   hasConflicts: boolean;
 }
+
+let activeRetroPid: number | undefined;
 
 async function launchTaskRun(
   task: Task,
@@ -531,6 +546,8 @@ async function runReviewPhases(
   deps: WorkerRuntimeDeps,
   config: ReturnType<typeof readConfig>
 ): Promise<void> {
+  const learningEnabled = config.review_learning_enabled !== false;
+
   deps.logger.log("[worker] Poll phase: reconcile review pids");
   const reviewMap = deps.readReviewSummaryMap();
   const liveReviewKeys = new Set<string>();
@@ -587,17 +604,27 @@ async function runReviewPhases(
         agent_review_status: undefined,
         error: undefined,
         final_at: undefined,
+        final_state_lookup_started_at: undefined,
+        final_state_lookup_error_started_at: undefined,
+        final_state_lookup_error: undefined,
       });
       continue;
     }
     const wasFinal = Boolean(cached.final_at);
+    const hadFinalLookup = Boolean(
+      cached.final_state_lookup_started_at || cached.final_state_lookup_error
+    );
     const reviewShaChanged =
       cached.my_last_review_sha !== pr.my_last_review_sha;
-    if (wasFinal || reviewShaChanged) {
+    if (wasFinal || reviewShaChanged || hadFinalLookup) {
       await deps.upsertReviewSummary({
         ...cached,
         ...prFieldsFromRequest(pr),
         final_at: undefined,
+        final_state: undefined,
+        final_state_lookup_started_at: undefined,
+        final_state_lookup_error_started_at: undefined,
+        final_state_lookup_error: undefined,
       });
     }
   }
@@ -631,18 +658,175 @@ async function runReviewPhases(
     }
   }
 
-  deps.logger.log("[worker] Poll phase: prune old reviews");
+  deps.logger.log("[worker] Poll phase: finalize completed reviews");
   const openSet = new Set(openReviewRequests.map((r) => r.pr_url));
+  const reviewsForFinalization: ReviewSummary[] = Object.values(
+    deps.readReviewSummaryMap()
+  );
+  for (const review of reviewsForFinalization) {
+    if (activeReviewPids.has(review.pr_url)) continue;
+    if (review.final_at || openSet.has(review.pr_url)) continue;
+    let finalState: "merged" | "closed" | null = null;
+    let lookupError: unknown;
+    try {
+      finalState = await deps.isPRMergedOrClosed(review.pr_url);
+    } catch (error) {
+      lookupError = error;
+      deps.logger.error(
+        `[worker] Failed to classify final review ${review.pr_url}:`,
+        error
+      );
+    }
+    if (!finalState) {
+      const now = Date.now();
+      const lookupStartedAt =
+        review.final_state_lookup_started_at || new Date(now).toISOString();
+      const errorStartedAt = lookupError
+        ? review.final_state_lookup_error_started_at ||
+          new Date(now).toISOString()
+        : undefined;
+      const errorStartedMs = errorStartedAt
+        ? new Date(errorStartedAt).getTime()
+        : NaN;
+      const retryExpired =
+        Boolean(lookupError) &&
+        Number.isFinite(errorStartedMs) &&
+        now - errorStartedMs >= FINAL_CLASSIFICATION_RETRY_MS;
+      const lookupMessage = lookupError
+        ? errorMessage(lookupError)
+        : "GitHub did not return merged or closed state.";
+      await deps.upsertReviewSummary({
+        ...review,
+        final_at: retryExpired ? new Date(now).toISOString() : undefined,
+        final_state_lookup_started_at: retryExpired
+          ? undefined
+          : lookupStartedAt,
+        final_state_lookup_error_started_at: retryExpired
+          ? undefined
+          : errorStartedAt,
+        final_state_lookup_error: retryExpired
+          ? `Final-state lookup timed out after ${Math.round(
+              FINAL_CLASSIFICATION_RETRY_MS / 60000
+            )} minutes: ${lookupMessage}`
+          : lookupMessage,
+      });
+      continue;
+    }
+    await deps.upsertReviewSummary({
+      ...review,
+      final_at: new Date().toISOString(),
+      final_state: finalState,
+      final_state_lookup_started_at: undefined,
+      final_state_lookup_error_started_at: undefined,
+      final_state_lookup_error: undefined,
+      retro_status:
+        finalState === "merged" &&
+        learningEnabled &&
+        review.retro_status == null &&
+        review.summary?.trim()
+          ? "pending"
+          : review.retro_status,
+    });
+  }
+
+  deps.logger.log("[worker] Poll phase: run review retros");
+  const reviewsForRetroReconcile: ReviewSummary[] = Object.values(
+    deps.readReviewSummaryMap()
+  );
+  if (activeRetroPid != null) {
+    const tracked = reviewsForRetroReconcile.some(
+      (review) => review.retro_run_pid === activeRetroPid
+    );
+    if (!tracked) {
+      activeRetroPid = undefined;
+    }
+  }
+
+  for (const review of reviewsForRetroReconcile) {
+    if (review.retro_run_pid == null) continue;
+    const retroPid = review.retro_run_pid;
+    let retroRunning = false;
+    try {
+      retroRunning = deps.isPidRunning(retroPid);
+    } catch {
+      retroRunning = false;
+    }
+
+    if (retroRunning) {
+      activeRetroPid ??= retroPid;
+      continue;
+    }
+
+    if (activeRetroPid === retroPid) {
+      activeRetroPid = undefined;
+    }
+    await deps.upsertReviewSummary({
+      ...review,
+      retro_status:
+        review.retro_status === "pending" ? "error" : review.retro_status,
+      retro_error:
+        review.retro_status === "pending"
+          ? "Retro process exited before completion."
+          : review.retro_error,
+      retro_run_pid: undefined,
+    });
+  }
+
+  if (activeRetroPid != null) {
+    try {
+      if (!deps.isPidRunning(activeRetroPid)) {
+        activeRetroPid = undefined;
+      }
+    } catch {
+      activeRetroPid = undefined;
+    }
+  }
+
+  if (learningEnabled && activeRetroPid == null) {
+    const pending = Object.values(deps.readReviewSummaryMap())
+      .filter((review) => {
+        return review.retro_status === "pending" && review.retro_run_pid == null;
+      })
+      .sort((a, b) => (a.final_at ?? "").localeCompare(b.final_at ?? ""));
+    const next = pending[0];
+    if (next) {
+      try {
+        const learningsBefore = deps.readReviewLearnings();
+        const retroLaunch: { completed: boolean; pid?: number } = {
+          completed: false,
+        };
+        const { pid } = await deps.spawnReviewRetro(next, learningsBefore, () => {
+          retroLaunch.completed = true;
+          if (retroLaunch.pid == null || activeRetroPid === retroLaunch.pid) {
+            activeRetroPid = undefined;
+          }
+        });
+        retroLaunch.pid = pid;
+        if (!retroLaunch.completed) {
+          activeRetroPid = pid;
+        }
+        deps.logger.log(`[worker] Spawned review retro for ${next.pr_url}`);
+      } catch (error) {
+        deps.logger.error(
+          `[worker] Failed to spawn review retro for ${next.pr_url}:`,
+          error
+        );
+      }
+    }
+  }
+
+  deps.logger.log("[worker] Poll phase: prune old reviews");
   const now = Date.now();
   const reviewsForGC: ReviewSummary[] = Object.values(deps.readReviewSummaryMap());
   for (const review of reviewsForGC) {
     if (activeReviewPids.has(review.pr_url)) continue;
-    if (!review.final_at && !openSet.has(review.pr_url)) {
-      await deps.upsertReviewSummary({
-        ...review,
-        final_at: new Date().toISOString(),
-      });
-      continue;
+    if (learningEnabled && review.retro_status === "pending") continue;
+    if (review.retro_run_pid != null) {
+      try {
+        if (deps.isPidRunning(review.retro_run_pid)) continue;
+      } catch {
+        // Dead retro processes do not block normal review GC.
+      }
     }
     if (
       review.final_at &&

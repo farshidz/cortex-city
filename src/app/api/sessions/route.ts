@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
   const orch = getOrchestrator();
   const killed =
     body.kind === "review"
-      ? orch.killReviewSession(body.task_id)
+      ? orch.killReviewSession(body.task_id, body.run_kind)
       : orch.killSession(body.task_id);
   if (!killed) {
     return NextResponse.json(

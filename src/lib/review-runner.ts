@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "child_process";
 import { buildEnv, buildModelArgsWith, buildPermissionArgs } from "./runtime-args";
+import { readReviewLearnings } from "./review-learnings-store";
 import {
   getReviewSummary,
   patchReviewSummary,
@@ -34,13 +35,13 @@ Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produ
 Do not approve or request changes on GitHub.`;
 export const DEFAULT_REVIEW_PROMPT = DEFAULT_REVIEW_SUMMARY_PROMPT;
 
-interface SpawnOpts {
+export interface SpawnOpts {
   runtime: AgentRuntime;
   effort?: TaskEffort;
   model?: string;
 }
 
-interface RunOutput {
+export interface RunOutput {
   session_id?: string;
   result_text: string;
   usage?: { input_tokens?: number; output_tokens?: number };
@@ -105,7 +106,16 @@ function isFollowupReview(
   );
 }
 
-function buildReviewWrapperPrompt(
+function retroFields(review?: ReviewSummary) {
+  return {
+    retro_status: review?.retro_status,
+    retro_done_at: review?.retro_done_at,
+    retro_run_pid: review?.retro_run_pid,
+    retro_error: review?.retro_error,
+  };
+}
+
+export function buildReviewWrapperPrompt(
   config: OrchestratorConfig,
   request: ReviewRequest,
   cached?: ReviewSummary
@@ -167,6 +177,19 @@ function buildReviewWrapperPrompt(
       "This is an initial review of the current PR state.",
       `Current head SHA: ${request.head_sha}`
     );
+  }
+
+  if (config.review_learning_enabled !== false) {
+    const learnings = readReviewLearnings().trim();
+    if (learnings) {
+      sections.push(
+        "",
+        "## Lessons from past reviews",
+        "Apply these lessons learned from previously merged PRs. Treat repo-tagged lessons as applying only to that repository.",
+        "",
+        learnings
+      );
+    }
   }
 
   sections.push("", `Review this PR: ${request.pr_url}`);
@@ -257,13 +280,13 @@ function flushCodexEvents(
   return remainder;
 }
 
-interface SpawnResult {
+export interface SpawnResult {
   pid: number;
   child: ChildProcess;
   done: Promise<RunOutput>;
 }
 
-function spawnRuntime(
+export function spawnRuntime(
   runtime: AgentRuntime,
   prompt: string,
   opts: SpawnOpts,
@@ -459,6 +482,7 @@ export async function spawnReviewSummary(
     followups: cachedBefore?.followups,
     final_at: cachedBefore?.final_at,
     error: cachedBefore?.error,
+    ...retroFields(cachedBefore),
   };
 
   const { pid, child, done } = spawnRuntime(
@@ -499,6 +523,7 @@ export async function spawnReviewSummary(
 
     const generatedAt = new Date().toISOString();
     const successful = !finalOutput.error;
+    const latestBeforeSave = getReviewSummary(request.pr_url) || cachedBefore;
     const next = {
       ...request,
       summary: successful
@@ -524,6 +549,7 @@ export async function spawnReviewSummary(
         followupReview || finalOutput.error ? cachedBefore?.followups || [] : [],
       final_at: undefined,
       current_run_pid: undefined,
+      ...retroFields(latestBeforeSave),
     };
     const saved = await upsertReviewSummary(next);
     if (onComplete) {

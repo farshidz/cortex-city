@@ -193,6 +193,108 @@ test("config route reads and updates Cortex config", () => {
   );
 });
 
+test("review learnings route reads and writes the learnings file", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const learningsRoute = await loadRoute("./src/app/api/reviews/learnings/route.ts");
+      fs.writeFileSync(
+        path.join(cortexDir, "review-learnings.md"),
+        "# Review learnings\\n"
+      );
+      const initial = await json(await learningsRoute.GET());
+      assert.deepEqual(initial.body, {
+        content: "# Review learnings\\n",
+        enabled: true,
+      });
+
+      const updated = await json(
+        await learningsRoute.PUT(
+          request("http://localhost/api/reviews/learnings", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ content: "- Manual lesson\\n" }),
+          })
+        )
+      );
+      assert.deepEqual(updated.body, {
+        content: "- Manual lesson\\n",
+        enabled: true,
+      });
+      assert.equal(
+        fs.readFileSync(path.join(cortexDir, "review-learnings.md"), "utf-8"),
+        "- Manual lesson\\n"
+      );
+    `)
+  );
+});
+
+test("review learnings route rejects malformed content", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const learningsRoute = await loadRoute("./src/app/api/reviews/learnings/route.ts");
+      fs.writeFileSync(
+        path.join(cortexDir, "review-learnings.md"),
+        "# Keep me\\n"
+      );
+
+      const missing = await json(
+        await learningsRoute.PUT(
+          request("http://localhost/api/reviews/learnings", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({}),
+          })
+        )
+      );
+
+      assert.equal(missing.status, 400);
+      assert.deepEqual(missing.body, {
+        error: "content must be a string",
+      });
+      assert.equal(
+        fs.readFileSync(path.join(cortexDir, "review-learnings.md"), "utf-8"),
+        "# Keep me\\n"
+      );
+
+      const numeric = await json(
+        await learningsRoute.PUT(
+          request("http://localhost/api/reviews/learnings", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ content: 123 }),
+          })
+        )
+      );
+
+      assert.equal(numeric.status, 400);
+      assert.deepEqual(numeric.body, {
+        error: "content must be a string",
+      });
+      assert.equal(
+        fs.readFileSync(path.join(cortexDir, "review-learnings.md"), "utf-8"),
+        "# Keep me\\n"
+      );
+
+      const cleared = await json(
+        await learningsRoute.PUT(
+          request("http://localhost/api/reviews/learnings", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ content: "" }),
+          })
+        )
+      );
+
+      assert.equal(cleared.status, 200);
+      assert.equal(cleared.body.content, "");
+      assert.equal(
+        fs.readFileSync(path.join(cortexDir, "review-learnings.md"), "utf-8"),
+        ""
+      );
+    `)
+  );
+});
+
 test("prompts route returns templates with missing cleanup fallback", () => {
   runRouteAssertions(
     withCortexState(`

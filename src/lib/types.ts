@@ -163,6 +163,7 @@ export interface OrchestratorConfig {
   review_effort?: TaskEffort;
   review_model?: string;
   max_parallel_reviews?: number;
+  review_learning_enabled?: boolean;
 }
 
 export type PRStatus =
@@ -237,6 +238,14 @@ export interface ReviewSummary extends ReviewRequest {
   agent_review_status?: ReviewAgentStatus;
   followups?: ReviewFollowup[];
   final_at?: string;
+  final_state?: "merged" | "closed";
+  final_state_lookup_started_at?: string;
+  final_state_lookup_error_started_at?: string;
+  final_state_lookup_error?: string;
+  retro_status?: "pending" | "done" | "error";
+  retro_done_at?: string;
+  retro_run_pid?: number;
+  retro_error?: string;
   current_run_pid?: number;
 }
 
@@ -266,6 +275,7 @@ export interface ChildTaskSummary {
 
 export interface ActiveSession {
   kind: "task" | "review";
+  run_kind?: "review" | "review_retro";
   // For tasks this is the task id; for reviews it's the PR URL (used as the
   // stable key in .cortex/reviews.json).
   task_id: string;

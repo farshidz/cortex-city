@@ -96,6 +96,18 @@ function hasActiveReviewPid(
   return typeof review.current_run_pid === "number";
 }
 
+function hasActiveReviewRetroPid(
+  review: ReviewSummary
+): review is ReviewSummary & { retro_run_pid: number } {
+  return typeof review.retro_run_pid === "number";
+}
+
+function reviewSessionTitle(review: ReviewSummary): string {
+  return review.title
+    ? `${review.repo_slug}#${review.pr_number} — ${review.title}`
+    : `${review.repo_slug}#${review.pr_number}`;
+}
+
 function getLiveActiveSessions(
   tasks: Task[],
   reviews: ReviewSummary[]
@@ -122,10 +134,9 @@ function getLiveActiveSessions(
     .filter((r) => isPidAlive(r.current_run_pid))
     .map((r) => ({
       kind: "review",
+      run_kind: "review",
       task_id: r.pr_url,
-      task_title: r.title
-        ? `${r.repo_slug}#${r.pr_number} — ${r.title}`
-        : `${r.repo_slug}#${r.pr_number}`,
+      task_title: reviewSessionTitle(r),
       agent: r.runtime || "review",
       session_id: r.session_id || "pending",
       pid: r.current_run_pid,
@@ -133,7 +144,22 @@ function getLiveActiveSessions(
       status: "running" as const,
     }));
 
-  return [...taskSessions, ...reviewSessions];
+  const retroSessions: ActiveSession[] = reviews
+    .filter(hasActiveReviewRetroPid)
+    .filter((r) => isPidAlive(r.retro_run_pid))
+    .map((r) => ({
+      kind: "review",
+      run_kind: "review_retro",
+      task_id: r.pr_url,
+      task_title: `${reviewSessionTitle(r)} — review retro`,
+      agent: `${r.runtime || "review"} retro`,
+      session_id: "retro",
+      pid: r.retro_run_pid,
+      started_at: r.final_at || r.updated_at || new Date().toISOString(),
+      status: "running" as const,
+    }));
+
+  return [...taskSessions, ...reviewSessions, ...retroSessions];
 }
 
 export function getOrchestrator() {
@@ -189,10 +215,32 @@ export function getOrchestrator() {
         return false;
       }
     },
-    killReviewSession(prUrl: string): boolean {
+    killReviewSession(
+      prUrl: string,
+      runKind?: ActiveSession["run_kind"]
+    ): boolean {
       const review = readReviewSummaries().find((r) => r.pr_url === prUrl);
-      const pid = review?.current_run_pid;
+      const target =
+        runKind === "review_retro"
+          ? "retro"
+          : runKind === "review"
+            ? "review"
+            : review?.current_run_pid != null
+              ? "review"
+              : review?.retro_run_pid != null
+                ? "retro"
+                : undefined;
+      const pid =
+        target === "retro" ? review?.retro_run_pid : review?.current_run_pid;
       if (!pid) return false;
+      const updates: Partial<ReviewSummary> =
+        target === "retro"
+          ? {
+              retro_run_pid: undefined,
+              retro_status: "error",
+              retro_error: "Retro run stopped by user.",
+            }
+          : { current_run_pid: undefined };
       try {
         process.kill(pid, "SIGTERM");
         setTimeout(() => {
@@ -200,10 +248,10 @@ export function getOrchestrator() {
             process.kill(pid, "SIGKILL");
           } catch {}
         }, 5000);
-        void patchReviewSummary(prUrl, { current_run_pid: undefined });
+        void patchReviewSummary(prUrl, updates);
         return true;
       } catch {
-        void patchReviewSummary(prUrl, { current_run_pid: undefined });
+        void patchReviewSummary(prUrl, updates);
         return false;
       }
     },

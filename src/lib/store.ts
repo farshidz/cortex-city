@@ -133,6 +133,7 @@ export function readConfig(): OrchestratorConfig {
   return {
     ...defaults,
     ...rest,
+    review_learning_enabled: rest.review_learning_enabled ?? true,
     default_agent_runner:
       rest.default_agent_runner || legacyRunner || defaults.default_agent_runner,
     default_permission_mode:
@@ -156,6 +157,7 @@ function getDefaultConfig(): OrchestratorConfig {
     task_run_timeout_ms: DEFAULT_TASK_RUN_TIMEOUT_MS,
     default_permission_mode: "bypassPermissions",
     default_agent_runner: "claude",
+    review_learning_enabled: true,
     agents: {},
   };
 }

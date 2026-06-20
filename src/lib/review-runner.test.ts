@@ -130,6 +130,73 @@ test("resolveReviewPrompt prefers the configured prompt and falls back to the de
   assert.equal(resolveReviewPrompt(blank), DEFAULT_REVIEW_PROMPT);
 });
 
+test("buildReviewWrapperPrompt injects review learnings when enabled and non-empty", () => {
+  const workspace = setupRunnerWorkspace("review-runner-learnings-");
+  const request = sampleRequest();
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { buildReviewWrapperPrompt } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+    ],
+    `
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const cortexDir = path.join(process.cwd(), ".cortex");
+      fs.mkdirSync(cortexDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(cortexDir, "review-learnings.md"),
+        "- Check repo-tagged lessons only for matching repositories.\\n"
+      );
+      const prompt = buildReviewWrapperPrompt(
+        ${JSON.stringify(baseConfig({ review_learning_enabled: true }))},
+        ${JSON.stringify(request)}
+      );
+      console.log(JSON.stringify({ prompt }));
+    `,
+    prependBinToPath(workspace)
+  );
+
+  assert.match(result.prompt, /## Lessons from past reviews/);
+  assert.match(result.prompt, /Check repo-tagged lessons/);
+  assert.ok(
+    result.prompt.indexOf("## Lessons from past reviews") <
+      result.prompt.indexOf(`Review this PR: ${request.pr_url}`)
+  );
+});
+
+test("buildReviewWrapperPrompt omits review learnings when disabled or empty", () => {
+  const workspace = setupRunnerWorkspace("review-runner-learnings-disabled-");
+  const request = sampleRequest();
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { buildReviewWrapperPrompt } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+    ],
+    `
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const cortexDir = path.join(process.cwd(), ".cortex");
+      fs.mkdirSync(cortexDir, { recursive: true });
+      fs.writeFileSync(path.join(cortexDir, "review-learnings.md"), "- Keep this hidden.\\n");
+      const disabled = buildReviewWrapperPrompt(
+        ${JSON.stringify(baseConfig({ review_learning_enabled: false }))},
+        ${JSON.stringify(request)}
+      );
+      fs.writeFileSync(path.join(cortexDir, "review-learnings.md"), "");
+      const empty = buildReviewWrapperPrompt(
+        ${JSON.stringify(baseConfig({ review_learning_enabled: true }))},
+        ${JSON.stringify(request)}
+      );
+      console.log(JSON.stringify({ disabled, empty }));
+    `,
+    prependBinToPath(workspace)
+  );
+
+  assert.doesNotMatch(result.disabled, /## Lessons from past reviews/);
+  assert.doesNotMatch(result.disabled, /Keep this hidden/);
+  assert.doesNotMatch(result.empty, /## Lessons from past reviews/);
+});
+
 test("parseReviewAgentStatus reads the exact agent status marker", () => {
   assert.equal(
     parseReviewAgentStatus("## Agent Status\nAgent status: `ready_for_human_approval`"),
@@ -188,6 +255,78 @@ test("summarizePR persists Claude output as a ReviewSummary", () => {
   assert.equal(result.persisted.summary, "## Summary\nLooks fine.");
   assert.equal(result.persisted.summary_head_sha, request.head_sha);
   assert.equal(result.persisted.session_id, "claude-session-1");
+});
+
+test("spawnReviewSummary preserves retro state during summary refreshes", () => {
+  const workspace = setupRunnerWorkspace("review-runner-retro-preserve-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-session-retro",
+        result: "## Summary\nUpdated.",
+        is_error: false,
+      }),
+      sleepMs: 100,
+    },
+  });
+
+  const request = sampleRequest();
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify(
+      {
+        [request.pr_url]: {
+          ...request,
+          summary: "old summary",
+          summary_head_sha: request.head_sha,
+          generated_at: "2026-05-01T00:00:00.000Z",
+          retro_status: "pending",
+          retro_run_pid: 60_000,
+        },
+      },
+      null,
+      2
+    )
+  );
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary, readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const spawned = await spawnReviewSummary(${JSON.stringify(request)}, { runtime: "claude" });
+      const during = readReviewSummaryMap()[${JSON.stringify(request.pr_url)}];
+      await patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+        retro_status: "done",
+        retro_done_at: "2026-05-01T00:20:00.000Z",
+        retro_run_pid: undefined,
+        retro_error: undefined,
+      });
+      const summary = await spawned.done;
+      console.log(JSON.stringify({
+        during,
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  assert.equal(result.during.retro_status, "pending");
+  assert.equal(result.during.retro_run_pid, 60_000);
+  assert.equal(result.summary.summary, "## Summary\nUpdated.");
+  assert.equal(result.persisted.retro_status, "done");
+  assert.equal(result.persisted.retro_done_at, "2026-05-01T00:20:00.000Z");
+  assert.equal(result.persisted.retro_run_pid, undefined);
+  assert.equal(result.persisted.retro_error, undefined);
 });
 
 test("summarizePR resumes cached review sessions for changed PRs", () => {

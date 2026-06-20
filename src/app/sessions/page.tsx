@@ -50,7 +50,11 @@ export default function SessionsPage() {
     await fetch("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ task_id: session.task_id, kind: session.kind }),
+      body: JSON.stringify({
+        task_id: session.task_id,
+        kind: session.kind,
+        run_kind: session.run_kind,
+      }),
     });
     mutateSessions();
   }
@@ -161,12 +165,18 @@ export default function SessionsPage() {
       {sessions && sessions.length > 0 ? (
         <div className="grid gap-3">
           {sessions.map((session) => (
-            <Card key={`${session.kind}:${session.task_id}`}>
+            <Card
+              key={`${session.kind}:${session.run_kind || "run"}:${session.task_id}`}
+            >
               <CardHeader className="py-3">
                 <div className="flex items-center justify-between gap-2">
                   <CardTitle className="text-base flex items-center gap-2">
                     <Badge variant={session.kind === "review" ? "secondary" : "default"}>
-                      {session.kind === "review" ? "Review" : "Task"}
+                      {session.run_kind === "review_retro"
+                        ? "Review retro"
+                        : session.kind === "review"
+                          ? "Review"
+                          : "Task"}
                     </Badge>
                     <span>{session.task_title}</span>
                   </CardTitle>

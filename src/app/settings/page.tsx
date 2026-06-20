@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import type {
   AgentRuntime,
@@ -33,13 +34,23 @@ import { getEffortOptions, getPermissionOptions } from "@/lib/runtime-config";
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const UNSET_VALUE = "__unset__";
 
+interface ReviewLearningsResponse {
+  content: string;
+  enabled: boolean;
+}
+
 export default function SettingsPage() {
   const { data: config, mutate } = useSWR<OrchestratorConfig>(
     "/api/config",
     fetcher
   );
+  const { data: learnings, mutate: mutateLearnings } =
+    useSWR<ReviewLearningsResponse>("/api/reviews/learnings", fetcher);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<OrchestratorConfig | null>(null);
+  const [learningsEditing, setLearningsEditing] = useState(false);
+  const [learningsSaving, setLearningsSaving] = useState(false);
+  const [learningsContent, setLearningsContent] = useState("");
   const permissionOptions = form
     ? getPermissionOptions(form.default_agent_runner)
     : [];
@@ -49,6 +60,14 @@ export default function SettingsPage() {
     const handle = requestAnimationFrame(() => setForm(config));
     return () => cancelAnimationFrame(handle);
   }, [config, form]);
+
+  useEffect(() => {
+    if (!learnings || learningsEditing) return;
+    const handle = requestAnimationFrame(() =>
+      setLearningsContent(learnings.content)
+    );
+    return () => cancelAnimationFrame(handle);
+  }, [learnings, learningsEditing]);
 
   function handleRunnerChange(value: string) {
     if (!form) return;
@@ -75,6 +94,29 @@ export default function SettingsPage() {
     });
     mutate();
     setSaving(false);
+  }
+
+  async function saveLearnings() {
+    setLearningsSaving(true);
+    await fetch("/api/reviews/learnings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: learningsContent }),
+    });
+    await mutateLearnings();
+    setLearningsEditing(false);
+    setLearningsSaving(false);
+  }
+
+  function toggleLearningsEditing() {
+    if (learningsEditing) {
+      setLearningsContent(learnings?.content ?? "");
+      setLearningsEditing(false);
+      return;
+    }
+    if (!learnings) return;
+    setLearningsContent(learnings.content);
+    setLearningsEditing(true);
   }
 
   if (!form) return <div className="text-muted-foreground">Loading...</div>;
@@ -339,6 +381,57 @@ export default function SettingsPage() {
               }
             />
           </div>
+          <div className="flex items-center gap-2">
+            <Switch
+              checked={form.review_learning_enabled !== false}
+              onCheckedChange={(checked) =>
+                setForm({
+                  ...form,
+                  review_learning_enabled: checked,
+                })
+              }
+            />
+            <Label>Learning enabled</Label>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">Review learnings</CardTitle>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={toggleLearningsEditing}
+              disabled={!learnings && !learningsEditing}
+            >
+              {learningsEditing ? "Cancel" : "Edit"}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {learningsEditing ? (
+            <>
+              <Textarea
+                rows={10}
+                value={learningsContent}
+                onChange={(e) => setLearningsContent(e.target.value)}
+              />
+              <Button
+                type="button"
+                onClick={saveLearnings}
+                disabled={learningsSaving}
+              >
+                {learningsSaving ? "Saving..." : "Save"}
+              </Button>
+            </>
+          ) : (
+            <pre className="max-h-80 overflow-auto rounded-md border bg-muted/30 p-3 text-sm whitespace-pre-wrap">
+              {learnings?.content?.trim() || "No review learnings recorded yet."}
+            </pre>
+          )}
         </CardContent>
       </Card>
 

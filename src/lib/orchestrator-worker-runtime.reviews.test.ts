@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  FINAL_CLASSIFICATION_RETRY_MS,
   PRUNE_AGE_MS,
   pollOnce,
   type WorkerRuntimeDeps,
@@ -17,14 +18,18 @@ interface HarnessOptions {
   config?: Partial<OrchestratorConfig>;
   reviews?: Record<string, ReviewSummary>;
   openReviewRequests?: ReviewRequest[];
+  prFinalStates?: Record<string, "merged" | "closed" | null>;
+  isPRMergedOrClosed?: (prUrl: string) => Promise<"merged" | "closed" | null>;
   isPidRunning?: (pid: number) => boolean;
   spawnPid?: () => number;
+  learnings?: string;
 }
 
 interface Harness {
   deps: WorkerRuntimeDeps;
   reviews: Record<string, ReviewSummary>;
   spawnCalls: ReviewRequest[];
+  retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }>;
   deletedPrUrls: string[];
   activeReviewPids: Map<string, number>;
 }
@@ -72,6 +77,7 @@ function makeSummary(
 function makeHarness(options: HarnessOptions = {}): Harness {
   const reviews: Record<string, ReviewSummary> = { ...(options.reviews || {}) };
   const spawnCalls: ReviewRequest[] = [];
+  const retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }> = [];
   const deletedPrUrls: string[] = [];
   let nextPid = 50_000;
   const spawnPid = options.spawnPid || (() => nextPid++);
@@ -82,10 +88,16 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     getPRStatus: async () => "unknown",
     getReviewRequestedPRs: async () => options.openReviewRequests || [],
     getTask: async () => undefined,
-    isPRMergedOrClosed: async () => null,
+    isPRMergedOrClosed:
+      options.isPRMergedOrClosed ||
+      (async (prUrl) =>
+        options.prFinalStates && prUrl in options.prFinalStates
+          ? options.prFinalStates[prUrl]
+          : null),
     isPidRunning: options.isPidRunning || (() => true),
     logger: { log: () => {}, error: () => {} },
     readConfig: () => makeConfig(options.config),
+    readReviewLearnings: () => options.learnings || "",
     readReviewSummaries: () => Object.values(reviews),
     readReviewSummaryMap: () => ({ ...reviews }),
     readTasks: () => [],
@@ -114,6 +126,22 @@ function makeHarness(options: HarnessOptions = {}): Harness {
         })(),
       };
     },
+    spawnReviewRetro: async (review, learningsBefore) => {
+      retroCalls.push({ review, learningsBefore });
+      const pid = spawnPid();
+      reviews[review.pr_url] = {
+        ...withReviewStatus({
+          ...(reviews[review.pr_url] || review),
+          retro_status: "pending",
+          retro_run_pid: pid,
+        }),
+      };
+      return {
+        pid,
+        child: {} as never,
+        done: new Promise<void>(() => {}),
+      };
+    },
     updateTask: async () => ({}) as never,
     upsertReviewSummary: async (entry) => {
       reviews[entry.pr_url] = withReviewStatus(entry) as ReviewSummary;
@@ -129,6 +157,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     deps,
     reviews,
     spawnCalls,
+    retroCalls,
     deletedPrUrls,
     activeReviewPids: new Map(),
   };
@@ -267,6 +296,7 @@ test("pollOnce stamps final_at when a PR drops out of the live list", async () =
   const h = makeHarness({
     openReviewRequests: [],
     reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: "closed" },
   });
 
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
@@ -276,6 +306,473 @@ test("pollOnce stamps final_at when a PR drops out of the live list", async () =
   // Summary is preserved during the 24h grace period.
   assert.equal(stored.summary, "old summary");
   assert.equal(h.deletedPrUrls.length, 0);
+});
+
+test("pollOnce marks merged reviews pending and spawns one retro", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    agent_review_status: "needs_author_changes",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: "merged" },
+    learnings: "existing lessons",
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_state, "merged");
+  assert.equal(stored.retro_status, "pending");
+  assert.equal(stored.retro_run_pid, 50_000);
+  assert.equal(h.retroCalls.length, 1);
+  assert.equal(h.retroCalls[0].review.pr_url, pr.pr_url);
+  assert.equal(h.retroCalls[0].learningsBefore, "existing lessons");
+});
+
+test("pollOnce preserves terminal retro status when refinalizing merged reviews", async () => {
+  const done = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const errored = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: {
+      [done.pr_url]: makeSummary(done, {
+        summary: "done summary",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        retro_status: "done",
+        retro_done_at: "2026-05-01T00:20:00.000Z",
+      }),
+      [errored.pr_url]: makeSummary(errored, {
+        summary: "errored summary",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        retro_status: "error",
+        retro_error: "Retro failed.",
+      }),
+    },
+    prFinalStates: {
+      [done.pr_url]: "merged",
+      [errored.pr_url]: "merged",
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.ok(h.reviews[done.pr_url].final_at);
+  assert.equal(h.reviews[done.pr_url].final_state, "merged");
+  assert.equal(h.reviews[done.pr_url].retro_status, "done");
+  assert.equal(
+    h.reviews[done.pr_url].retro_done_at,
+    "2026-05-01T00:20:00.000Z"
+  );
+  assert.ok(h.reviews[errored.pr_url].final_at);
+  assert.equal(h.reviews[errored.pr_url].final_state, "merged");
+  assert.equal(h.reviews[errored.pr_url].retro_status, "error");
+  assert.equal(h.reviews[errored.pr_url].retro_error, "Retro failed.");
+  assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce stamps closed reviews without spawning retros", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: "closed" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_state, "closed");
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(stored.retro_run_pid, undefined);
+  assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce leaves unknown final review state retryable", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: null },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_at, undefined);
+  assert.equal(stored.final_state, undefined);
+  assert.ok(stored.final_state_lookup_started_at);
+  assert.equal(
+    stored.final_state_lookup_error,
+    "GitHub did not return merged or closed state."
+  );
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce keeps unknown final review state retryable after retry window", async () => {
+  const pr = makeRequest();
+  const retryStartedAt = new Date(
+    Date.now() - (FINAL_CLASSIFICATION_RETRY_MS + 60_000)
+  ).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_state_lookup_started_at: retryStartedAt,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: null },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_at, undefined);
+  assert.equal(stored.final_state, undefined);
+  assert.equal(stored.final_state_lookup_started_at, retryStartedAt);
+  assert.equal(stored.final_state_lookup_error_started_at, undefined);
+  assert.equal(
+    stored.final_state_lookup_error,
+    "GitHub did not return merged or closed state."
+  );
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(h.retroCalls.length, 0);
+  assert.deepEqual(h.deletedPrUrls, []);
+});
+
+test("pollOnce does not expire on first lookup error after long unknown state", async () => {
+  const pr = makeRequest();
+  const retryStartedAt = new Date(
+    Date.now() - (FINAL_CLASSIFICATION_RETRY_MS + 60_000)
+  ).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_state_lookup_started_at: retryStartedAt,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPRMergedOrClosed: async () => {
+      throw new Error("GitHub unavailable");
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_at, undefined);
+  assert.equal(stored.final_state, undefined);
+  assert.equal(stored.final_state_lookup_started_at, retryStartedAt);
+  assert.ok(stored.final_state_lookup_error_started_at);
+  assert.equal(stored.final_state_lookup_error, "GitHub unavailable");
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(h.retroCalls.length, 0);
+  assert.deepEqual(h.deletedPrUrls, []);
+});
+
+test("pollOnce finalizes repeated final-state lookup errors after retry window", async () => {
+  const pr = makeRequest();
+  const retryStartedAt = new Date(
+    Date.now() - (FINAL_CLASSIFICATION_RETRY_MS + 60_000)
+  ).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_state_lookup_started_at: retryStartedAt,
+    final_state_lookup_error_started_at: retryStartedAt,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPRMergedOrClosed: async () => {
+      throw new Error("GitHub unavailable");
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.ok(stored.final_at);
+  assert.equal(stored.final_state, undefined);
+  assert.equal(stored.final_state_lookup_started_at, undefined);
+  assert.match(
+    stored.final_state_lookup_error || "",
+    /Final-state lookup timed out.*GitHub unavailable/
+  );
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(h.retroCalls.length, 0);
+  assert.deepEqual(h.deletedPrUrls, []);
+});
+
+test("pollOnce continues finalizing reviews when classification throws", async () => {
+  const a = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const b = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const cachedA = makeSummary(a, {
+    summary: "old summary a",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const cachedB = makeSummary(b, {
+    summary: "old summary b",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [a.pr_url]: cachedA, [b.pr_url]: cachedB },
+    isPRMergedOrClosed: async (prUrl) => {
+      if (prUrl === a.pr_url) throw new Error("GitHub unavailable");
+      return "merged";
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.reviews[a.pr_url].final_at, undefined);
+  assert.equal(h.reviews[a.pr_url].final_state, undefined);
+  assert.equal(
+    h.reviews[a.pr_url].final_state_lookup_error,
+    "GitHub unavailable"
+  );
+  assert.equal(h.reviews[a.pr_url].retro_status, undefined);
+  assert.equal(h.reviews[b.pr_url].final_state, "merged");
+  assert.equal(h.reviews[b.pr_url].retro_status, "pending");
+  assert.equal(h.retroCalls.length, 1);
+  assert.equal(h.retroCalls[0].review.pr_url, b.pr_url);
+});
+
+test("pollOnce does not spawn retros when learning is disabled", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    config: { review_learning_enabled: false },
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: "merged" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.final_state, "merged");
+  assert.equal(stored.retro_status, undefined);
+  assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce serializes pending retros", async () => {
+  const a = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const b = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const finalAt = new Date().toISOString();
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: {
+      [a.pr_url]: makeSummary(a, {
+        summary: "summary a",
+        generated_at: finalAt,
+        final_at: finalAt,
+        final_state: "merged",
+        retro_status: "pending",
+      }),
+      [b.pr_url]: makeSummary(b, {
+        summary: "summary b",
+        generated_at: finalAt,
+        final_at: finalAt,
+        final_state: "merged",
+        retro_status: "pending",
+      }),
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.retroCalls.length, 1);
+  assert.equal(h.retroCalls[0].review.pr_url, a.pr_url);
+});
+
+test("pollOnce rehydrates a running persisted retro pid before scheduling", async () => {
+  const a = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const b = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const finalAt = new Date().toISOString();
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: {
+      [a.pr_url]: makeSummary(a, {
+        summary: "summary a",
+        generated_at: finalAt,
+        final_at: finalAt,
+        final_state: "merged",
+        retro_status: "pending",
+        retro_run_pid: 60_000,
+      }),
+      [b.pr_url]: makeSummary(b, {
+        summary: "summary b",
+        generated_at: finalAt,
+        final_at: finalAt,
+        final_state: "merged",
+        retro_status: "pending",
+      }),
+    },
+    isPidRunning: (pid) => pid === 60_000,
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.retroCalls.length, 0);
+  assert.equal(h.reviews[a.pr_url].retro_run_pid, 60_000);
+  assert.equal(h.reviews[b.pr_url].retro_run_pid, undefined);
+});
+
+test("pollOnce marks dead persisted retro pids as errors", async () => {
+  const pr = makeRequest();
+  const finalAt = new Date().toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_at: finalAt,
+    final_state: "merged",
+    retro_status: "pending",
+    retro_run_pid: 60_000,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPidRunning: () => false,
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.retroCalls.length, 0);
+  assert.equal(h.reviews[pr.pr_url].retro_status, "error");
+  assert.match(
+    h.reviews[pr.pr_url].retro_error || "",
+    /exited before completion/
+  );
+  assert.equal(h.reviews[pr.pr_url].retro_run_pid, undefined);
+});
+
+test("pollOnce keeps in-flight retros through the review GC window", async () => {
+  const pr = makeRequest();
+  const aged = new Date(Date.now() - (PRUNE_AGE_MS + 60_000)).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_at: aged,
+    final_state: "merged",
+    retro_status: "pending",
+    retro_run_pid: 60_000,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPidRunning: (pid) => pid === 60_000,
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.deletedPrUrls, []);
+  assert.ok(h.reviews[pr.pr_url]);
+});
+
+test("pollOnce keeps queued pending retros through the review GC window", async () => {
+  const inFlight = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/1",
+    pr_number: 1,
+  });
+  const queued = makeRequest({
+    pr_url: "https://github.com/acme/widget/pull/2",
+    pr_number: 2,
+  });
+  const aged = new Date(Date.now() - (PRUNE_AGE_MS + 60_000)).toISOString();
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: {
+      [inFlight.pr_url]: makeSummary(inFlight, {
+        summary: "in flight",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        final_at: aged,
+        final_state: "merged",
+        retro_status: "pending",
+        retro_run_pid: 60_000,
+      }),
+      [queued.pr_url]: makeSummary(queued, {
+        summary: "queued",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        final_at: aged,
+        final_state: "merged",
+        retro_status: "pending",
+      }),
+    },
+    isPidRunning: (pid) => pid === 60_000,
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.deletedPrUrls, []);
+  assert.ok(h.reviews[queued.pr_url]);
+  assert.equal(h.retroCalls.length, 0);
+});
+
+test("pollOnce prunes queued pending retros when learning is disabled", async () => {
+  const pr = makeRequest();
+  const aged = new Date(Date.now() - (PRUNE_AGE_MS + 60_000)).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "queued",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_at: aged,
+    final_state: "merged",
+    retro_status: "pending",
+  });
+  const h = makeHarness({
+    config: { review_learning_enabled: false },
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.deletedPrUrls, [pr.pr_url]);
+  assert.equal(h.reviews[pr.pr_url], undefined);
+  assert.equal(h.retroCalls.length, 0);
 });
 
 test("pollOnce deletes review entries whose final_at is older than the prune age", async () => {

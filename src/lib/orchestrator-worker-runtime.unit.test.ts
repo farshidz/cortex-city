@@ -147,6 +147,7 @@ test("completion callbacks leave newer active pids in place", async () => {
       default_agent_runner: "codex",
       agents: {},
     }),
+    readReviewLearnings: () => "",
     readReviewSummaries: () => [],
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
@@ -155,6 +156,11 @@ test("completion callbacks leave newer active pids in place", async () => {
       completions.push(onComplete);
       return { pid: nextPid++, child: {} as never };
     },
+    spawnReviewRetro: async () => ({
+      pid: 0,
+      child: {} as never,
+      done: Promise.resolve(),
+    }),
     spawnReviewSummary: async () => ({
       pid: nextPid++,
       child: {} as never,
@@ -210,11 +216,17 @@ test("pollOnce gives dead owned pids a grace window before resuming", async () =
       default_agent_runner: "codex",
       agents: {},
     }),
+    readReviewLearnings: () => "",
     readReviewSummaries: () => [],
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
     removeWorktree: async () => {},
     spawnAgentSession: async () => ({ pid: 202, child: {} as never }),
+    spawnReviewRetro: async () => ({
+      pid: 0,
+      child: {} as never,
+      done: Promise.resolve(),
+    }),
     spawnReviewSummary: async () => ({
       pid: 303,
       child: {} as never,
@@ -277,6 +289,7 @@ test("pollOnce rechecks latest review hash before launching review run", async (
       default_agent_runner: "codex",
       agents: {},
     }),
+    readReviewLearnings: () => "",
     readReviewSummaries: () => [],
     readReviewSummaryMap: () => ({}),
     readTasks: () => [staleTask],
@@ -285,6 +298,11 @@ test("pollOnce rechecks latest review hash before launching review run", async (
       spawnedTasks.push(task);
       return { pid: 202, child: {} as never };
     },
+    spawnReviewRetro: async () => ({
+      pid: 0,
+      child: {} as never,
+      done: Promise.resolve(),
+    }),
     spawnReviewSummary: async () => ({
       pid: 303,
       child: {} as never,
@@ -334,6 +352,7 @@ test("pollOnce launches a pending reviewer run before feedback handling", async 
       default_agent_runner: "codex",
       agents: {},
     }),
+    readReviewLearnings: () => "",
     readReviewSummaries: () => [],
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
@@ -343,6 +362,11 @@ test("pollOnce launches a pending reviewer run before feedback handling", async 
       launchedModes.push(mode);
       return { pid: 202, child: {} as never };
     },
+    spawnReviewRetro: async () => ({
+      pid: 0,
+      child: {} as never,
+      done: Promise.resolve(),
+    }),
     spawnReviewSummary: async () => ({
       pid: 303,
       child: {} as never,
@@ -395,6 +419,7 @@ test("pollOnce skips paused open tasks", async () => {
       default_agent_runner: "codex",
       agents: {},
     }),
+    readReviewLearnings: () => "",
     readReviewSummaries: () => [],
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
@@ -403,6 +428,11 @@ test("pollOnce skips paused open tasks", async () => {
       launchedModes.push(mode);
       return { pid: 202, child: {} as never };
     },
+    spawnReviewRetro: async () => ({
+      pid: 0,
+      child: {} as never,
+      done: Promise.resolve(),
+    }),
     spawnReviewSummary: async () => ({
       pid: 303,
       child: {} as never,
@@ -457,6 +487,7 @@ test("pollOnce skips paused in_review tasks entirely", async () => {
       default_agent_runner: "codex",
       agents: {},
     }),
+    readReviewLearnings: () => "",
     readReviewSummaries: () => [],
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
@@ -465,6 +496,11 @@ test("pollOnce skips paused in_review tasks entirely", async () => {
       launchedModes.push(mode);
       return { pid: 202, child: {} as never };
     },
+    spawnReviewRetro: async () => ({
+      pid: 0,
+      child: {} as never,
+      done: Promise.resolve(),
+    }),
     spawnReviewSummary: async () => ({
       pid: 303,
       child: {} as never,
@@ -521,6 +557,7 @@ test("pollOnce skips pending reviewer runs when reviewer agent is disabled", asy
       default_agent_runner: "codex",
       agents: {},
     }),
+    readReviewLearnings: () => "",
     readReviewSummaries: () => [],
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
@@ -529,6 +566,11 @@ test("pollOnce skips pending reviewer runs when reviewer agent is disabled", asy
       launchedModes.push(mode);
       return { pid: 202, child: {} as never };
     },
+    spawnReviewRetro: async () => ({
+      pid: 0,
+      child: {} as never,
+      done: Promise.resolve(),
+    }),
     spawnReviewSummary: async () => ({
       pid: 303,
       child: {} as never,
