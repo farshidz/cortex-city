@@ -22,6 +22,7 @@ function sample(prUrl: string): ReviewSummary {
     summary: "",
     generated_at: "",
     review_status: "pending_summary",
+    review_state: "queued",
   };
 }
 
@@ -41,15 +42,18 @@ test("upsert / patch / delete roundtrip works in-process", async () => {
     const fetched = store.getReviewSummary(prUrl);
     assert.equal(fetched?.pr_url, prUrl);
     assert.equal(fetched?.review_status, "pending_summary");
+    assert.equal(fetched?.review_state, "queued");
 
     const patched = await store.patchReviewSummary(prUrl, { summary: "hi" });
     assert.equal(patched?.summary, "hi");
     assert.equal(patched?.review_status, "needs_review");
+    assert.equal(patched?.review_state, "needs_review");
 
     const allMap = store.readReviewSummaryMap();
     assert.ok(allMap[prUrl]);
     assert.equal(allMap[prUrl].summary, "hi");
     assert.equal(allMap[prUrl].review_status, "needs_review");
+    assert.equal(allMap[prUrl].review_state, "needs_review");
 
     const allList = store.readReviewSummaries();
     assert.ok(allList.find((r) => r.pr_url === prUrl));
