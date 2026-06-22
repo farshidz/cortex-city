@@ -1414,10 +1414,11 @@ test("review submit route clears the approval signal on request-changes", () => 
         (review) => review.pr_url === prUrl
       );
       assert.equal(after.my_approval_sha, undefined);
-      // The stale verdict is superseded so the row no longer shows "Ready to approve".
-      assert.equal(after.agent_review_status, undefined);
-      assert.notEqual(after.review_state, "approved");
-      assert.notEqual(after.review_state, "ready_to_approve");
+      // Requesting changes sets the change-request signal at the current head,
+      // which supersedes the stale verdict: the row shows "changes_requested",
+      // not the agent's "ready_to_approve".
+      assert.equal(after.my_changes_requested_sha, "abc123");
+      assert.equal(after.review_state, "changes_requested");
     `)
   );
 });

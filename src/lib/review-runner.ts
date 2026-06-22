@@ -566,6 +566,7 @@ export async function spawnReviewSummary(
       // spawn-time request so completion does not clobber them.
       my_last_review_sha: latestBeforeSave?.my_last_review_sha,
       my_approval_sha: latestBeforeSave?.my_approval_sha,
+      my_changes_requested_sha: latestBeforeSave?.my_changes_requested_sha,
       final_at: undefined,
       current_run_pid: undefined,
       ...retroFields(latestBeforeSave),

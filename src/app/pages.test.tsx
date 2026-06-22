@@ -825,6 +825,7 @@ test("merged review state presentation matches expected labels and classes", () 
     generation_failed: "Summary error",
     queued: "No summary yet",
     approved: "Approved",
+    changes_requested: "You requested changes",
     reviewed: "Up to date with your review",
     archived: "No longer live",
   });
@@ -839,6 +840,7 @@ test("merged review state presentation matches expected labels and classes", () 
     generation_failed: "bg-red-500/10",
     queued: "",
     approved: "bg-green-500/10",
+    changes_requested: "bg-yellow-500/10",
     reviewed: "bg-green-500/10",
     archived: "bg-muted/40 opacity-60",
   });
@@ -853,6 +855,7 @@ test("merged review state presentation matches expected labels and classes", () 
     generation_failed: "bg-red-100 text-red-800",
     queued: "bg-blue-100 text-blue-800",
     approved: "bg-green-100 text-green-800",
+    changes_requested: "bg-yellow-100 text-yellow-800",
     reviewed: "bg-green-100 text-green-800",
     archived: "bg-gray-100 text-gray-800",
   });

@@ -295,6 +295,36 @@ test("pollOnce clears a stale verdict when the approval is withdrawn", async () 
   assert.equal(h.spawnCalls.length, 0);
 });
 
+test("pollOnce threads a GitHub-side change request without a prior approval", async () => {
+  // The human requested changes directly on GitHub and had never approved, so
+  // my_approval_sha stays undefined (no withdrawal). The worker must still write
+  // through my_changes_requested_sha so deriveReviewState can supersede the
+  // stale agent verdict with "changes_requested".
+  const pr = makeRequest({
+    head_sha: "abc123",
+    my_last_review_sha: "abc123",
+    my_changes_requested_sha: "abc123",
+  });
+  const cached = makeSummary(
+    makeRequest({ head_sha: "abc123", my_last_review_sha: "old-sha" }),
+    {
+      summary: "previous summary",
+      generated_at: "2026-05-01T00:00:00.000Z",
+      agent_review_status: "ready_for_human_approval",
+    }
+  );
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: cached },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.my_changes_requested_sha, "abc123");
+  assert.equal(h.spawnCalls.length, 0);
+});
+
 test("pollOnce respects max_parallel_reviews", async () => {
   const a = makeRequest({
     pr_url: "https://github.com/acme/widget/pull/1",

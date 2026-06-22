@@ -396,6 +396,75 @@ test("spawnReviewSummary preserves review signals updated while the run is in fl
   assert.equal(result.persisted.review_state, "approved");
 });
 
+test("spawnReviewSummary keeps a mid-flight change request over the run's verdict", () => {
+  const workspace = setupRunnerWorkspace("review-runner-changes-preserve-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  // The run finishes with a non-blocking verdict; a human change request lands
+  // while it is in flight. The verdict must not bury the human's decision.
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-session-changes",
+        result:
+          "## Summary\nUpdated.\n\n## Agent Status\nAgent status: ready_for_human_approval",
+        is_error: false,
+      }),
+      sleepMs: 100,
+    },
+  });
+
+  const request = sampleRequest({ my_changes_requested_sha: undefined });
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify(
+      {
+        [request.pr_url]: {
+          ...request,
+          summary: "old summary",
+          summary_head_sha: request.head_sha,
+          generated_at: "2026-05-01T00:00:00.000Z",
+        },
+      },
+      null,
+      2
+    )
+  );
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary, readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const spawned = await spawnReviewSummary(${JSON.stringify(request)}, { runtime: "claude" });
+      await patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+        my_changes_requested_sha: ${JSON.stringify(request.head_sha)},
+        my_last_review_sha: ${JSON.stringify(request.head_sha)},
+      });
+      const summary = await spawned.done;
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  // The run parsed a ready_for_human_approval verdict, but the preserved change
+  // request supersedes it in the derived state.
+  assert.equal(
+    result.persisted.agent_review_status,
+    "ready_for_human_approval"
+  );
+  assert.equal(result.persisted.my_changes_requested_sha, request.head_sha);
+  assert.equal(result.persisted.review_state, "changes_requested");
+});
+
 test("summarizePR resumes cached review sessions for changed PRs", () => {
   const workspace = setupRunnerWorkspace("review-runner-stale-resume-");
   const scenarioFile = path.join(workspace, "scenario.json");

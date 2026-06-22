@@ -193,6 +193,11 @@ export interface ReviewRequest {
   // at the current head means the human has handled the review. Compared against
   // head_sha so a stale approval (from before new commits) does not count.
   my_approval_sha?: string;
+  // Symmetric to my_approval_sha: SHA at which the signed-in user's current
+  // decision review is a CHANGES_REQUESTED. Lets a human change request
+  // supersede a stale agent verdict. Compared against head_sha so a request
+  // from before new commits does not count.
+  my_changes_requested_sha?: string;
 }
 
 export type ReviewStatus =
@@ -225,6 +230,7 @@ export type ReviewState =
   | "needs_decision" // verdict: agent flagged advisory/uncertain points for you
   | "ready_to_approve" // verdict: agent found nothing blocking
   | "approved" // you approved this HEAD on GitHub (overrides the agent verdict)
+  | "changes_requested" // you requested changes on this HEAD (overrides the verdict)
   | "reviewed" // no verdict, summary current, you've reviewed this HEAD
   | "needs_review"; // no verdict, summary current, you haven't reviewed (fallback)
 
