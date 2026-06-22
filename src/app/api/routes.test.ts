@@ -1395,7 +1395,9 @@ test("review submit route clears the approval signal on request-changes", () => 
     withReviewState(`
       const reviewsPath = path.join(cortexDir, "reviews.json");
       const seeded = JSON.parse(fs.readFileSync(reviewsPath, "utf-8"));
+      // A stale agent verdict that must not survive a human "request changes".
       seeded[prUrl].my_approval_sha = "abc123";
+      seeded[prUrl].agent_review_status = "ready_for_human_approval";
       fs.writeFileSync(reviewsPath, JSON.stringify(seeded));
 
       const submitRoute = await loadRoute("./src/app/api/reviews/submit/route.ts");
@@ -1412,7 +1414,10 @@ test("review submit route clears the approval signal on request-changes", () => 
         (review) => review.pr_url === prUrl
       );
       assert.equal(after.my_approval_sha, undefined);
+      // The stale verdict is superseded so the row no longer shows "Ready to approve".
+      assert.equal(after.agent_review_status, undefined);
       assert.notEqual(after.review_state, "approved");
+      assert.notEqual(after.review_state, "ready_to_approve");
     `)
   );
 });

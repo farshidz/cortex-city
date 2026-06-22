@@ -418,8 +418,9 @@ export async function getMyLastReviewSha(
 //   getMyLastReviewSha; signature-blind, includes the agent's COMMENTED reviews).
 // - approval_sha: the commit of the user's current decision review, but only when
 //   that latest decision is an APPROVAL. Comment-only reviews are ignored so the
-//   agent's own COMMENTED reviews can't mask a real approval, and a later
-//   CHANGES_REQUESTED supersedes an earlier approval.
+//   agent's own COMMENTED reviews can't mask a real approval; a later
+//   CHANGES_REQUESTED supersedes an earlier approval; and a later DISMISSED
+//   (e.g. an approval that GitHub dismissed) means there is no active approval.
 export interface MyReviewSignals {
   last_review_sha?: string;
   approval_sha?: string;
@@ -445,8 +446,16 @@ export async function getMyReviewSignals(
     .filter((r) => r.state !== "PENDING")
     .sort(byNewest)[0];
 
+  // DISMISSED is included so that a dismissed review (GitHub's signal that a
+  // prior approval no longer counts) supersedes an older APPROVED instead of
+  // letting it fall through and be reported as an active approval.
   const latestDecision = [...mine]
-    .filter((r) => r.state === "APPROVED" || r.state === "CHANGES_REQUESTED")
+    .filter(
+      (r) =>
+        r.state === "APPROVED" ||
+        r.state === "CHANGES_REQUESTED" ||
+        r.state === "DISMISSED"
+    )
     .sort(byNewest)[0];
 
   return {

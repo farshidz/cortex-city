@@ -379,6 +379,44 @@ test("getMyReviewSignals sets the approval SHA when a comment follows my approva
   assert.deepEqual(result, { last_review_sha: "sha1", approval_sha: "sha1" });
 });
 
+test("getMyReviewSignals treats a dismissed approval as no active approval", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  // I approved at sha1, then that review was DISMISSED. GitHub no longer has an
+  // active approval, so the dismissal must supersede the older APPROVED.
+  const responses: Record<string, FakeGhResponse> = {
+    "api --paginate --slurp repos/acme/widget/pulls/1/reviews": {
+      stdout: JSON.stringify([
+        [
+          {
+            user: { login: "me" },
+            commit_id: "sha1",
+            state: "APPROVED",
+            submitted_at: "2026-05-01T00:00:00Z",
+          },
+          {
+            user: { login: "me" },
+            commit_id: "sha1",
+            state: "DISMISSED",
+            submitted_at: "2026-05-02T00:00:00Z",
+          },
+        ],
+      ]),
+    },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { getMyReviewSignals } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const signals = await getMyReviewSignals(${JSON.stringify(prUrl)}, "me");
+      console.log(JSON.stringify(signals));
+    `
+  );
+  // Latest decision-affecting state is DISMISSED -> no approval (key dropped).
+  assert.deepEqual(result, { last_review_sha: "sha1" });
+});
+
 test("getReviewRequestedPRs drops entries missing a head SHA", () => {
   const workspace = setupWorkspace();
   const searchResults = [

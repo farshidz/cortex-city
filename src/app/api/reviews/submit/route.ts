@@ -30,13 +30,17 @@ export async function POST(request: NextRequest) {
   // Optimistically reflect the decision in the cached record so the UI updates
   // immediately; the worker reconciles against GitHub on its next poll. We just
   // reviewed the current head, so the review is at head_sha. Approving sets the
-  // approval signal (-> "approved" state); any other decision clears it.
+  // approval signal (-> "approved" state). A non-approval decision clears the
+  // approval signal AND supersedes any stale agent verdict, so the row can't
+  // keep showing e.g. "Ready to approve" after the human has requested changes.
   if (decision !== "comment") {
     const cached = getReviewSummary(prUrl);
     if (cached?.head_sha) {
+      const approving = decision === "approve";
       await patchReviewSummary(prUrl, {
         my_last_review_sha: cached.head_sha,
-        my_approval_sha: decision === "approve" ? cached.head_sha : undefined,
+        my_approval_sha: approving ? cached.head_sha : undefined,
+        agent_review_status: approving ? cached.agent_review_status : undefined,
       });
     }
   }
