@@ -618,10 +618,19 @@ async function runReviewPhases(
     const reviewShaChanged =
       cached.my_last_review_sha !== pr.my_last_review_sha ||
       cached.my_approval_sha !== pr.my_approval_sha;
+    // An approval going set -> undefined means the human requested changes or
+    // dismissed their approval on GitHub. That supersedes any stale agent
+    // verdict (mirrors the submit route) so the row can't keep showing e.g.
+    // "Ready to approve" after the approval was withdrawn.
+    const approvalWithdrawn =
+      Boolean(cached.my_approval_sha) && !pr.my_approval_sha;
     if (wasFinal || reviewShaChanged || hadFinalLookup) {
       await deps.upsertReviewSummary({
         ...cached,
         ...prFieldsFromRequest(pr),
+        agent_review_status: approvalWithdrawn
+          ? undefined
+          : cached.agent_review_status,
         final_at: undefined,
         final_state: undefined,
         final_state_lookup_started_at: undefined,

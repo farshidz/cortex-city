@@ -547,6 +547,12 @@ export async function spawnReviewSummary(
         : cachedBefore?.agent_review_status,
       followups:
         followupReview || finalOutput.error ? cachedBefore?.followups || [] : [],
+      // Review signals are owned by the worker poll and the submit route, which
+      // may have updated them (e.g. an optimistic approval) while this run was
+      // in flight. Preserve the latest persisted values rather than the stale
+      // spawn-time request so completion does not clobber them.
+      my_last_review_sha: latestBeforeSave?.my_last_review_sha,
+      my_approval_sha: latestBeforeSave?.my_approval_sha,
       final_at: undefined,
       current_run_pid: undefined,
       ...retroFields(latestBeforeSave),

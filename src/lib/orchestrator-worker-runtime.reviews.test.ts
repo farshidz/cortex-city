@@ -260,6 +260,41 @@ test("pollOnce refreshes my_last_review_sha when the cached value changes", asyn
   assert.equal(h.spawnCalls.length, 0);
 });
 
+test("pollOnce clears a stale verdict when the approval is withdrawn", async () => {
+  // I had approved the current head (approval recorded alongside an agent
+  // verdict). Then I requested changes / dismissed on GitHub, so this poll
+  // reports no approval. The stale verdict must be superseded, otherwise the
+  // row would keep showing "Ready to approve" after the approval was withdrawn.
+  const pr = makeRequest({
+    head_sha: "abc123",
+    my_last_review_sha: "abc123",
+    my_approval_sha: undefined,
+  });
+  const cached = makeSummary(
+    makeRequest({
+      head_sha: "abc123",
+      my_last_review_sha: "abc123",
+      my_approval_sha: "abc123",
+    }),
+    {
+      summary: "previous summary",
+      generated_at: "2026-05-01T00:00:00.000Z",
+      agent_review_status: "ready_for_human_approval",
+    }
+  );
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: cached },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.my_approval_sha, undefined);
+  assert.equal(stored.agent_review_status, undefined);
+  assert.equal(h.spawnCalls.length, 0);
+});
+
 test("pollOnce respects max_parallel_reviews", async () => {
   const a = makeRequest({
     pr_url: "https://github.com/acme/widget/pull/1",
