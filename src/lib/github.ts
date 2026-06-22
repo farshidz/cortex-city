@@ -421,9 +421,13 @@ export async function getMyLastReviewSha(
 //   agent's own COMMENTED reviews can't mask a real approval; a later
 //   CHANGES_REQUESTED supersedes an earlier approval; and a later DISMISSED
 //   (e.g. an approval that GitHub dismissed) means there is no active approval.
+// - changes_requested_sha: the symmetric signal — set only when the user's latest
+//   decision is CHANGES_REQUESTED. Lets a human change request supersede a stale
+//   agent verdict the same way an approval does.
 export interface MyReviewSignals {
   last_review_sha?: string;
   approval_sha?: string;
+  changes_requested_sha?: string;
 }
 
 export async function getMyReviewSignals(
@@ -462,6 +466,10 @@ export async function getMyReviewSignals(
     last_review_sha: lastReview?.commit_id || undefined,
     approval_sha:
       latestDecision?.state === "APPROVED"
+        ? latestDecision.commit_id || undefined
+        : undefined,
+    changes_requested_sha:
+      latestDecision?.state === "CHANGES_REQUESTED"
         ? latestDecision.commit_id || undefined
         : undefined,
   };
@@ -529,6 +537,7 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
         updated_at: pr.updatedAt || "",
         my_last_review_sha: signals.last_review_sha,
         my_approval_sha: signals.approval_sha,
+        my_changes_requested_sha: signals.changes_requested_sha,
       };
     })
   );

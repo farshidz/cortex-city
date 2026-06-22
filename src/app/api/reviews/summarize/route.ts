@@ -48,6 +48,7 @@ export async function POST(request: NextRequest) {
       updated_at: cached.updated_at,
       my_last_review_sha: cached.my_last_review_sha,
       my_approval_sha: cached.my_approval_sha,
+      my_changes_requested_sha: cached.my_changes_requested_sha,
     },
     overrides
   );

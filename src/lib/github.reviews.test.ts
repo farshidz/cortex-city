@@ -338,9 +338,13 @@ test("getMyReviewSignals reports approval only when my latest decision is an app
       console.log(JSON.stringify(changesRequested));
     `
   );
-  // Latest decision is CHANGES_REQUESTED -> no approval (key dropped by JSON);
+  // Latest decision is CHANGES_REQUESTED -> no approval (approval key dropped by
+  // JSON), changes_requested_sha set at sha2; a later COMMENTED must not mask it.
   // last review SHA tracks the most recent non-pending review (COMMENTED at sha2).
-  assert.deepEqual(result, { last_review_sha: "sha2" });
+  assert.deepEqual(result, {
+    last_review_sha: "sha2",
+    changes_requested_sha: "sha2",
+  });
 });
 
 test("getMyReviewSignals sets the approval SHA when a comment follows my approval", () => {

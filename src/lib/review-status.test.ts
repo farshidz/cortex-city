@@ -141,6 +141,10 @@ test("deriveReviewState returns every merged review state", () => {
     "approved"
   );
   assert.equal(
+    deriveReviewState({ ...stateBase, my_changes_requested_sha: "head-sha" }),
+    "changes_requested"
+  );
+  assert.equal(
     deriveReviewState({ ...stateBase, my_last_review_sha: "head-sha" }),
     "reviewed"
   );
@@ -228,6 +232,24 @@ test("deriveReviewState enforces precedence and verdict-wins", () => {
       agent_review_status: "needs_human_decision",
     }),
     "needs_decision"
+  );
+  // a change request at the current HEAD beats any agent verdict.
+  assert.equal(
+    deriveReviewState({
+      ...stateBase,
+      my_changes_requested_sha: "head-sha",
+      agent_review_status: "ready_for_human_approval",
+    }),
+    "changes_requested"
+  );
+  // a stale change request (from before new commits) does not count; verdict wins.
+  assert.equal(
+    deriveReviewState({
+      ...stateBase,
+      my_changes_requested_sha: "old-sha",
+      agent_review_status: "ready_for_human_approval",
+    }),
+    "ready_to_approve"
   );
   // verdict wins over the "you've reviewed this HEAD" signal.
   assert.equal(

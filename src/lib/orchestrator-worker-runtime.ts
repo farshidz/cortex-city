@@ -533,6 +533,7 @@ function prFieldsFromRequest(request: ReviewRequest) {
     updated_at: request.updated_at,
     my_last_review_sha: request.my_last_review_sha,
     my_approval_sha: request.my_approval_sha,
+    my_changes_requested_sha: request.my_changes_requested_sha,
   };
 }
 
@@ -617,7 +618,8 @@ async function runReviewPhases(
     );
     const reviewShaChanged =
       cached.my_last_review_sha !== pr.my_last_review_sha ||
-      cached.my_approval_sha !== pr.my_approval_sha;
+      cached.my_approval_sha !== pr.my_approval_sha ||
+      cached.my_changes_requested_sha !== pr.my_changes_requested_sha;
     // An approval going set -> undefined means the human requested changes or
     // dismissed their approval on GitHub. That supersedes any stale agent
     // verdict (mirrors the submit route) so the row can't keep showing e.g.
