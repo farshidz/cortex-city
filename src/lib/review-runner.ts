@@ -128,6 +128,16 @@ export function buildReviewWrapperPrompt(
     "",
     "Cortex City review protocol:",
     "- Start the generated review with `## Summary` and put the summary before any findings.",
+    [
+      "- The `## Summary` must always be a standalone, self-contained description of",
+      "the PR in its current state, written for a reader who has not seen any prior",
+      "review or summary. Describe what the PR does and your assessment of it as it",
+      "stands now. Do not write it as an update or a diff against a previous review:",
+      "no references to an earlier summary, to what changed since last time, or to",
+      'comments being "addressed", "resolved", or "still unresolved". Any such',
+      "follow-up or delta reasoning belongs in your GitHub comments and the agent",
+      "status only, never in the summary.",
+    ].join(" "),
     "- Then include `## Agent Status` with one exact line: `Agent status: <status>`.",
     `- The status must be one of: ${REVIEW_AGENT_STATUSES.join(", ")}.`,
     [
@@ -152,6 +162,9 @@ export function buildReviewWrapperPrompt(
     sections.push(
       "",
       "This is a follow-up review because the PR changed since your previous review.",
+      "The follow-up context below guides your GitHub comments and agent status only.",
+      "It must not change how you write the summary: the `## Summary` is still a",
+      "standalone description of the PR's current state, as instructed above.",
       `Previously reviewed head SHA: ${reviewedHeadSha}`,
       `Current head SHA: ${request.head_sha}`,
       [
@@ -164,7 +177,7 @@ export function buildReviewWrapperPrompt(
       ].join(" "),
       [
         "If a prior required-change comment is still unresolved, do not duplicate",
-        "the same comment; reflect that in the generated review and status.",
+        "the same comment; reflect that in your agent status.",
       ].join(" "),
       [
         "Review the current PR fresh as well, and leave new GitHub comments for",
