@@ -12,6 +12,7 @@ export interface ReviewStatusInput {
 
 export interface ReviewStateInput extends ReviewStatusInput {
   agent_review_status?: ReviewAgentStatus;
+  my_approval_sha?: string;
 }
 
 // Attention ordering for the merged state (lower sorts higher in the list).
@@ -26,6 +27,7 @@ const REVIEW_STATE_SORT_GROUP: Record<ReviewState, number> = {
   re_reviewing: 1,
   generation_failed: 1,
   queued: 1,
+  approved: 2,
   reviewed: 2,
   archived: 3,
 };
@@ -51,9 +53,18 @@ export function deriveReviewStatus(review: ReviewStatusInput): ReviewStatus {
 
 // Merge the pipeline/freshness axis and the agent verdict axis into one state.
 // Precedence (top wins): archived > generating > generation_failed > queued >
-// re_reviewing > verdict > reviewed/needs_review. "Verdict wins" means a current
-// agent verdict beats the (signature-blind, unreliable) "you've reviewed" signal,
-// which only ever surfaces as `reviewed` when no verdict is present.
+// re_reviewing > approved > verdict > reviewed/needs_review.
+//
+// "Approved wins over the verdict": a human approval at the current head is the
+// strongest "handled" signal. Unlike `my_last_review_sha` (signature-blind, so
+// the agent's own COMMENTED reviews flip it), an approval is agent-free because
+// the reviewer agent never approves — so it is safe to let it beat the verdict.
+// It is gated on the current head, so a stale approval from before new commits
+// does not count (HEAD moving also clears the verdict and triggers re_reviewing).
+//
+// Below approval, "verdict wins" still holds: a current agent verdict beats the
+// (unreliable) "you've reviewed" signal, which only surfaces as `reviewed` when
+// no verdict is present.
 export function deriveReviewState(review: ReviewStateInput): ReviewState {
   const hasSummary = Boolean(review.summary?.trim());
 
@@ -65,6 +76,10 @@ export function deriveReviewState(review: ReviewStateInput): ReviewState {
   // Summary present: a stale summary means HEAD moved (verdict already cleared).
   const summaryHeadSha = review.summary_head_sha || review.head_sha;
   if (summaryHeadSha !== review.head_sha) return "re_reviewing";
+
+  if (review.my_approval_sha && review.my_approval_sha === review.head_sha) {
+    return "approved";
+  }
 
   if (review.agent_review_status) {
     return AGENT_STATUS_TO_STATE[review.agent_review_status];

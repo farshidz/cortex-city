@@ -532,6 +532,7 @@ function prFieldsFromRequest(request: ReviewRequest) {
     created_at: request.created_at,
     updated_at: request.updated_at,
     my_last_review_sha: request.my_last_review_sha,
+    my_approval_sha: request.my_approval_sha,
   };
 }
 
@@ -615,7 +616,8 @@ async function runReviewPhases(
       cached.final_state_lookup_started_at || cached.final_state_lookup_error
     );
     const reviewShaChanged =
-      cached.my_last_review_sha !== pr.my_last_review_sha;
+      cached.my_last_review_sha !== pr.my_last_review_sha ||
+      cached.my_approval_sha !== pr.my_approval_sha;
     if (wasFinal || reviewShaChanged || hadFinalLookup) {
       await deps.upsertReviewSummary({
         ...cached,

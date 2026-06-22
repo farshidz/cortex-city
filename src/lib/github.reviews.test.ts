@@ -229,17 +229,24 @@ test("getReviewRequestedPRs unions requested and reviewed PRs, then enriches wit
     pr_url: string;
     head_sha: string;
     my_last_review_sha?: string;
+    my_approval_sha?: string;
   }>;
   assert.equal(prs.length, 3);
   assert.equal(prs[0].pr_url, "https://github.com/acme/widget/pull/1");
   assert.equal(prs[0].head_sha, "abc123");
   // PR #1: my latest non-pending review is at abc123 (matches head — "up to date").
   assert.equal(prs[0].my_last_review_sha, "abc123");
+  // PR #1: my latest decision review is the APPROVAL at abc123 (== head),
+  // so the approval signal is set even though a COMMENTED review also exists.
+  assert.equal(prs[0].my_approval_sha, "abc123");
   // PR #2: I have never reviewed.
   assert.equal(prs[1].my_last_review_sha, undefined);
+  assert.equal(prs[1].my_approval_sha, undefined);
   // PR #3: I already reviewed it, so it stays visible after GitHub clears the request.
   assert.equal(prs[2].pr_url, "https://github.com/acme/widget/pull/3");
   assert.equal(prs[2].my_last_review_sha, "ghi789");
+  // PR #3: only a COMMENTED review — not an approval.
+  assert.equal(prs[2].my_approval_sha, undefined);
   assert.equal(
     prs.some((pr) => pr.pr_url === "https://github.com/acme/widget/pull/4"),
     false
@@ -281,6 +288,95 @@ test("getMyLastReviewSha returns undefined when login is empty or no reviews mat
   );
   assert.equal((result as { noLogin: unknown }).noLogin, null);
   assert.equal((result as { noMatch: unknown }).noMatch, null);
+});
+
+test("getMyReviewSignals reports approval only when my latest decision is an approval", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  // My reviews, oldest to newest: APPROVED at sha1, then CHANGES_REQUESTED at
+  // sha2, then a COMMENTED at sha2. Latest decision is CHANGES_REQUESTED, so no
+  // approval — and the COMMENTED review must not mask that. The agent's own
+  // COMMENTED review is a different login and is ignored.
+  const responses: Record<string, FakeGhResponse> = {
+    "api --paginate --slurp repos/acme/widget/pulls/1/reviews": {
+      stdout: JSON.stringify([
+        [
+          {
+            user: { login: "me" },
+            commit_id: "sha1",
+            state: "APPROVED",
+            submitted_at: "2026-05-01T00:00:00Z",
+          },
+          {
+            user: { login: "me" },
+            commit_id: "sha2",
+            state: "CHANGES_REQUESTED",
+            submitted_at: "2026-05-02T00:00:00Z",
+          },
+          {
+            user: { login: "me" },
+            commit_id: "sha2",
+            state: "COMMENTED",
+            submitted_at: "2026-05-03T00:00:00Z",
+          },
+          {
+            user: { login: "cortex-bot" },
+            commit_id: "sha2",
+            state: "COMMENTED",
+            submitted_at: "2026-05-04T00:00:00Z",
+          },
+        ],
+      ]),
+    },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { getMyReviewSignals } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const changesRequested = await getMyReviewSignals(${JSON.stringify(prUrl)}, "me");
+      console.log(JSON.stringify(changesRequested));
+    `
+  );
+  // Latest decision is CHANGES_REQUESTED -> no approval (key dropped by JSON);
+  // last review SHA tracks the most recent non-pending review (COMMENTED at sha2).
+  assert.deepEqual(result, { last_review_sha: "sha2" });
+});
+
+test("getMyReviewSignals sets the approval SHA when a comment follows my approval", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/1";
+  // I approved at sha1, then left a plain comment. My decision is still APPROVED.
+  const responses: Record<string, FakeGhResponse> = {
+    "api --paginate --slurp repos/acme/widget/pulls/1/reviews": {
+      stdout: JSON.stringify([
+        [
+          {
+            user: { login: "me" },
+            commit_id: "sha1",
+            state: "APPROVED",
+            submitted_at: "2026-05-01T00:00:00Z",
+          },
+          {
+            user: { login: "me" },
+            commit_id: "sha1",
+            state: "COMMENTED",
+            submitted_at: "2026-05-02T00:00:00Z",
+          },
+        ],
+      ]),
+    },
+  };
+  const { result } = runGhScript(
+    workspace,
+    `import { getMyReviewSignals } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const signals = await getMyReviewSignals(${JSON.stringify(prUrl)}, "me");
+      console.log(JSON.stringify(signals));
+    `
+  );
+  assert.deepEqual(result, { last_review_sha: "sha1", approval_sha: "sha1" });
 });
 
 test("getReviewRequestedPRs drops entries missing a head SHA", () => {
