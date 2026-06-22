@@ -413,6 +413,60 @@ export async function getMyLastReviewSha(
   return mine[0].commit_id || undefined;
 }
 
+// Fetch the signed-in user's review signals for a PR in a single reviews call:
+// - last_review_sha: most recent non-PENDING review's commit (matches
+//   getMyLastReviewSha; signature-blind, includes the agent's COMMENTED reviews).
+// - approval_sha: the commit of the user's current decision review, but only when
+//   that latest decision is an APPROVAL. Comment-only reviews are ignored so the
+//   agent's own COMMENTED reviews can't mask a real approval; a later
+//   CHANGES_REQUESTED supersedes an earlier approval; and a later DISMISSED
+//   (e.g. an approval that GitHub dismissed) means there is no active approval.
+export interface MyReviewSignals {
+  last_review_sha?: string;
+  approval_sha?: string;
+}
+
+export async function getMyReviewSignals(
+  prUrl: string,
+  login: string
+): Promise<MyReviewSignals> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr || !login) return {};
+  const reviews = await execPaginatedArrayStrict<PRReviewItem>(
+    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
+  );
+  if (!reviews) return {};
+  const mine = reviews.filter((r) => r.user?.login === login && r.commit_id);
+  if (mine.length === 0) return {};
+
+  const byNewest = (a: PRReviewItem, b: PRReviewItem) =>
+    (b.submitted_at || "").localeCompare(a.submitted_at || "");
+
+  const lastReview = [...mine]
+    .filter((r) => r.state !== "PENDING")
+    .sort(byNewest)[0];
+
+  // DISMISSED is included so that a dismissed review (GitHub's signal that a
+  // prior approval no longer counts) supersedes an older APPROVED instead of
+  // letting it fall through and be reported as an active approval.
+  const latestDecision = [...mine]
+    .filter(
+      (r) =>
+        r.state === "APPROVED" ||
+        r.state === "CHANGES_REQUESTED" ||
+        r.state === "DISMISSED"
+    )
+    .sort(byNewest)[0];
+
+  return {
+    last_review_sha: lastReview?.commit_id || undefined,
+    approval_sha:
+      latestDecision?.state === "APPROVED"
+        ? latestDecision.commit_id || undefined
+        : undefined,
+  };
+}
+
 export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
   let myLogin = "";
   const requestedSearch = searchOpenReviewPRs("user-review-requested:@me");
@@ -452,11 +506,13 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
         return null;
       }
 
-      const [headData, myLastReviewSha] = await Promise.all([
+      const [headData, signals] = await Promise.all([
         execJsonStrict<PRViewResult>(`gh pr view ${url} --json headRefOid`),
         myLogin
-          ? getMyLastReviewSha(url, myLogin).catch(() => undefined)
-          : Promise.resolve(undefined),
+          ? getMyReviewSignals(url, myLogin).catch(
+              (): MyReviewSignals => ({})
+            )
+          : Promise.resolve<MyReviewSignals>({}),
       ]);
 
       const headSha = headData?.headRefOid?.trim() || "";
@@ -471,7 +527,8 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
         head_sha: headSha,
         created_at: pr.createdAt || "",
         updated_at: pr.updatedAt || "",
-        my_last_review_sha: myLastReviewSha,
+        my_last_review_sha: signals.last_review_sha,
+        my_approval_sha: signals.approval_sha,
       };
     })
   );

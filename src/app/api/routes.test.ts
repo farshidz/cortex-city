@@ -1353,6 +1353,75 @@ test("review submit route invokes gh for valid submissions", () => {
   );
 });
 
+test("review submit route flips an approved PR out of the agent verdict state", () => {
+  runRouteAssertions(
+    withReviewState(`
+      // Seed an open agent verdict so the row currently reads "needs your decision".
+      const reviewsPath = path.join(cortexDir, "reviews.json");
+      const seeded = JSON.parse(fs.readFileSync(reviewsPath, "utf-8"));
+      seeded[prUrl].agent_review_status = "needs_human_decision";
+      fs.writeFileSync(reviewsPath, JSON.stringify(seeded));
+
+      const reviewsRoute = await loadRoute("./src/app/api/reviews/route.ts");
+      const before = (await json(await reviewsRoute.GET())).body.find(
+        (review) => review.pr_url === prUrl
+      );
+      assert.equal(before.review_state, "needs_decision");
+
+      const submitRoute = await loadRoute("./src/app/api/reviews/submit/route.ts");
+      const submitted = await json(
+        await submitRoute.POST(
+          request("http://localhost/api/reviews/submit", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ pr_url: prUrl, decision: "approve", body: "LGTM" }),
+          })
+        )
+      );
+      assert.deepEqual(submitted.body, { ok: true });
+
+      // Approving the current head sets the approval signal and overrides the verdict.
+      const after = (await json(await reviewsRoute.GET())).body.find(
+        (review) => review.pr_url === prUrl
+      );
+      assert.equal(after.my_approval_sha, "abc123");
+      assert.equal(after.review_state, "approved");
+    `)
+  );
+});
+
+test("review submit route clears the approval signal on request-changes", () => {
+  runRouteAssertions(
+    withReviewState(`
+      const reviewsPath = path.join(cortexDir, "reviews.json");
+      const seeded = JSON.parse(fs.readFileSync(reviewsPath, "utf-8"));
+      // A stale agent verdict that must not survive a human "request changes".
+      seeded[prUrl].my_approval_sha = "abc123";
+      seeded[prUrl].agent_review_status = "ready_for_human_approval";
+      fs.writeFileSync(reviewsPath, JSON.stringify(seeded));
+
+      const submitRoute = await loadRoute("./src/app/api/reviews/submit/route.ts");
+      await submitRoute.POST(
+        request("http://localhost/api/reviews/submit", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ pr_url: prUrl, decision: "request-changes", body: "Please fix" }),
+        })
+      );
+
+      const reviewsRoute = await loadRoute("./src/app/api/reviews/route.ts");
+      const after = (await json(await reviewsRoute.GET())).body.find(
+        (review) => review.pr_url === prUrl
+      );
+      assert.equal(after.my_approval_sha, undefined);
+      // The stale verdict is superseded so the row no longer shows "Ready to approve".
+      assert.equal(after.agent_review_status, undefined);
+      assert.notEqual(after.review_state, "approved");
+      assert.notEqual(after.review_state, "ready_to_approve");
+    `)
+  );
+});
+
 test("review summarize route validates cached review state", () => {
   runRouteAssertions(
     withReviewState(`

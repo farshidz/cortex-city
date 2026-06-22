@@ -329,6 +329,73 @@ test("spawnReviewSummary preserves retro state during summary refreshes", () => 
   assert.equal(result.persisted.retro_error, undefined);
 });
 
+test("spawnReviewSummary preserves review signals updated while the run is in flight", () => {
+  const workspace = setupRunnerWorkspace("review-runner-approval-preserve-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  // Delay the run so the mid-flight approval patch lands before completion.
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-session-approval",
+        result: "## Summary\nUpdated.",
+        is_error: false,
+      }),
+      sleepMs: 100,
+    },
+  });
+
+  // The spawn-time request has no approval (it was captured before the user
+  // approved). An optimistic approval is recorded while the run is in flight.
+  const request = sampleRequest({ my_approval_sha: undefined });
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify(
+      {
+        [request.pr_url]: {
+          ...request,
+          summary: "old summary",
+          summary_head_sha: request.head_sha,
+          generated_at: "2026-05-01T00:00:00.000Z",
+        },
+      },
+      null,
+      2
+    )
+  );
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary, readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const spawned = await spawnReviewSummary(${JSON.stringify(request)}, { runtime: "claude" });
+      await patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+        my_approval_sha: ${JSON.stringify(request.head_sha)},
+        my_last_review_sha: ${JSON.stringify(request.head_sha)},
+      });
+      const summary = await spawned.done;
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  // Completion must not roll the signals back to the stale spawn-time request.
+  assert.equal(result.summary.summary, "## Summary\nUpdated.");
+  assert.equal(result.persisted.my_approval_sha, request.head_sha);
+  assert.equal(result.persisted.my_last_review_sha, request.head_sha);
+  assert.equal(result.persisted.review_state, "approved");
+});
+
 test("summarizePR resumes cached review sessions for changed PRs", () => {
   const workspace = setupRunnerWorkspace("review-runner-stale-resume-");
   const scenarioFile = path.join(workspace, "scenario.json");
