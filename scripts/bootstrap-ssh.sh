@@ -11,6 +11,7 @@ Bootstrap a fresh Linux host for Cortex City. The script connects over SSH and:
   - installs gh, codex, claude, and wrangler
   - creates the app user/group
   - creates /opt/cortex-city/app and /etc/cortex-city
+  - creates /opt/cortex-city/app/tmp for Cortex-owned service temp files
   - creates starter web.env and worker.env files
   - verifies systemd is available
   - reads deploy credentials from .env.prod by default
@@ -243,6 +244,7 @@ fi
 \$SUDO install -d -m 755 -o \"\$APP_USER\" -g \"\$APP_GROUP\" \"\$APP_DIR\"
 \$SUDO install -d -m 755 -o \"\$APP_USER\" -g \"\$APP_GROUP\" \"\$APP_DIR/.deploy\"
 \$SUDO install -d -m 755 -o \"\$APP_USER\" -g \"\$APP_GROUP\" \"\$APP_DIR/logs\"
+\$SUDO install -d -m 700 -o \"\$APP_USER\" -g \"\$APP_GROUP\" \"\$APP_DIR/tmp\"
 \$SUDO install -d -m 755 -o \"\$APP_USER\" -g \"\$APP_GROUP\" \"\$APP_DIR/.cortex\"
 \$SUDO install -d -m 755 \"\$CONFIG_DIR\"
 

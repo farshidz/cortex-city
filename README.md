@@ -248,12 +248,20 @@ Service templates are included under `deploy/systemd/`:
 
 - `deploy/systemd/cortex-city-web.service`
 - `deploy/systemd/cortex-city-worker.service`
+- `deploy/systemd/cortex-city-host-metrics.service`
+- `deploy/systemd/cortex-city-disk-hygiene.service`
+- `deploy/systemd/cortex-city-disk-hygiene.timer`
 
 Recommended production model:
 
 - `cortex-city-web.service` runs `npm run start`
 - `cortex-city-worker.service` runs `npm run worker`
-- both services use `Restart=always`
+- `cortex-city-host-metrics.service` writes compact host diagnostics every 60 seconds
+- `cortex-city-disk-hygiene.timer` runs daily cleanup for old logs and service-user caches
+- all Cortex services set `TMPDIR`, `TMP`, and `TEMP` to `/opt/cortex-city/app/tmp`
+  so review/build scratch files stay in a Cortex-owned temp directory instead
+  of accumulating in shared `/tmp`
+- the long-running web, worker, and host metrics services use `Restart=always`
 - `CORTEX_ENABLE_WORKER_AUTOSTART=0`
 
 The worker reconciles live task PIDs on every poll, so `systemd` restarts do not lose track of interrupted work or overcount parallel session slots.
@@ -270,10 +278,72 @@ The script syncs the repo to a remote staging release under `.deploy/staging/`,
 runs `npm ci` and `npm run build` there while the current services keep
 running, upgrades the remote Codex CLI to `@openai/codex@latest`, then
 publishes the staged release, installs rendered `systemd` units, and restarts
-the web, worker, and host metrics services. By default it deploys as the
+the web, worker, host metrics, and disk hygiene timer units. By default it deploys as the
 `cortex` service user created by bootstrap; override `SYSTEMD_USER`,
 `SYSTEMD_GROUP`, `REMOTE_OWNER`, and `REMOTE_GROUP` if you want a different
 account. Override `REMOTE_STAGING_BASE` to place staged releases somewhere else.
+
+### Production disk hygiene
+
+Production disk pressure is controlled in two layers:
+
+- Host metrics are compact by default: `HOST_METRICS_INTERVAL_SECONDS=60`,
+  `HOST_METRICS_RETENTION_DAYS=3`, and `HOST_METRICS_MODE=compact`. Override
+  these in `/etc/cortex-city/host-metrics.env` if you need a temporary incident
+  window with more detail, for example `HOST_METRICS_MODE=verbose` or
+  `HOST_METRICS_DETAIL_EVERY=1`.
+- `scripts/cortex-disk-hygiene.sh` prunes old `logs/host-metrics-*.log`,
+  `logs/server-*.log`, task session logs, npm/pnpm caches, stale
+  Playwright/Puppeteer browser cache directories, and stale known-safe temp
+  prefixes from `/tmp` and `/opt/cortex-city/app/tmp`. It intentionally does
+  not delete `.cortex/repos/*/.worktrees`, so active task worktrees are outside
+  the maintenance script's scope.
+- Deploy and bootstrap create `/opt/cortex-city/app/tmp` with `0700` ownership
+  for the `cortex` service user. Deploy also builds staged releases with
+  `TMPDIR` pointed at the staging directory, which prevents `npm ci`/build
+  scratch files from spilling into shared `/tmp`.
+
+The script is dry-run by default:
+
+```bash
+sudo -u cortex -H /opt/cortex-city/app/scripts/cortex-disk-hygiene.sh --dry-run --app-dir /opt/cortex-city/app
+```
+
+Apply cleanup manually with:
+
+```bash
+sudo -u cortex -H /opt/cortex-city/app/scripts/cortex-disk-hygiene.sh --apply --app-dir /opt/cortex-city/app
+```
+
+Deploy installs `cortex-city-disk-hygiene.timer`, which runs the same command
+daily around 03:30 with a randomized delay. Tune retention in
+`/etc/cortex-city/disk-hygiene.env`:
+
+```bash
+CORTEX_APP_LOG_RETENTION_DAYS=14
+CORTEX_TASK_LOG_RETENTION_DAYS=14
+HOST_METRICS_RETENTION_DAYS=3
+CORTEX_CACHE_RETENTION_DAYS=14
+CORTEX_BROWSER_CACHE_RETENTION_DAYS=14
+CORTEX_TMP_RETENTION_DAYS=2
+CORTEX_TMP_DIR=/opt/cortex-city/app/tmp
+CORTEX_TMP_SCAN_DIRS=/tmp:/opt/cortex-city/app/tmp
+CORTEX_PRUNE_OWNED_TMP_ALL=1
+CORTEX_TMP_USE_LSOF=1
+CORTEX_NPM_CACHE_ACTION=clean   # clean, verify, or skip
+CORTEX_PNPM_STORE_ACTION=prune  # prune or skip
+```
+
+If you do not use the included timer, schedule the apply command from cron or
+another host scheduler during an off-hours window and run the dry run first.
+The `/tmp` cleaner only considers entries owned by the service user and matching
+known Cortex/review prefixes such as `cloud_control_plane*`, `ccp-*`,
+`agentic-chat-*`, `aws-cdk-lib-review*`, `immutable_inputs*`,
+`codex-schema-*`, and `node-compile-cache*`. It skips entries with recent
+contents and, when `lsof` is available, entries with open files. Operators
+should still watch shared `/tmp` after major runtime/tooling changes; add new
+safe prefixes through the script only after confirming they are disposable
+scratch data.
 
 For first-time host setup, run:
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=Cortex City disk hygiene cleanup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cortex
+Group=cortex
+WorkingDirectory=/opt/cortex-city/app
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=TMPDIR=/opt/cortex-city/app/tmp
+Environment=TMP=/opt/cortex-city/app/tmp
+Environment=TEMP=/opt/cortex-city/app/tmp
+Environment=CORTEX_TMP_DIR=/opt/cortex-city/app/tmp
+EnvironmentFile=-/etc/cortex-city/disk-hygiene.env
+ExecStart=/usr/bin/env bash ./scripts/cortex-disk-hygiene.sh --apply

@@ -11,6 +11,7 @@ built release into place and restarts the Cortex City services.
 
 Environment overrides:
   APP_DIR=/opt/cortex-city/app
+  SERVICE_TMP_DIR=/opt/cortex-city/app/tmp
   CONFIG_DIR=/etc/cortex-city
   WEB_ENV_FILE=/etc/cortex-city/web.env
   WORKER_ENV_FILE=/etc/cortex-city/worker.env
@@ -21,6 +22,9 @@ Environment overrides:
   WEB_SERVICE_NAME=cortex-city-web.service
   WORKER_SERVICE_NAME=cortex-city-worker.service
   HOST_METRICS_SERVICE_NAME=cortex-city-host-metrics.service
+  DISK_HYGIENE_SERVICE_NAME=cortex-city-disk-hygiene.service
+  DISK_HYGIENE_TIMER_NAME=cortex-city-disk-hygiene.timer
+  DISK_HYGIENE_ENV_FILE=/etc/cortex-city/disk-hygiene.env
   REMOTE_SYSTEMD_DIR=/etc/systemd/system
   REMOTE_STAGING_BASE=/opt/cortex-city/app/.deploy/staging
   SSH_PORT=22
@@ -55,7 +59,21 @@ render_service() {
     -e "s|^User=.*$|User=$SYSTEMD_USER|" \
     -e "s|^Group=.*$|Group=$SYSTEMD_GROUP|" \
     -e "s|^WorkingDirectory=.*$|WorkingDirectory=$APP_DIR|" \
+    -e "s|^Environment=TMPDIR=.*$|Environment=TMPDIR=$SERVICE_TMP_DIR|" \
+    -e "s|^Environment=TMP=.*$|Environment=TMP=$SERVICE_TMP_DIR|" \
+    -e "s|^Environment=TEMP=.*$|Environment=TEMP=$SERVICE_TMP_DIR|" \
+    -e "s|^Environment=CORTEX_TMP_DIR=.*$|Environment=CORTEX_TMP_DIR=$SERVICE_TMP_DIR|" \
     -e "s|^EnvironmentFile=.*$|EnvironmentFile=-$env_file|" \
+    "$src" > "$dest"
+}
+
+render_timer() {
+  local src="$1"
+  local dest="$2"
+  local unit_name="$3"
+
+  sed \
+    -e "s|^Unit=.*$|Unit=$unit_name|" \
     "$src" > "$dest"
 }
 
@@ -79,12 +97,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 APP_DIR="${2:-${APP_DIR:-/opt/cortex-city/app}}"
+SERVICE_TMP_DIR="${SERVICE_TMP_DIR:-$APP_DIR/tmp}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/cortex-city}"
 WEB_ENV_FILE="${WEB_ENV_FILE:-$CONFIG_DIR/web.env}"
 WORKER_ENV_FILE="${WORKER_ENV_FILE:-$CONFIG_DIR/worker.env}"
+DISK_HYGIENE_ENV_FILE="${DISK_HYGIENE_ENV_FILE:-$CONFIG_DIR/disk-hygiene.env}"
 WEB_SERVICE_NAME="${WEB_SERVICE_NAME:-cortex-city-web.service}"
 WORKER_SERVICE_NAME="${WORKER_SERVICE_NAME:-cortex-city-worker.service}"
 HOST_METRICS_SERVICE_NAME="${HOST_METRICS_SERVICE_NAME:-cortex-city-host-metrics.service}"
+DISK_HYGIENE_SERVICE_NAME="${DISK_HYGIENE_SERVICE_NAME:-cortex-city-disk-hygiene.service}"
+DISK_HYGIENE_TIMER_NAME="${DISK_HYGIENE_TIMER_NAME:-cortex-city-disk-hygiene.timer}"
 REMOTE_SYSTEMD_DIR="${REMOTE_SYSTEMD_DIR:-/etc/systemd/system}"
 REMOTE_STAGING_BASE="${REMOTE_STAGING_BASE:-$APP_DIR/.deploy/staging}"
 SSH_PORT="${SSH_PORT:-22}"
@@ -150,6 +172,14 @@ render_service \
   "$REPO_ROOT/deploy/systemd/cortex-city-host-metrics.service" \
   "$tmpdir/systemd/$HOST_METRICS_SERVICE_NAME" \
   "$CONFIG_DIR/host-metrics.env"
+render_service \
+  "$REPO_ROOT/deploy/systemd/cortex-city-disk-hygiene.service" \
+  "$tmpdir/systemd/$DISK_HYGIENE_SERVICE_NAME" \
+  "$DISK_HYGIENE_ENV_FILE"
+render_timer \
+  "$REPO_ROOT/deploy/systemd/cortex-city-disk-hygiene.timer" \
+  "$tmpdir/systemd/$DISK_HYGIENE_TIMER_NAME" \
+  "$DISK_HYGIENE_SERVICE_NAME"
 
 log "Checking remote prerequisites on $REMOTE"
 run_remote "
@@ -172,9 +202,11 @@ log "Preparing remote staging directories"
 run_remote "
 set -euo pipefail
 $SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$APP_DIR")
+$SUDO install -d -m 700 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$SERVICE_TMP_DIR")
 $SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$REMOTE_STAGING_BASE")
 $SUDO rm -rf $(quote "$REMOTE_STAGING_DIR")
 $SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$REMOTE_STAGING_DIR")
+$SUDO install -d -m 700 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$REMOTE_STAGING_DIR/.tmp")
 $SUDO install -d -m 755 -o $(quote "$REMOTE_OWNER") -g $(quote "$REMOTE_GROUP") $(quote "$REMOTE_RENDER_DIR")
 $SUDO install -d -m 755 $(quote "$CONFIG_DIR")
 $SUDO find $(quote "$REMOTE_STAGING_BASE") -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} +
@@ -189,6 +221,8 @@ rsync -az --delete \
   --exclude='.env.*' \
   --exclude='.cortex/' \
   --exclude='.deploy/' \
+  --exclude='.tmp/' \
+  --exclude='tmp/' \
   --exclude='logs/' \
   --exclude='.DS_Store' \
   --rsync-path="$SUDO rsync" \
@@ -205,7 +239,7 @@ log "Installing dependencies and rebuilding staged release"
 run_remote "
 set -euo pipefail
 $SUDO chown -R $(quote "$SYSTEMD_USER:$SYSTEMD_GROUP") $(quote "$REMOTE_STAGING_DIR")
-$SUDO -u $(quote "$SYSTEMD_USER") -H env CORTEX_COMMIT_SHA=$(quote "$BUILD_COMMIT_SHA") sh -lc 'cd $(printf '%q' "$REMOTE_STAGING_DIR") && npm ci && npm run build'
+$SUDO -u $(quote "$SYSTEMD_USER") -H env CORTEX_COMMIT_SHA=$(quote "$BUILD_COMMIT_SHA") TMPDIR=$(quote "$REMOTE_STAGING_DIR/.tmp") TMP=$(quote "$REMOTE_STAGING_DIR/.tmp") TEMP=$(quote "$REMOTE_STAGING_DIR/.tmp") sh -lc 'cd $(printf '%q' "$REMOTE_STAGING_DIR") && npm ci && npm run build'
 "
 
 log "Publishing staged release and restarting services"
@@ -214,19 +248,25 @@ set -euo pipefail
 $SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$WEB_SERVICE_NAME") $(quote "$REMOTE_SYSTEMD_DIR/$WEB_SERVICE_NAME")
 $SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$WORKER_SERVICE_NAME") $(quote "$REMOTE_SYSTEMD_DIR/$WORKER_SERVICE_NAME")
 $SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$HOST_METRICS_SERVICE_NAME") $(quote "$REMOTE_SYSTEMD_DIR/$HOST_METRICS_SERVICE_NAME")
-$SUDO touch $(quote "$WEB_ENV_FILE") $(quote "$WORKER_ENV_FILE")
+$SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$DISK_HYGIENE_SERVICE_NAME") $(quote "$REMOTE_SYSTEMD_DIR/$DISK_HYGIENE_SERVICE_NAME")
+$SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$DISK_HYGIENE_TIMER_NAME") $(quote "$REMOTE_SYSTEMD_DIR/$DISK_HYGIENE_TIMER_NAME")
+$SUDO touch $(quote "$WEB_ENV_FILE") $(quote "$WORKER_ENV_FILE") $(quote "$CONFIG_DIR/host-metrics.env") $(quote "$DISK_HYGIENE_ENV_FILE")
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
+$SUDO systemctl enable $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME") $(quote "$DISK_HYGIENE_TIMER_NAME")
 $SUDO rsync -a --delete-delay --delay-updates \
   --exclude='.cortex/' \
   --exclude='.deploy/' \
+  --exclude='.tmp/' \
+  --exclude='tmp/' \
   --exclude='.env' \
   --exclude='.env.*' \
   --exclude='logs/' \
   $(quote "$REMOTE_STAGING_DIR/") $(quote "$APP_DIR/")
+$SUDO install -d -m 700 -o $(quote "$SYSTEMD_USER") -g $(quote "$SYSTEMD_GROUP") $(quote "$SERVICE_TMP_DIR")
 $SUDO chown -R $(quote "$SYSTEMD_USER:$SYSTEMD_GROUP") $(quote "$APP_DIR")
 $SUDO systemctl restart $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
-$SUDO systemctl --no-pager --full --lines=0 status $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
+$SUDO systemctl restart $(quote "$DISK_HYGIENE_TIMER_NAME")
+$SUDO systemctl --no-pager --full --lines=0 status $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME") $(quote "$DISK_HYGIENE_TIMER_NAME")
 $SUDO rm -rf $(quote "$REMOTE_STAGING_DIR")
 "
 

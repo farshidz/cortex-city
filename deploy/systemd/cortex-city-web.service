@@ -11,6 +11,9 @@ WorkingDirectory=/opt/cortex-city/app
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=CORTEX_ENABLE_WORKER_AUTOSTART=0
+Environment=TMPDIR=/opt/cortex-city/app/tmp
+Environment=TMP=/opt/cortex-city/app/tmp
+Environment=TEMP=/opt/cortex-city/app/tmp
 EnvironmentFile=-/etc/cortex-city/web.env
 ExecStart=/usr/bin/env npm run start -- --hostname 0.0.0.0
 Restart=always

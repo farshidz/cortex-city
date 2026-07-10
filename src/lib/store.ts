@@ -1,22 +1,40 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "fs";
 import path from "path";
 import type { Task, OrchestratorConfig } from "./types";
 import { snapshotCortex } from "./cortex-git";
 import { deleteTaskLogs } from "./logger";
 import { DEFAULT_TASK_RUN_TIMEOUT_MS } from "./run-timeout";
 import { syncIssueFromTask } from "./issue-store";
+import { assertSufficientDiskSpace } from "./disk-guard";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
 const GITIGNORE_FILE = path.join(CORTEX_DIR, ".gitignore");
+const BACKUPS_DIR = path.join(CORTEX_DIR, "backups");
 const DEFAULT_CORTEX_GITIGNORE_ENTRIES = [
   "orchestrator-state.json",
   ".env.*",
   ".env",
   "repos/",
+  "backups/",
 ];
 const DEFAULT_CORTEX_GITIGNORE = `${DEFAULT_CORTEX_GITIGNORE_ENTRIES.join("\n")}\n`;
+type StoredConfig = Partial<OrchestratorConfig> & {
+  agent_runner?: OrchestratorConfig["default_agent_runner"];
+  permission_mode?: OrchestratorConfig["default_permission_mode"];
+};
 
 export function ensureCortexDir() {
   if (!existsSync(CORTEX_DIR)) {
@@ -46,6 +64,92 @@ export function getCortexPath(...segments: string[]): string {
   return path.join(CORTEX_DIR, ...segments);
 }
 
+function backupPathFor(filePath: string): string {
+  return path.join(BACKUPS_DIR, `${path.basename(filePath)}.last-good`);
+}
+
+function writeTextFileAtomic(filePath: string, contents: string): void {
+  const dir = path.dirname(filePath);
+  mkdirSync(dir, { recursive: true });
+
+  const tmpPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`
+  );
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmpPath, "w", 0o600);
+    writeSync(fd, contents);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmpPath, filePath);
+
+    const dirFd = openSync(dir, "r");
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch (error) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch {}
+    throw error;
+  }
+}
+
+function writeJsonFileAtomic(filePath: string, value: unknown, label: string): void {
+  ensureCortexDir();
+  const contents = `${JSON.stringify(value, null, 2)}\n`;
+  JSON.parse(contents);
+  assertSufficientDiskSpace(`writing ${label}`, CORTEX_DIR);
+  writeTextFileAtomic(filePath, contents);
+
+  try {
+    writeTextFileAtomic(backupPathFor(filePath), contents);
+  } catch (error) {
+    console.warn(
+      `[store] Failed to update last-good backup for ${label}:`,
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
+function readJsonFileWithBackup<T>(filePath: string, label: string): T {
+  const raw = readFileSync(filePath, "utf-8");
+  try {
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    const backupPath = backupPathFor(filePath);
+    if (!existsSync(backupPath)) throw error;
+
+    const backupRaw = readFileSync(backupPath, "utf-8");
+    const parsed = JSON.parse(backupRaw) as T;
+    console.error(
+      `[store] Failed to parse ${label}; using last-good backup at ${backupPath}:`,
+      error instanceof Error ? error.message : error
+    );
+
+    try {
+      assertSufficientDiskSpace(`restoring ${label} from backup`, CORTEX_DIR);
+      writeTextFileAtomic(filePath, backupRaw);
+    } catch (restoreError) {
+      console.error(
+        `[store] Failed to restore ${label} from last-good backup:`,
+        restoreError instanceof Error ? restoreError.message : restoreError
+      );
+    }
+
+    return parsed;
+  }
+}
+
 // Simple promise-chain mutex for serializing writes
 let writeLock: Promise<void> = Promise.resolve();
 
@@ -60,13 +164,11 @@ function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
 export function readTasks(): Task[] {
   ensureCortexDir();
   if (!existsSync(TASKS_FILE)) return [];
-  const raw = readFileSync(TASKS_FILE, "utf-8");
-  return JSON.parse(raw);
+  return readJsonFileWithBackup<Task[]>(TASKS_FILE, "tasks.json");
 }
 
 function writeTasksLocked(tasks: Task[]): void {
-  ensureCortexDir();
-  writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
+  writeJsonFileAtomic(TASKS_FILE, tasks, "tasks.json");
   snapshotCortex("tasks");
 }
 
@@ -124,11 +226,13 @@ export function readConfig(): OrchestratorConfig {
   ensureCortexDir();
   const defaults = getDefaultConfig();
   if (!existsSync(CONFIG_FILE)) {
-    writeFileSync(CONFIG_FILE, JSON.stringify(defaults, null, 2));
+    writeJsonFileAtomic(CONFIG_FILE, defaults, "config.json");
     return defaults;
   }
-  const raw = readFileSync(CONFIG_FILE, "utf-8");
-  const parsed = JSON.parse(raw);
+  const parsed = readJsonFileWithBackup<StoredConfig>(
+    CONFIG_FILE,
+    "config.json"
+  );
   const { agent_runner: legacyRunner, ...rest } = parsed;
   return {
     ...defaults,
@@ -144,8 +248,7 @@ export function readConfig(): OrchestratorConfig {
 
 export function writeConfig(config: OrchestratorConfig): Promise<void> {
   return withWriteLock(() => {
-    ensureCortexDir();
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+    writeJsonFileAtomic(CONFIG_FILE, config, "config.json");
     snapshotCortex("config");
   });
 }
