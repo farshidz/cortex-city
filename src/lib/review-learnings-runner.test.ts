@@ -35,6 +35,7 @@ function sampleReview(overrides: Partial<ReviewSummary> = {}): ReviewSummary {
     summary_head_sha: "reviewed-head",
     generated_at: "2026-05-01T00:10:00.000Z",
     review_status: "final",
+    review_state: "archived",
     agent_review_status: "needs_author_changes",
     final_at: "2026-05-01T00:20:00.000Z",
     final_state: "merged",

@@ -81,7 +81,7 @@ test("readConfig creates defaults when no config file exists", () => {
   assert.deepEqual(JSON.parse(readFileSync(configFile, "utf-8")), config);
   assert.equal(
     readFileSync(gitignoreFile, "utf-8"),
-    "orchestrator-state.json\n.env.*\n.env\nrepos/\n"
+    "orchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
   );
 });
 
@@ -95,7 +95,7 @@ test("readConfig appends missing default cortex gitignore entries", () => {
 
   assert.equal(
     readFileSync(gitignoreFile, "utf-8"),
-    "custom-state.json\norchestrator-state.json\n.env.*\n.env\nrepos/\n"
+    "custom-state.json\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
   );
 });
 
@@ -197,6 +197,37 @@ test("updateTask merges concurrent writes without dropping earlier fields", () =
     result.pr_url,
     "https://github.com/farshidz/marqo-cortex-city/pull/456"
   );
+});
+
+test("readTasks restores from last-good backup when tasks file is corrupt", () => {
+  const workspace = createTempWorkspace();
+  const task = sampleTask();
+
+  const result = runStoreScript(
+    workspace,
+    `
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      await store.createTask(${JSON.stringify(task)});
+      const tasksFile = path.join(process.cwd(), ".cortex", "tasks.json");
+      const backupFile = path.join(
+        process.cwd(),
+        ".cortex",
+        "backups",
+        "tasks.json.last-good"
+      );
+      const backupBefore = fs.readFileSync(backupFile, "utf-8");
+      fs.writeFileSync(tasksFile, backupBefore.slice(0, 20));
+      const recovered = store.readTasks();
+      console.log(JSON.stringify({
+        recovered,
+        restored: fs.readFileSync(tasksFile, "utf-8") === backupBefore,
+      }));
+    `
+  );
+
+  assert.deepEqual(result.recovered, [task]);
+  assert.equal(result.restored, true);
 });
 
 test("writeConfig persists the supplied configuration", () => {
