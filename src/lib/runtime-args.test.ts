@@ -114,10 +114,20 @@ test("buildModelArgs falls back to runtime-specific config defaults", () => {
   ]);
 });
 
-test("buildModelArgs ignores efforts that aren't valid for the runtime", () => {
-  // `max` is a Claude effort, not a Codex one. It should be dropped.
+test("buildModelArgs supports the Codex max effort", () => {
   const config = sampleConfig({ default_codex_effort: undefined });
   const args = buildModelArgs("codex", { effort: "max" }, config);
+  assert.deepEqual(args, [
+    "--model",
+    "gpt-5.4",
+    "-c",
+    'model_reasoning_effort="max"',
+  ]);
+});
+
+test("buildModelArgs ignores efforts that aren't valid for the runtime", () => {
+  const config = sampleConfig({ default_codex_effort: undefined });
+  const args = buildModelArgs("codex", { effort: "not-real" as never }, config);
   assert.deepEqual(args, ["--model", "gpt-5.4"]);
 });
 
@@ -133,6 +143,10 @@ test("buildModelArgsWith emits only the args it is given", () => {
   assert.deepEqual(
     buildModelArgsWith("codex", "gpt-5.4", "xhigh"),
     ["--model", "gpt-5.4", "-c", 'model_reasoning_effort="xhigh"']
+  );
+  assert.deepEqual(
+    buildModelArgsWith("codex", "gpt-5.6-sol", "ultra"),
+    ["--model", "gpt-5.6-sol", "-c", 'model_reasoning_effort="ultra"']
   );
 });
 

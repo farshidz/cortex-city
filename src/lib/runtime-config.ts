@@ -53,10 +53,13 @@ const CLAUDE_EFFORT_OPTIONS: SelectOption<ClaudeEffort>[] = [
 
 const CODEX_EFFORT_OPTIONS: SelectOption<CodexEffort>[] = [
   { value: "none", label: "None" },
+  { value: "minimal", label: "Minimal" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
   { value: "xhigh", label: "Extra High" },
+  { value: "max", label: "Max" },
+  { value: "ultra", label: "Ultra" },
 ];
 
 export function getPermissionOptions(runtime: AgentRuntime): SelectOption<PermissionMode>[] {

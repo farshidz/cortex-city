@@ -267,7 +267,7 @@ export default function SettingsPage() {
                   default_codex_model: e.target.value || undefined,
                 })
               }
-              placeholder="gpt-5.4"
+              placeholder="gpt-5.6"
             />
           </div>
           <div className="space-y-2">
