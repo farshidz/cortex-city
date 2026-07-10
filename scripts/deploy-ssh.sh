@@ -162,6 +162,12 @@ for cmd in bash rsync npm systemctl install; do
 done
 "
 
+log "Upgrading Codex CLI on $REMOTE"
+run_remote "
+set -euo pipefail
+$SUDO npm install -g @openai/codex@latest
+"
+
 log "Preparing remote staging directories"
 run_remote "
 set -euo pipefail

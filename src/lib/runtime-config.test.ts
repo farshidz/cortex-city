@@ -85,10 +85,12 @@ test("getEffortOptions and normalizeEffort keep runtimes isolated", () => {
   );
   assert.deepEqual(
     getEffortOptions("codex").map((option) => option.value),
-    ["none", "low", "medium", "high", "xhigh"]
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
   );
+  assert.equal(normalizeEffort("codex", "minimal", config), "minimal");
   assert.equal(normalizeEffort("codex", "xhigh", config), "xhigh");
-  assert.equal(normalizeEffort("codex", "max", config), "medium");
+  assert.equal(normalizeEffort("codex", "max", config), "max");
+  assert.equal(normalizeEffort("codex", "ultra", config), "ultra");
   assert.equal(normalizeEffort("claude", "xhigh", config), "xhigh");
   assert.equal(normalizeEffort("claude", undefined, sampleConfig({ default_claude_effort: undefined })), undefined);
 });
@@ -116,7 +118,7 @@ test("resolveTaskModel and resolveTaskEffort ignore invalid task overrides for t
   const task = sampleTask({
     agent_runner: "codex",
     model: "   ",
-    effort: "max",
+    effort: "not-real" as never,
   });
 
   assert.equal(resolveTaskModel(task, config), "gpt-5.4");

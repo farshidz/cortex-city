@@ -53,7 +53,8 @@ test("every runtime-config helper is reachable via the module namespace", () => 
   assert.equal(rc.normalizePermissionMode("codex", "invalid" as never), "default");
 
   assert.equal(rc.normalizeEffort("claude", "high"), "high");
-  assert.equal(rc.normalizeEffort("codex", "max" as never), undefined);
+  assert.equal(rc.normalizeEffort("codex", "max"), "max");
+  assert.equal(rc.normalizeEffort("codex", "ultra"), "ultra");
   assert.equal(rc.normalizeEffort("codex", undefined, config), "medium");
 
   assert.equal(rc.normalizeModel("  trim-me "), "trim-me");
