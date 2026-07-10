@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { shouldStartFinalCleanup } from "./final-task-cleanup";
+import {
+  shouldClearMissingFinalWorktreePath,
+  shouldStartFinalCleanup,
+} from "./final-task-cleanup";
 import type { Task } from "./types";
 
 function sampleTask(overrides: Partial<Task> = {}): Task {
@@ -29,6 +32,19 @@ test("shouldStartFinalCleanup allows a final task with a worktree to run once", 
   );
 });
 
+test("shouldStartFinalCleanup skips missing final worktree directories", () => {
+  assert.equal(
+    shouldStartFinalCleanup(
+      sampleTask({
+        worktree_path: "/tmp/missing-worktree",
+      }),
+      false,
+      false
+    ),
+    false
+  );
+});
+
 test("shouldStartFinalCleanup skips tasks already in cleanup", () => {
   assert.equal(
     shouldStartFinalCleanup(
@@ -36,6 +52,40 @@ test("shouldStartFinalCleanup skips tasks already in cleanup", () => {
         worktree_path: "/tmp/worktree",
         final_cleanup_state: "running",
       }),
+      false
+    ),
+    false
+  );
+});
+
+test("shouldClearMissingFinalWorktreePath allows inactive final tasks to drop stale paths", () => {
+  assert.equal(
+    shouldClearMissingFinalWorktreePath(
+      sampleTask({
+        worktree_path: "/tmp/missing-worktree",
+      }),
+      false,
+      false
+    ),
+    true
+  );
+  assert.equal(
+    shouldClearMissingFinalWorktreePath(
+      sampleTask({
+        worktree_path: "/tmp/missing-worktree",
+      }),
+      true,
+      false
+    ),
+    false
+  );
+  assert.equal(
+    shouldClearMissingFinalWorktreePath(
+      sampleTask({
+        status: "in_review",
+        worktree_path: "/tmp/missing-worktree",
+      }),
+      false,
       false
     ),
     false

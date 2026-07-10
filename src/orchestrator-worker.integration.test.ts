@@ -84,7 +84,7 @@ test("pollOnce picks the oldest eligible open task and still accepts manual inst
   const callsFile = path.join(workspace, "agent-calls.jsonl");
   writeJson(scenarioFile, {
     codex: {
-      sleepMs: 300,
+      sleepMs: 2000,
     },
   });
 

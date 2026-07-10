@@ -1,6 +1,9 @@
 // In-process tests for the pure predicates that gate worker phases.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
   DEAD_OWNED_PID_GRACE_MS,
@@ -59,10 +62,21 @@ test("shouldResetStaleFinalCleanup detects running-but-orphaned cleanup state", 
   );
   assert.equal(
     shouldResetStaleFinalCleanup(
-      sample({ final_cleanup_state: "running", current_run_pid: 123 }),
+      sample({
+        final_cleanup_state: "running",
+        current_run_pid: 123,
+        worktree_path: "/tmp/x",
+      }),
       false
     ),
     false
+  );
+  assert.equal(
+    shouldResetStaleFinalCleanup(
+      sample({ final_cleanup_state: "running", current_run_pid: 123 }),
+      false
+    ),
+    true
   );
   assert.equal(
     shouldResetStaleFinalCleanup(
@@ -256,6 +270,96 @@ test("pollOnce gives dead owned pids a grace window before resuming", async () =
   assert.equal(activePids.has("task-1"), false);
   assert.equal(tasks[0].current_run_pid, undefined);
   assert.equal(tasks[0].resume_requested, true);
+});
+
+test("pollOnce clears missing final worktree paths without launching cleanup and prunes old tasks", async () => {
+  const workspace = mkdtempSync(path.join(os.tmpdir(), "worker-missing-final-"));
+  const missingWorktree = path.join(workspace, "missing-worktree");
+  const missingRunningWorktree = path.join(workspace, "missing-running-worktree");
+  const tasks: Task[] = [
+    sample({
+      id: "missing-final",
+      status: "merged",
+      worktree_path: missingWorktree,
+      updated_at: "2026-01-01T00:00:00.000Z",
+    }),
+    sample({
+      id: "missing-running-final",
+      status: "closed",
+      worktree_path: missingRunningWorktree,
+      final_cleanup_state: "running",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    }),
+  ];
+  const deletedTaskIds: string[] = [];
+  let cleanupLaunches = 0;
+  let worktreeRemovals = 0;
+
+  const deps: WorkerRuntimeDeps = {
+    deleteReviewSummary: async () => {},
+    deleteTask: async (id) => {
+      deletedTaskIds.push(id);
+      const index = tasks.findIndex((task) => task.id === id);
+      assert.notEqual(index, -1);
+      tasks.splice(index, 1);
+    },
+    getPRStateHash: async () => "",
+    getPRStatus: async () => "unknown",
+    getReviewRequestedPRs: async () => [],
+    getTask: async (id) => tasks.find((task) => task.id === id),
+    isPRMergedOrClosed: async () => null,
+    isPidRunning: () => true,
+    logger: { log: () => {}, error: () => {} },
+    readConfig: () => ({
+      max_parallel_sessions: 0,
+      poll_interval_seconds: 30,
+      default_permission_mode: "bypassPermissions",
+      default_agent_runner: "codex",
+      agents: {},
+    }),
+    readReviewLearnings: () => "",
+    readReviewSummaries: () => [],
+    readReviewSummaryMap: () => ({}),
+    readTasks: () => tasks.map((task) => ({ ...task })),
+    removeWorktree: async () => {
+      worktreeRemovals++;
+    },
+    spawnAgentSession: async () => {
+      cleanupLaunches++;
+      return { pid: 202, child: {} as never };
+    },
+    spawnReviewRetro: async () => ({
+      pid: 0,
+      child: {} as never,
+      done: Promise.resolve(),
+    }),
+    spawnReviewSummary: async () => ({
+      pid: 303,
+      child: {} as never,
+      done: Promise.resolve({} as never),
+    }),
+    updateTask: async (id, updatesForTask) => {
+      const index = tasks.findIndex((task) => task.id === id);
+      assert.notEqual(index, -1);
+      tasks[index] = {
+        ...tasks[index],
+        ...updatesForTask,
+        updated_at: new Date().toISOString(),
+      };
+      return tasks[index];
+    },
+    upsertReviewSummary: async (summary) => summary as never,
+  };
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(deletedTaskIds.sort(), [
+    "missing-final",
+    "missing-running-final",
+  ]);
+  assert.equal(cleanupLaunches, 0);
+  assert.equal(worktreeRemovals, 0);
+  assert.deepEqual(tasks, []);
 });
 
 test("pollOnce rechecks latest review hash before launching review run", async () => {

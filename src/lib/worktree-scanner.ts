@@ -12,6 +12,7 @@ import type { Task } from "./types";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
+const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
 
 export interface OrphanWorktree {
   path: string;
@@ -27,6 +28,11 @@ export interface WorktreeScanResult {
 
 export interface WorktreeCleanupResult extends WorktreeScanResult {
   cleanedWorktrees: OrphanWorktree[];
+}
+
+interface WorktreeScannerConfig {
+  worktree_roots?: unknown;
+  agents?: Record<string, { repo_path?: unknown }>;
 }
 
 function isDirectory(target: string): boolean {
@@ -66,16 +72,19 @@ function getWorktreeRoot(worktreePath: string): string | undefined {
   return prefix || path.sep;
 }
 
+function addWorktreeRoot(roots: Set<string>, worktreesRoot: string) {
+  if (isDirectory(worktreesRoot)) {
+    roots.add(normalizeWorktreePath(worktreesRoot));
+  }
+}
+
 function addManagedWorktreeRoots(roots: Set<string>, errors: string[]) {
   const reposDir = path.join(CORTEX_DIR, "repos");
   if (!existsSync(reposDir)) return;
 
   try {
     for (const entry of readdirSync(reposDir)) {
-      const worktreesRoot = path.join(reposDir, entry, ".worktrees");
-      if (isDirectory(worktreesRoot)) {
-        roots.add(normalizeWorktreePath(worktreesRoot));
-      }
+      addWorktreeRoot(roots, path.join(reposDir, entry, ".worktrees"));
     }
   } catch (error) {
     errors.push(
@@ -86,16 +95,57 @@ function addManagedWorktreeRoots(roots: Set<string>, errors: string[]) {
   }
 }
 
-function readTaskStore(): Task[] {
-  if (!existsSync(TASKS_FILE)) return [];
-  return JSON.parse(readFileSync(TASKS_FILE, "utf-8"));
+function readScannerConfig(errors: string[]): WorktreeScannerConfig | undefined {
+  if (!existsSync(CONFIG_FILE)) return undefined;
+
+  try {
+    return JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+  } catch (error) {
+    errors.push(
+      error instanceof Error
+        ? `Failed to read config: ${error.message}`
+        : "Failed to read config"
+    );
+    return undefined;
+  }
+}
+
+function addConfiguredWorktreeRoots(roots: Set<string>, errors: string[]) {
+  const config = readScannerConfig(errors);
+  if (!config) return;
+
+  if (Array.isArray(config.worktree_roots)) {
+    for (const configuredRoot of config.worktree_roots) {
+      if (typeof configuredRoot === "string" && configuredRoot.trim()) {
+        addWorktreeRoot(roots, configuredRoot.trim());
+      }
+    }
+  }
+
+  for (const agent of Object.values(config.agents ?? {})) {
+    if (!agent || typeof agent !== "object") continue;
+    const repoPath = agent.repo_path;
+    if (typeof repoPath !== "string" || !repoPath.trim()) continue;
+    addWorktreeRoot(roots, path.join(repoPath.trim(), "..", ".worktrees"));
+  }
+}
+
+function readTaskStore(): { tasks: Task[]; ok: boolean } {
+  if (!existsSync(TASKS_FILE)) return { tasks: [], ok: true };
+  return { tasks: JSON.parse(readFileSync(TASKS_FILE, "utf-8")), ok: true };
 }
 
 function addTaskWorktreeRoots(tasks: Task[], roots: Set<string>) {
   for (const task of tasks) {
     if (!task.worktree_path) continue;
     const root = getWorktreeRoot(task.worktree_path);
-    if (root && isDirectory(root)) {
+    if (
+      root &&
+      isDirectory(root) &&
+      isDirectory(task.worktree_path) &&
+      isGitWorktree(task.worktree_path) &&
+      isPathWithin(root, task.worktree_path)
+    ) {
       roots.add(root);
     }
   }
@@ -104,14 +154,27 @@ function addTaskWorktreeRoots(tasks: Task[], roots: Set<string>) {
 export function scanOrphanWorktrees(): WorktreeScanResult {
   const errors: string[] = [];
   let tasks: Task[] = [];
+  let canTrustTaskLinks = true;
   try {
-    tasks = readTaskStore();
+    const result = readTaskStore();
+    tasks = result.tasks;
+    canTrustTaskLinks = result.ok;
   } catch (error) {
+    canTrustTaskLinks = false;
     errors.push(
       error instanceof Error
         ? `Failed to read tasks: ${error.message}`
         : "Failed to read tasks"
     );
+  }
+
+  if (!canTrustTaskLinks) {
+    return {
+      scannedRoots: [],
+      linkedWorktreeCount: 0,
+      orphanedWorktrees: [],
+      errors,
+    };
   }
 
   const linkedWorktrees = new Set(
@@ -122,6 +185,7 @@ export function scanOrphanWorktrees(): WorktreeScanResult {
   );
   const roots = new Set<string>();
   addManagedWorktreeRoots(roots, errors);
+  addConfiguredWorktreeRoots(roots, errors);
   addTaskWorktreeRoots(tasks, roots);
 
   const orphanedWorktrees: OrphanWorktree[] = [];
@@ -129,6 +193,7 @@ export function scanOrphanWorktrees(): WorktreeScanResult {
     try {
       for (const entry of readdirSync(root)) {
         const worktreePath = normalizeWorktreePath(path.join(root, entry));
+        if (!isPathWithin(root, worktreePath)) continue;
         if (!isDirectory(worktreePath) || !isGitWorktree(worktreePath)) continue;
         if (!linkedWorktrees.has(worktreePath)) {
           orphanedWorktrees.push({ path: worktreePath, root });

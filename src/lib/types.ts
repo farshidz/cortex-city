@@ -172,6 +172,7 @@ export interface OrchestratorConfig {
   review_model?: string;
   max_parallel_reviews?: number;
   review_learning_enabled?: boolean;
+  worktree_roots?: string[];
 }
 
 export type PRStatus =

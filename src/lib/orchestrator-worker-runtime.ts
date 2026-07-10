@@ -1,8 +1,13 @@
 // This module owns a single worker poll. The long-running loop, heartbeat, and
 // signal handling stay in src/orchestrator-worker.ts so tests can exercise one
 // poll without touching process lifecycle behavior.
+import { statSync } from "fs";
 import { spawnAgentSession, removeWorktree } from "./agent-runner";
-import { shouldStartFinalCleanup } from "./final-task-cleanup";
+import {
+  isFinalTask,
+  shouldClearMissingFinalWorktreePath,
+  shouldStartFinalCleanup,
+} from "./final-task-cleanup";
 import {
   getPRStateHash,
   getPRStatus,
@@ -27,6 +32,7 @@ import { spawnReviewRetro } from "./review-learnings-runner";
 import { spawnReviewSummary } from "./review-runner";
 import { unlinkTask as unlinkIssueTask } from "./issue-store";
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
+import { assertSufficientDiskSpace } from "./disk-guard";
 import type { ReviewRequest, ReviewSummary, Task, TaskRunMode } from "./types";
 
 export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
@@ -49,9 +55,9 @@ export function shouldFinalizeCleanupWorktree(task: Task, hasActivePid: boolean)
 
 export function shouldResetStaleFinalCleanup(task: Task, hasActivePid: boolean): boolean {
   return Boolean(
-    (task.status === "merged" || task.status === "closed") &&
+    isFinalTask(task) &&
       task.final_cleanup_state === "running" &&
-      !task.current_run_pid &&
+      (!task.current_run_pid || !task.worktree_path) &&
       !hasActivePid
   );
 }
@@ -82,6 +88,18 @@ function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   return "Unknown error";
+}
+
+function isDirectory(target: string): boolean {
+  try {
+    return statSync(target).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function hasWorktreeDirectory(task: Pick<Task, "worktree_path">): boolean {
+  return Boolean(task.worktree_path && isDirectory(task.worktree_path));
 }
 
 interface WorkerLogger {
@@ -161,6 +179,8 @@ async function launchTaskRun(
   options: LaunchOptions
 ): Promise<boolean> {
   try {
+    assertSufficientDiskSpace(`launching ${options.mode} run for task ${task.id}`);
+
     if (options.preSpawnUpdates) {
       await deps.updateTask(task.id, options.preSpawnUpdates);
     }
@@ -203,6 +223,18 @@ export async function pollOnce(
   deps.logger.log("[worker] Poll phase: load state");
   let tasks = deps.readTasks();
   const config = deps.readConfig();
+  const pollStartedAt = Date.now();
+  const initialTaskUpdatedAt = new Map(
+    tasks.map((task) => [task.id, new Date(task.updated_at).getTime()])
+  );
+  const pruneAfterMetadataCleanupTaskIds = new Set<string>();
+
+  const rememberPruneEligibility = (task: Task) => {
+    const updatedAt = initialTaskUpdatedAt.get(task.id);
+    if (updatedAt !== undefined && pollStartedAt - updatedAt > PRUNE_AGE_MS) {
+      pruneAfterMetadataCleanupTaskIds.add(task.id);
+    }
+  };
 
   deps.logger.log("[worker] Poll phase: reconcile task pids");
   const liveTaskIds = new Set<string>();
@@ -250,6 +282,9 @@ export async function pollOnce(
     deps.logger.log(
       `[worker] Resetting stale final cleanup state for task "${task.title}" (${task.id})`
     );
+    if (!task.worktree_path || !hasWorktreeDirectory(task)) {
+      rememberPruneEligibility(task);
+    }
     await deps.updateTask(task.id, {
       final_cleanup_state: undefined,
     });
@@ -257,9 +292,42 @@ export async function pollOnce(
 
   tasks = deps.readTasks();
 
+  deps.logger.log("[worker] Poll phase: clear missing final worktrees");
+  for (const task of tasks) {
+    if (
+      !shouldClearMissingFinalWorktreePath(
+        task,
+        activePids.has(task.id),
+        hasWorktreeDirectory(task)
+      )
+    ) {
+      continue;
+    }
+
+    deps.logger.log(
+      `[worker] Clearing missing worktree path for final task "${task.title}" (${task.id})`
+    );
+    rememberPruneEligibility(task);
+    await deps.updateTask(task.id, {
+      worktree_path: undefined,
+      final_cleanup_state:
+        task.final_cleanup_state === "running" ? undefined : task.final_cleanup_state,
+    });
+  }
+
+  tasks = deps.readTasks();
+
   deps.logger.log("[worker] Poll phase: cleanup final tasks");
   for (const task of tasks) {
-    if (!shouldStartFinalCleanup(task, activePids.has(task.id))) continue;
+    if (
+      !shouldStartFinalCleanup(
+        task,
+        activePids.has(task.id),
+        hasWorktreeDirectory(task)
+      )
+    ) {
+      continue;
+    }
 
     deps.logger.log(`[worker] Running cleanup for task "${task.title}" (${task.id})`);
     await launchTaskRun(task, activePids, deps, {
@@ -309,10 +377,11 @@ export async function pollOnce(
   const now = Date.now();
   for (const task of tasks) {
     if (
-      (task.status === "merged" || task.status === "closed") &&
+      isFinalTask(task) &&
       !task.worktree_path &&
       !activePids.has(task.id) &&
-      now - new Date(task.updated_at).getTime() > PRUNE_AGE_MS
+      (now - new Date(task.updated_at).getTime() > PRUNE_AGE_MS ||
+        pruneAfterMetadataCleanupTaskIds.has(task.id))
     ) {
       await deps.deleteTask(task.id);
       if (task.issue_id) {
