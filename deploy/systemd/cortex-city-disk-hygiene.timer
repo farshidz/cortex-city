@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Cortex City disk hygiene cleanup daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=cortex-city-disk-hygiene.service
+
+[Install]
+WantedBy=timers.target
