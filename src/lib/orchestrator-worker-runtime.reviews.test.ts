@@ -9,7 +9,7 @@ import {
   shouldRetryErroredReview,
   type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
-import { withReviewStatus } from "./review-status";
+import { deriveReviewState, withReviewStatus } from "./review-status";
 import type {
   OrchestratorConfig,
   ReviewRequest,
@@ -835,6 +835,11 @@ test("paused and automatic-review-disabled task PRs stay live without spawning",
     pr_url: "https://github.com/acme/widget/pull/2",
     reviewer_agent_enabled: false,
   });
+  const neverReviewedDisabledTask = makeTask({
+    id: "never-reviewed-disabled-task",
+    pr_url: "https://github.com/acme/widget/pull/3",
+    reviewer_agent_enabled: false,
+  });
   const pausedRequest = makeRequest({
     source: "task",
     task_id: pausedTask.id,
@@ -842,12 +847,15 @@ test("paused and automatic-review-disabled task PRs stay live without spawning",
   const disabledRequest = makeRequest({
     source: "task",
     task_id: disabledTask.id,
+    task_title: disabledTask.title,
+    task_description: disabledTask.description,
+    task_plan: disabledTask.plan,
     pr_url: disabledTask.pr_url!,
     pr_number: 2,
     head_sha: "disabled-head",
   });
   const h = makeHarness({
-    tasks: [pausedTask, disabledTask],
+    tasks: [pausedTask, disabledTask, neverReviewedDisabledTask],
     reviews: {
       [pausedRequest.pr_url]: makeSummary(pausedRequest, {
         summary: "paused summary",
@@ -855,8 +863,14 @@ test("paused and automatic-review-disabled task PRs stay live without spawning",
       }),
       [disabledRequest.pr_url]: makeSummary(disabledRequest, {
         summary: "disabled summary",
+        summary_head_sha: "disabled-head",
         generated_at: "2026-05-01T00:00:00.000Z",
+        agent_review_status: "ready_for_human_approval",
       }),
+    },
+    prHeadShas: {
+      [disabledRequest.pr_url]: "disabled-new-head",
+      [neverReviewedDisabledTask.pr_url!]: "never-reviewed-head",
     },
     prFinalStates: {
       [pausedRequest.pr_url]: "closed",
@@ -869,7 +883,50 @@ test("paused and automatic-review-disabled task PRs stay live without spawning",
   assert.deepEqual(h.spawnCalls, []);
   assert.equal(h.reviews[pausedRequest.pr_url].final_at, undefined);
   assert.equal(h.reviews[disabledRequest.pr_url].final_at, undefined);
+  assert.equal(h.reviews[disabledRequest.pr_url].head_sha, "disabled-new-head");
+  assert.equal(h.reviews[disabledRequest.pr_url].summary_head_sha, "disabled-head");
+  assert.equal(h.reviews[disabledRequest.pr_url].summary, "disabled summary");
+  assert.equal(h.reviews[disabledRequest.pr_url].agent_review_status, undefined);
+  assert.equal(
+    deriveReviewState(h.reviews[disabledRequest.pr_url]),
+    "re_reviewing"
+  );
+  assert.equal(h.reviews[neverReviewedDisabledTask.pr_url!], undefined);
   assert.deepEqual(h.deletedPrUrls, []);
+});
+
+test("re-enabling automatic review schedules the refreshed stale head once", async () => {
+  const task = makeTask({ reviewer_agent_enabled: false });
+  const oldRequest = makeRequest({
+    source: "task",
+    task_id: task.id,
+    task_title: task.title,
+    task_description: task.description,
+    task_plan: task.plan,
+    head_sha: "old-head",
+  });
+  const h = makeHarness({
+    tasks: [task],
+    reviews: {
+      [task.pr_url!]: makeSummary(oldRequest, {
+        summary: "Reviewed before opt-out.",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        agent_review_status: "ready_for_human_approval",
+      }),
+    },
+    prHeadShas: { [task.pr_url!]: "new-head" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+  assert.equal(h.spawnCalls.length, 0);
+  assert.equal(deriveReviewState(h.reviews[task.pr_url!]), "re_reviewing");
+
+  h.tasks[0].reviewer_agent_enabled = true;
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.spawnCalls.length, 1);
+  assert.equal(h.spawnCalls[0].head_sha, "new-head");
 });
 
 test("a merged task-owned review enters the shared retrospective flow", async () => {

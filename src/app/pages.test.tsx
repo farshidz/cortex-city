@@ -1347,6 +1347,21 @@ test("task detail surfaces task-owned review verdicts without self-approval acti
       "./src/app/tasks/[id]/page.tsx",
       { params: Promise.resolve({ id: "task-review-result" }) }
     );
+    globalThis.__SWR_DATA__["/api/tasks/task-review-result"] = {
+      ...reviewTask,
+      reviewer_agent_enabled: false,
+      automatic_review: {
+        ...reviewTask.automatic_review,
+        state: "re_reviewing",
+        status: undefined,
+        head_sha: "head-2",
+        summary_head_sha: "head-1",
+      },
+    };
+    const optedOutStaleHtml = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-review-result" }) }
+    );
     globalThis.__SWR_DATA__ = originalData;
 
     console.log(JSON.stringify({
@@ -1360,6 +1375,15 @@ test("task detail surfaces task-owned review verdicts without self-approval acti
         "The reviewer could not inspect a required dependency."
       ),
       hasCleanStatus: cleanHtml.includes("No blocking findings"),
+      hasOptedOutStaleStatus: optedOutStaleHtml.includes(
+        "New commits since review"
+      ),
+      hasOptedOutStaleDetail: optedOutStaleHtml.includes(
+        "New commits since this review"
+      ),
+      falselyClaimsReReview: optedOutStaleHtml.includes(
+        "Re-reviewing new commits"
+      ),
       hasSelfApprovalLabel:
         decisionHtml.includes("Ready to approve") ||
         blockedHtml.includes("Ready to approve") ||
@@ -1374,6 +1398,9 @@ test("task detail surfaces task-owned review verdicts without self-approval acti
     hasBlockedStatus: true,
     hasBlockedSummary: true,
     hasCleanStatus: true,
+    hasOptedOutStaleStatus: true,
+    hasOptedOutStaleDetail: true,
+    falselyClaimsReReview: false,
     hasSelfApprovalLabel: false,
   });
 });

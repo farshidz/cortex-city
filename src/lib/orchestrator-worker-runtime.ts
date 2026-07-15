@@ -523,15 +523,26 @@ export async function pollOnce(
 
   deps.logger.log("[worker] Poll phase: resolve task review heads");
   const taskReviewHeads = new Map<string, string>();
+  const storedReviewsBeforeHeadResolution = deps.readReviewSummaryMap();
   await Promise.all(
     tasks
       .filter(
-        (task): task is Task & { pr_url: string } =>
-          !task.paused &&
-          task.status === "in_review" &&
-          typeof task.pr_url === "string" &&
-          isAutomaticReviewEnabled(task) &&
-          !activePids.has(task.id)
+        (task): task is Task & { pr_url: string } => {
+          if (
+            task.paused ||
+            task.status !== "in_review" ||
+            typeof task.pr_url !== "string" ||
+            activePids.has(task.id)
+          ) {
+            return false;
+          }
+          if (isAutomaticReviewEnabled(task)) return true;
+          const storedReview = storedReviewsBeforeHeadResolution[task.pr_url];
+          return (
+            storedReview?.source === "task" &&
+            storedReview.task_id === task.id
+          );
+        }
       )
       .map(async (task) => {
         try {
@@ -649,6 +660,7 @@ export async function pollOnce(
       !task.paused && task.status === "in_review" && typeof task.pr_url === "string"
   );
   const taskReviewRequests: ReviewRequest[] = [];
+  const refreshOnlyTaskReviewRequests: ReviewRequest[] = [];
   const tasksToReview: ReviewRunCandidate[] = [];
 
   await Promise.all(
@@ -671,15 +683,16 @@ export async function pollOnce(
 
         if (activePids.has(task.id)) return;
 
-        if (isAutomaticReviewEnabled(task)) {
-          const headSha = taskReviewHeads.get(task.pr_url) || "";
-          const request =
-            task.review_migration_head_sha === headSha
-              ? undefined
-              : taskReviewRequest(task, headSha);
+        const automaticReviewEnabled = isAutomaticReviewEnabled(task);
+        const headSha = taskReviewHeads.get(task.pr_url) || "";
+        const cached = deps.readReviewSummaryMap()[task.pr_url];
+        const request =
+          task.review_migration_head_sha === headSha
+            ? undefined
+            : taskReviewRequest(task, headSha);
+        if (automaticReviewEnabled) {
           if (request) {
             taskReviewRequests.push(request);
-            const cached = deps.readReviewSummaryMap()[task.pr_url];
             const reviewedHeadSha = cached ? summaryHeadShaFor(cached) : undefined;
             if (cached?.current_run_pid != null) return;
             if (
@@ -690,6 +703,14 @@ export async function pollOnce(
               return;
             }
           }
+        } else if (
+          request &&
+          cached?.source === "task" &&
+          cached.task_id === task.id
+        ) {
+          // Opting out prevents new review runs, but an existing result still
+          // needs the current HEAD so the task UI can show that it is stale.
+          refreshOnlyTaskReviewRequests.push(request);
         }
 
         if (prStatus === "checks_pending" && !hasManualInstruction) return;
@@ -760,6 +781,9 @@ export async function pollOnce(
     taskReviewRequests.filter(
       (request) => !request.task_id || !activePids.has(request.task_id)
     ),
+    refreshOnlyTaskReviewRequests.filter(
+      (request) => !request.task_id || !activePids.has(request.task_id)
+    ),
     liveTaskPrUrls
   );
 }
@@ -822,6 +846,7 @@ async function runReviewPhases(
   deps: WorkerRuntimeDeps,
   config: ReturnType<typeof readConfig>,
   taskReviewRequests: ReviewRequest[] = [],
+  refreshOnlyTaskReviewRequests: ReviewRequest[] = [],
   liveTaskPrUrls: Set<string> = new Set()
 ): Promise<void> {
   const learningEnabled = config.review_learning_enabled !== false;
@@ -897,6 +922,11 @@ async function runReviewPhases(
   const schedulableTaskUrls = new Set(
     taskReviewRequests.map((request) => request.pr_url)
   );
+  const refreshOnlyTaskUrls = new Set(
+    refreshOnlyTaskReviewRequests
+      .map((request) => request.pr_url)
+      .filter((prUrl) => !schedulableTaskUrls.has(prUrl))
+  );
   for (const request of inboundReviewRequests) {
     // A live Cortex task owns its PR even while paused, opted out, or running
     // its builder. Do not let the inbound discovery path bypass those task
@@ -917,10 +947,23 @@ async function runReviewPhases(
   for (const request of taskReviewRequests) {
     requestsByUrl.set(request.pr_url, { ...request, source: "task" });
   }
+  for (const request of refreshOnlyTaskReviewRequests) {
+    if (!schedulableTaskUrls.has(request.pr_url)) {
+      requestsByUrl.set(request.pr_url, { ...request, source: "task" });
+    }
+  }
   const openReviewRequests = [...requestsByUrl.values()];
 
   for (const pr of openReviewRequests) {
     await mutateStoredReview(deps, pr.pr_url, (current) => {
+      if (
+        refreshOnlyTaskUrls.has(pr.pr_url) &&
+        (!current ||
+          current.source !== "task" ||
+          current.task_id !== pr.task_id)
+      ) {
+        return undefined;
+      }
       if (!current) {
         return {
           ...prFieldsFromRequest(pr),
@@ -1009,6 +1052,7 @@ async function runReviewPhases(
   if (reviewSlots > 0) {
     const refreshed = deps.readReviewSummaryMap();
     for (const pr of openReviewRequests) {
+      if (refreshOnlyTaskUrls.has(pr.pr_url)) continue;
       if (reviewSlots <= 0) break;
       if (activeReviewPids.has(pr.pr_url)) continue;
       const cached = refreshed[pr.pr_url];

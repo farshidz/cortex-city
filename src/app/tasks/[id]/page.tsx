@@ -97,6 +97,16 @@ const TASK_REVIEW_STATE_LABELS: Record<ReviewState, string> = {
   needs_review: "Review complete",
 };
 
+function taskReviewStateLabel(
+  state: ReviewState,
+  automaticReviewEnabled: boolean
+): string {
+  if (state === "re_reviewing" && !automaticReviewEnabled) {
+    return "New commits since review";
+  }
+  return TASK_REVIEW_STATE_LABELS[state];
+}
+
 function taskReviewBadgeVariant(
   state: ReviewState
 ): "default" | "secondary" | "destructive" | "outline" {
@@ -648,7 +658,10 @@ export default function TaskDetailPage({
                   <Badge
                     variant={taskReviewBadgeVariant(task.automatic_review.state)}
                   >
-                    {TASK_REVIEW_STATE_LABELS[task.automatic_review.state]}
+                    {taskReviewStateLabel(
+                      task.automatic_review.state,
+                      task.reviewer_agent_enabled !== false
+                    )}
                   </Badge>
                 </div>
               </CardHeader>
@@ -669,7 +682,9 @@ export default function TaskDetailPage({
                     {task.automatic_review.summary_head_sha &&
                     task.automatic_review.summary_head_sha !==
                       task.automatic_review.head_sha
-                      ? " · New commits are awaiting review"
+                      ? task.reviewer_agent_enabled === false
+                        ? " · New commits since this review"
+                        : " · New commits are awaiting review"
                       : ""}
                   </p>
                 )}
