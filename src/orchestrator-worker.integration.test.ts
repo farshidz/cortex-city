@@ -187,7 +187,7 @@ test("pollOnce reconciles orphaned pids, resumes eligible work, and leaves final
   const callsFile = path.join(workspace, "resume-calls.jsonl");
   writeJson(scenarioFile, {
     codex: {
-      sleepMs: 300,
+      sleepMs: 2000,
     },
   });
 
@@ -412,6 +412,9 @@ test("pollOnce scans in-review tasks for merged, closed, pending, conflicts, unc
       tasks[4].last_review_gh_state = conflictHash;
       tasks[5].last_review_gh_state = unchangedHash;
       for (const task of tasks) {
+        // This fixture isolates the implementation agent's GitHub-feedback
+        // scan. Unified automatic-review behavior has dedicated worker tests.
+        task.reviewer_agent_enabled = false;
         task.worktree_path = ${JSON.stringify(workspace)};
         await createTask(task);
       }

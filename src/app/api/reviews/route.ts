@@ -3,7 +3,9 @@ import { readReviewSummaries } from "@/lib/review-store";
 import { getReviewStateSortGroup } from "@/lib/review-status";
 
 export async function GET() {
-  const reviews = readReviewSummaries();
+  const reviews = readReviewSummaries().filter(
+    (review) => review.source !== "task"
+  );
   reviews.sort((a, b) => {
     const groupDiff =
       getReviewStateSortGroup(a.review_state) -

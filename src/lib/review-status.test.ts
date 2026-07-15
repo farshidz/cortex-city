@@ -271,6 +271,43 @@ test("deriveReviewState enforces precedence and verdict-wins", () => {
   );
 });
 
+test("task-owned reviews use summary freshness and ignore human decision signals", () => {
+  assert.equal(
+    deriveReviewStatus({
+      ...base,
+      source: "task",
+      summary_head_sha: "head-sha",
+    }),
+    "up_to_date"
+  );
+  assert.equal(
+    deriveReviewStatus({
+      ...base,
+      source: "task",
+      summary_head_sha: "old-head-sha",
+    }),
+    "new_commits"
+  );
+  assert.equal(
+    deriveReviewState({
+      ...stateBase,
+      source: "task",
+      my_approval_sha: "head-sha",
+      agent_review_status: "needs_author_changes",
+    }),
+    "needs_author_changes"
+  );
+  assert.equal(
+    deriveReviewState({
+      ...stateBase,
+      source: "task",
+      my_changes_requested_sha: "head-sha",
+      agent_review_status: "ready_for_human_approval",
+    }),
+    "ready_to_approve"
+  );
+});
+
 test("withReviewStatus recomputes the legacy status", () => {
   assert.equal(
     withReviewStatus({

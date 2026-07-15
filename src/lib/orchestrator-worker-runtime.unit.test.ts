@@ -421,80 +421,6 @@ test("pollOnce rechecks latest review hash before launching review run", async (
   assert.deepEqual(spawnedTasks, []);
 });
 
-test("pollOnce launches a pending reviewer run before feedback handling", async () => {
-  const tasks: Task[] = [
-    sample({
-      id: "task-1",
-      status: "in_review",
-      pr_url: "https://github.com/acme/widget/pull/1",
-      pending_manual_instruction: "apply this after review",
-      reviewer_run_pending: true,
-      agent_runner: "codex",
-      permission_mode: "bypassPermissions",
-    }),
-  ];
-  const launchedModes: string[] = [];
-  const spawnedManualInstructions: Array<string | undefined> = [];
-  let hashCalls = 0;
-  const deps: WorkerRuntimeDeps = {
-    deleteReviewSummary: async () => {},
-    deleteTask: async () => {},
-    getPRStateHash: async () => {
-      hashCalls++;
-      return "new-hash";
-    },
-    getPRStatus: async () => "checks_pending",
-    getReviewRequestedPRs: async () => [],
-    getTask: async (id) => tasks.find((task) => task.id === id),
-    isPRMergedOrClosed: async () => null,
-    isPidRunning: () => true,
-    logger: { log: () => {}, error: () => {} },
-    readConfig: () => ({
-      max_parallel_sessions: 1,
-      poll_interval_seconds: 30,
-      default_permission_mode: "bypassPermissions",
-      default_agent_runner: "codex",
-      agents: {},
-    }),
-    readReviewLearnings: () => "",
-    readReviewSummaries: () => [],
-    readReviewSummaryMap: () => ({}),
-    readTasks: () => tasks,
-    removeWorktree: async () => {},
-    spawnAgentSession: async (task, mode) => {
-      spawnedManualInstructions.push(task.pending_manual_instruction);
-      launchedModes.push(mode);
-      return { pid: 202, child: {} as never };
-    },
-    spawnReviewRetro: async () => ({
-      pid: 0,
-      child: {} as never,
-      done: Promise.resolve(),
-    }),
-    spawnReviewSummary: async () => ({
-      pid: 303,
-      child: {} as never,
-      done: Promise.resolve({} as never),
-    }),
-    updateTask: async (id, updates) => {
-      const index = tasks.findIndex((task) => task.id === id);
-      assert.notEqual(index, -1);
-      tasks[index] = { ...tasks[index], ...updates };
-      return tasks[index];
-    },
-    upsertReviewSummary: async (summary) => summary as never,
-  };
-
-  await pollOnce(new Map(), deps, new Map());
-
-  assert.deepEqual(launchedModes, ["reviewer"]);
-  assert.deepEqual(spawnedManualInstructions, [undefined]);
-  assert.equal(hashCalls, 0);
-  assert.equal(tasks[0].reviewer_run_pending, false);
-  assert.equal(tasks[0].pending_manual_instruction, "apply this after review");
-  assert.equal(tasks[0].current_run_mode, "reviewer");
-});
-
 test("pollOnce skips paused open tasks", async () => {
   const tasks: Task[] = [
     sample({
@@ -564,7 +490,6 @@ test("pollOnce skips paused in_review tasks entirely", async () => {
       status: "in_review",
       paused: true,
       pr_url: "https://github.com/acme/widget/pull/1",
-      reviewer_run_pending: true,
       agent_runner: "codex",
       permission_mode: "bypassPermissions",
     }),
@@ -623,23 +548,22 @@ test("pollOnce skips paused in_review tasks entirely", async () => {
 
   assert.deepEqual(launchedModes, []);
   assert.equal(prStateChecks, 0);
-  assert.equal(tasks[0].reviewer_run_pending, true);
 });
 
-test("pollOnce skips pending reviewer runs when reviewer agent is disabled", async () => {
+test("pollOnce skips automatic reviews when automatic review is disabled", async () => {
   const tasks: Task[] = [
     sample({
       id: "task-1",
       status: "in_review",
       pr_url: "https://github.com/acme/widget/pull/1",
       reviewer_agent_enabled: false,
-      reviewer_run_pending: true,
       last_review_gh_state: "same-hash",
       agent_runner: "codex",
       permission_mode: "bypassPermissions",
     }),
   ];
   const launchedModes: string[] = [];
+  let reviewLaunches = 0;
   let hashCalls = 0;
   const deps: WorkerRuntimeDeps = {
     deleteReviewSummary: async () => {},
@@ -675,11 +599,14 @@ test("pollOnce skips pending reviewer runs when reviewer agent is disabled", asy
       child: {} as never,
       done: Promise.resolve(),
     }),
-    spawnReviewSummary: async () => ({
-      pid: 303,
-      child: {} as never,
-      done: Promise.resolve({} as never),
-    }),
+    spawnReviewSummary: async () => {
+      reviewLaunches++;
+      return {
+        pid: 303,
+        child: {} as never,
+        done: Promise.resolve({} as never),
+      };
+    },
     updateTask: async (id, updates) => {
       const index = tasks.findIndex((task) => task.id === id);
       assert.notEqual(index, -1);
@@ -693,6 +620,6 @@ test("pollOnce skips pending reviewer runs when reviewer agent is disabled", asy
 
   assert.deepEqual(launchedModes, []);
   assert.equal(hashCalls, 1);
-  assert.equal(tasks[0].reviewer_run_pending, true);
+  assert.equal(reviewLaunches, 0);
   assert.equal(tasks[0].current_run_mode, undefined);
 });

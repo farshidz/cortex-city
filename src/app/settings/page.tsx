@@ -22,7 +22,6 @@ import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import type {
-  AgentRuntime,
   ClaudeEffort,
   CodexEffort,
   OrchestratorConfig,
@@ -30,6 +29,10 @@ import type {
   TaskEffort,
 } from "@/lib/types";
 import { getEffortOptions, getPermissionOptions } from "@/lib/runtime-config";
+import {
+  applyReviewerRuntime,
+  buildConfigUpdate,
+} from "./reviewer-config";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const UNSET_VALUE = "__unset__";
@@ -72,6 +75,8 @@ export default function SettingsPage() {
   function handleRunnerChange(value: string) {
     if (!form) return;
     if (value !== "claude" && value !== "codex") return;
+    const reviewerRuntimeChanges =
+      !form.review_runtime && form.default_agent_runner !== value;
     const nextPermission = getPermissionOptions(value).some(
       (option) => option.value === form.default_permission_mode
     )
@@ -81,7 +86,16 @@ export default function SettingsPage() {
       ...form,
       default_agent_runner: value,
       default_permission_mode: nextPermission,
+      ...(reviewerRuntimeChanges
+        ? { review_effort: undefined, review_model: undefined }
+        : {}),
     });
+  }
+
+  function handleReviewRunnerChange(value: string) {
+    if (!form) return;
+    if (value !== "claude" && value !== "codex") return;
+    setForm(applyReviewerRuntime(form, value));
   }
 
   async function saveConfig() {
@@ -90,7 +104,9 @@ export default function SettingsPage() {
     await fetch("/api/config", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
+      // Keep explicit nulls in the update so clearing optional settings removes
+      // persisted overrides instead of being lost by JSON.stringify.
+      body: JSON.stringify(buildConfigUpdate(form)),
     });
     mutate();
     setSaving(false);
@@ -300,15 +316,15 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Review Summaries</CardTitle>
+          <CardTitle className="text-base">Reviewer</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label>Review Summary Prompt</Label>
+            <Label>Reviewer Prompt</Label>
             <Textarea
               rows={8}
               value={form.review_prompt ?? ""}
-              placeholder="Default summary prompt will be used if left blank."
+              placeholder="Default reviewer prompt will be used if left blank."
               onChange={(e) =>
                 setForm({
                   ...form,
@@ -318,17 +334,10 @@ export default function SettingsPage() {
             />
           </div>
           <div className="space-y-2">
-            <Label>Default Review Summary Runtime</Label>
+            <Label>Default Reviewer Runtime</Label>
             <Select
               value={form.review_runtime || form.default_agent_runner}
-              onValueChange={(v) =>
-                v &&
-                setForm({
-                  ...form,
-                  review_runtime: v as AgentRuntime,
-                  review_effort: undefined,
-                })
-              }
+              onValueChange={(v) => v && handleReviewRunnerChange(v)}
             >
               <SelectTrigger>
                 <SelectValue />
@@ -340,7 +349,28 @@ export default function SettingsPage() {
             </Select>
           </div>
           <div className="space-y-2">
-            <Label>Default Review Summary Effort</Label>
+            <Label>Default Reviewer Model</Label>
+            <Input
+              value={form.review_model ?? ""}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  review_model: e.target.value,
+                })
+              }
+              placeholder={
+                (form.review_runtime || form.default_agent_runner) === "codex"
+                  ? form.default_codex_model || "gpt-5.6"
+                  : form.default_claude_model || "claude-sonnet-4-6"
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              Enter any model supported by the selected runtime. Leave blank to
+              use that runtime&apos;s default model.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label>Default Reviewer Effort</Label>
             <Select
               value={form.review_effort || UNSET_VALUE}
               onValueChange={(v) =>
@@ -367,7 +397,7 @@ export default function SettingsPage() {
             </Select>
           </div>
           <div className="space-y-2">
-            <Label>Max Parallel Review Summary Runs</Label>
+            <Label>Max Parallel Review Runs</Label>
             <Input
               type="number"
               min={1}
@@ -392,6 +422,20 @@ export default function SettingsPage() {
               }
             />
             <Label>Learning enabled</Label>
+          </div>
+          <div className="space-y-2">
+            <Label>Task-owned review instructions (optional)</Label>
+            <Textarea
+              rows={6}
+              value={form.reviewer_agent_prompt ?? ""}
+              placeholder="Optional instructions applied when reviewing your task-owned pull requests."
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  reviewer_agent_prompt: e.target.value || undefined,
+                })
+              }
+            />
           </div>
         </CardContent>
       </Card>
@@ -432,28 +476,6 @@ export default function SettingsPage() {
               {learnings?.content?.trim() || "No review learnings recorded yet."}
             </pre>
           )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Reviewer Agent</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label>Reviewer Agent Instructions</Label>
-            <Textarea
-              rows={6}
-              value={form.reviewer_agent_prompt ?? ""}
-              placeholder="Optional instructions appended to the reviewer agent prompt."
-              onChange={(e) =>
-                setForm({
-                  ...form,
-                  reviewer_agent_prompt: e.target.value || undefined,
-                })
-              }
-            />
-          </div>
         </CardContent>
       </Card>
 

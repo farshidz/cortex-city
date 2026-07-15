@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getReviewSummary } from "@/lib/review-store";
-import { summarizePR } from "@/lib/review-runner";
+import {
+  ReviewRunInFlightError,
+  summarizePR,
+} from "@/lib/review-runner";
 import type { AgentRuntime, TaskEffort } from "@/lib/types";
 
 export async function POST(request: NextRequest) {
@@ -36,22 +39,30 @@ export async function POST(request: NextRequest) {
     overrides.model = body.model.trim();
   }
 
-  const result = await summarizePR(
-    {
-      pr_url: cached.pr_url,
-      pr_number: cached.pr_number,
-      repo_slug: cached.repo_slug,
-      title: cached.title,
-      author: cached.author,
-      head_sha: cached.head_sha,
-      created_at: cached.created_at,
-      updated_at: cached.updated_at,
-      my_last_review_sha: cached.my_last_review_sha,
-      my_approval_sha: cached.my_approval_sha,
-      my_changes_requested_sha: cached.my_changes_requested_sha,
-    },
-    overrides
-  );
+  let result: Awaited<ReturnType<typeof summarizePR>>;
+  try {
+    result = await summarizePR(
+      {
+        pr_url: cached.pr_url,
+        pr_number: cached.pr_number,
+        repo_slug: cached.repo_slug,
+        title: cached.title,
+        author: cached.author,
+        head_sha: cached.head_sha,
+        created_at: cached.created_at,
+        updated_at: cached.updated_at,
+        my_last_review_sha: cached.my_last_review_sha,
+        my_approval_sha: cached.my_approval_sha,
+        my_changes_requested_sha: cached.my_changes_requested_sha,
+      },
+      overrides
+    );
+  } catch (error) {
+    if (error instanceof ReviewRunInFlightError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    throw error;
+  }
 
   return NextResponse.json(result);
 }

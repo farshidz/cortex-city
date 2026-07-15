@@ -9,7 +9,9 @@ import {
 import path from "node:path";
 
 import {
+  buildReviewWrapperPrompt,
   DEFAULT_REVIEW_PROMPT,
+  isReviewSessionCompatible,
   parseReviewAgentStatus,
   resolveReviewOpts,
   resolveReviewPrompt,
@@ -23,7 +25,11 @@ import {
   writeJson,
   writeTestConfig,
 } from "./test-harness";
-import type { OrchestratorConfig, ReviewRequest } from "./types";
+import type {
+  OrchestratorConfig,
+  ReviewRequest,
+  ReviewSummary,
+} from "./types";
 
 const REVIEW_RUNNER_MODULE_URL = moduleUrl("src/lib/review-runner.ts");
 const REVIEW_STORE_MODULE_URL = moduleUrl("src/lib/review-store.ts");
@@ -122,6 +128,27 @@ test("resolveReviewOpts falls back to runtime-specific defaults when review_* is
   });
 });
 
+test("resolveReviewOpts does not leak the configured reviewer profile across runtimes", () => {
+  const config = baseConfig({
+    review_runtime: "codex",
+    review_effort: "ultra",
+    review_model: "gpt-5.6",
+  });
+  assert.deepEqual(resolveReviewOpts(config, { runtime: "claude" }), {
+    runtime: "claude",
+    effort: "high",
+    model: "claude-sonnet-4-6",
+  });
+  assert.deepEqual(
+    resolveReviewOpts(config, {
+      runtime: "claude",
+      effort: "low",
+      model: "claude-custom",
+    }),
+    { runtime: "claude", effort: "low", model: "claude-custom" }
+  );
+});
+
 test("resolveReviewPrompt prefers the configured prompt and falls back to the default", () => {
   assert.equal(resolveReviewPrompt(baseConfig()), DEFAULT_REVIEW_PROMPT);
   const custom = baseConfig({ review_prompt: "  my prompt  " });
@@ -195,6 +222,81 @@ test("buildReviewWrapperPrompt omits review learnings when disabled or empty", (
   assert.doesNotMatch(result.disabled, /## Lessons from past reviews/);
   assert.doesNotMatch(result.disabled, /Keep this hidden/);
   assert.doesNotMatch(result.empty, /## Lessons from past reviews/);
+});
+
+test("buildReviewWrapperPrompt applies source-specific policy and task context", () => {
+  const config = baseConfig({
+    review_learning_enabled: false,
+    reviewer_agent_prompt: "Check the task's accessibility requirements.",
+  });
+  const taskPrompt = buildReviewWrapperPrompt(
+    config,
+    sampleRequest({
+      source: "task",
+      task_id: "task-42",
+      task_title: "Improve keyboard navigation",
+      task_description: "Make every dialog keyboard accessible.",
+      task_plan: "Add focus trapping, then test escape handling.",
+    })
+  );
+  assert.match(taskPrompt, /Review source: task-owned pull request/);
+  assert.match(taskPrompt, /never approve it or request changes on GitHub/i);
+  assert.match(taskPrompt, /specific, actionable GitHub comments/i);
+  assert.match(taskPrompt, /Task ID: task-42/);
+  assert.match(taskPrompt, /Improve keyboard navigation/);
+  assert.match(taskPrompt, /Make every dialog keyboard accessible/);
+  assert.match(taskPrompt, /Add focus trapping/);
+  assert.match(taskPrompt, /Check the task's accessibility requirements/);
+  assert.match(taskPrompt, /never authorizes self-approval/i);
+
+  const inboundPrompt = buildReviewWrapperPrompt(config, sampleRequest());
+  assert.match(inboundPrompt, /Review source: inbound pull request/);
+  assert.match(inboundPrompt, /someone else's PR/);
+  assert.doesNotMatch(inboundPrompt, /accessibility requirements/);
+  assert.doesNotMatch(inboundPrompt, /Cortex task context/);
+});
+
+test("isReviewSessionCompatible requires the same source, runtime, model, and effort", () => {
+  const request = sampleRequest({ source: "inbound" });
+  const cached = {
+    ...request,
+    summary: "Reviewed",
+    generated_at: "2026-05-01T00:10:00.000Z",
+    review_status: "up_to_date",
+    review_state: "reviewed",
+    session_id: "session-1",
+    runtime: "codex",
+    effort: "xhigh",
+    model: "gpt-5.6",
+    session_profile: {
+      runtime: "codex",
+      effort: "xhigh",
+      model: "gpt-5.6",
+    },
+  } satisfies ReviewSummary;
+  assert.equal(
+    isReviewSessionCompatible(request, cached, {
+      runtime: "codex",
+      effort: "xhigh",
+      model: "gpt-5.6",
+    }),
+    true
+  );
+  for (const incompatible of [
+    { runtime: "claude", effort: "xhigh", model: "gpt-5.6" },
+    { runtime: "codex", effort: "high", model: "gpt-5.6" },
+    { runtime: "codex", effort: "xhigh", model: "gpt-5.5" },
+  ] as const) {
+    assert.equal(isReviewSessionCompatible(request, cached, incompatible), false);
+  }
+  assert.equal(
+    isReviewSessionCompatible(
+      { ...request, source: "task", task_id: "task-1" },
+      cached,
+      { runtime: "codex", effort: "xhigh", model: "gpt-5.6" }
+    ),
+    false
+  );
 });
 
 test("parseReviewAgentStatus reads the exact agent status marker", () => {
@@ -396,6 +498,72 @@ test("spawnReviewSummary preserves review signals updated while the run is in fl
   assert.equal(result.persisted.review_state, "approved");
 });
 
+test("spawnReviewSummary preserves a newer task target reconciled during the run", () => {
+  const workspace = setupRunnerWorkspace("review-runner-head-race-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "task-review-session",
+        result:
+          "## Summary\nReviewed old head.\n\n## Agent Status\nAgent status: ready_for_human_approval",
+        is_error: false,
+      }),
+      sleepMs: 100,
+    },
+  });
+
+  const request = sampleRequest({
+    source: "task",
+    task_id: "task-1",
+    task_title: "Original task title",
+    task_description: "Original goal",
+    task_plan: "Original plan",
+    head_sha: "old-head",
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary, readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const spawned = await spawnReviewSummary(
+        ${JSON.stringify(request)},
+        { runtime: "claude" }
+      );
+      await patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+        head_sha: "new-head",
+        updated_at: "2026-05-01T00:30:00.000Z",
+        task_title: "Updated task title",
+        task_description: "Updated goal",
+        task_plan: "Updated plan",
+      });
+      const summary = await spawned.done;
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  assert.equal(result.persisted.source, "task");
+  assert.equal(result.persisted.task_id, "task-1");
+  assert.equal(result.persisted.task_title, "Updated task title");
+  assert.equal(result.persisted.task_description, "Updated goal");
+  assert.equal(result.persisted.task_plan, "Updated plan");
+  assert.equal(result.persisted.head_sha, "new-head");
+  assert.equal(result.persisted.summary, "");
+  assert.equal(result.persisted.summary_head_sha, undefined);
+  assert.equal(result.persisted.review_status, "pending_summary");
+  assert.equal(result.persisted.review_state, "queued");
+  assert.equal(result.persisted.agent_review_status, undefined);
+});
+
 test("spawnReviewSummary keeps a mid-flight change request over the run's verdict", () => {
   const workspace = setupRunnerWorkspace("review-runner-changes-preserve-");
   const scenarioFile = path.join(workspace, "scenario.json");
@@ -494,6 +662,13 @@ test("summarizePR resumes cached review sessions for changed PRs", () => {
           summary_head_sha: "old-head",
           generated_at: "2026-05-01T00:00:00.000Z",
           runtime: "claude",
+          effort: "max",
+          model: "claude-sonnet-4-6",
+          session_profile: {
+            runtime: "claude",
+            effort: "max",
+            model: "claude-sonnet-4-6",
+          },
           session_id: "claude-session-1",
           agent_review_status: "ready_for_human_approval",
           followups: [
@@ -543,6 +718,82 @@ test("summarizePR resumes cached review sessions for changed PRs", () => {
   assert.equal(result.summary.agent_review_status, "needs_author_changes");
   assert.equal(result.summary.followups.length, 1);
   assert.equal(result.persisted.agent_review_status, "needs_author_changes");
+});
+
+test("summarizePR starts fresh when the configured review profile changed", () => {
+  const workspace = setupRunnerWorkspace("review-runner-profile-change-", {
+    review_runtime: "claude",
+    review_effort: "high",
+    review_model: "claude-new-model",
+  });
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const argsFile = path.join(workspace, "agent-args.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "fresh-session",
+        result: "## Summary\nFresh review.",
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ head_sha: "new-head" });
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify({
+      [request.pr_url]: {
+        ...sampleRequest({ head_sha: "old-head" }),
+        summary: "old summary",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        runtime: "claude",
+        effort: "max",
+        model: "claude-old-model",
+        session_profile: {
+          runtime: "claude",
+          effort: "max",
+          model: "claude-old-model",
+        },
+        session_id: "old-session",
+      },
+    })
+  );
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const summary = await summarizePR(${JSON.stringify(request)});
+      const args = JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8"));
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+        args,
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_AGENT_ARGS_FILE: argsFile,
+    }
+  );
+
+  assert.equal(result.args.args.includes("--resume"), false);
+  assert.equal(result.args.args.includes("old-session"), false);
+  assert.equal(result.summary.session_id, "fresh-session");
+  assert.equal(result.persisted.model, "claude-new-model");
+  assert.equal(result.persisted.effort, "high");
+  assert.deepEqual(result.persisted.session_profile, {
+    runtime: "claude",
+    effort: "high",
+    model: "claude-new-model",
+  });
 });
 
 test("summarizePR persists Codex output as a ReviewSummary", () => {
@@ -644,10 +895,12 @@ test("summarizePR records error and preserves previous summary on non-zero exit"
 
   assert.ok(result.summary.error, "error should be populated");
   assert.match(result.summary.error, /boom|claude exited with code 7/);
+  assert.equal(typeof result.summary.error_at, "string");
   assert.equal(result.summary.summary, "old text");
   assert.equal(result.summary.summary_head_sha, request.head_sha);
   assert.equal(result.persisted.summary, "old text");
   assert.equal(result.persisted.summary_head_sha, request.head_sha);
+  assert.equal(result.persisted.error_at, result.summary.error_at);
 });
 
 test("summarizePR applies the configured task run timeout", () => {
@@ -854,6 +1107,13 @@ test("askFollowup resumes the cached session on the happy path", () => {
           summary: "previous summary",
           generated_at: "2026-05-01T00:00:00.000Z",
           runtime: "claude",
+          effort: "max",
+          model: "claude-sonnet-4-6",
+          session_profile: {
+            runtime: "claude",
+            effort: "max",
+            model: "claude-sonnet-4-6",
+          },
           session_id: "claude-session-1",
         },
       },
@@ -880,6 +1140,11 @@ test("askFollowup resumes the cached session on the happy path", () => {
   assert.equal(result.resumed, true);
   assert.equal(result.answer, "Answered via resume.");
   assert.equal(result.session_id, "claude-session-1");
+  assert.deepEqual(result.session_profile, {
+    runtime: "claude",
+    effort: "max",
+    model: "claude-sonnet-4-6",
+  });
   assert.equal(result.error, undefined);
 });
 
@@ -920,6 +1185,13 @@ process.stdout.write(${JSON.stringify(
           summary: "previous summary",
           generated_at: "2026-05-01T00:00:00.000Z",
           runtime: "claude",
+          effort: "max",
+          model: "claude-sonnet-4-6",
+          session_profile: {
+            runtime: "claude",
+            effort: "max",
+            model: "claude-sonnet-4-6",
+          },
           session_id: "claude-session-1",
         },
       },
@@ -1049,6 +1321,13 @@ test("askFollowup over codex uses the resume flow when a session id is cached", 
           summary: "prior summary",
           generated_at: "2026-05-01T00:00:00.000Z",
           runtime: "codex",
+          effort: "xhigh",
+          model: "gpt-5.4",
+          session_profile: {
+            runtime: "codex",
+            effort: "xhigh",
+            model: "gpt-5.4",
+          },
           session_id: "codex-thread-1",
         },
       },
@@ -1153,6 +1432,59 @@ test("spawnReviewSummary invokes the onComplete hook with the final summary", ()
   assert.equal(result.final.summary, "Looks good.");
   assert.equal(result.final.runtime, "claude");
   assert.equal(result.onCompleteSeenSummary, "Looks good.");
+});
+
+test("spawnReviewSummary atomically rejects a duplicate run for the same PR", () => {
+  const workspace = setupRunnerWorkspace("review-runner-claim-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claimed-session",
+        result: "## Summary\nClaimed.",
+        is_error: false,
+      }),
+      sleepMs: 150,
+    },
+  });
+  const request = sampleRequest();
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+    ],
+    `
+      const first = await spawnReviewSummary(
+        ${JSON.stringify(request)},
+        { runtime: "claude" }
+      );
+      let duplicateError = "";
+      try {
+        await spawnReviewSummary(
+          ${JSON.stringify(request)},
+          { runtime: "claude" }
+        );
+      } catch (error) {
+        duplicateError = error instanceof Error ? error.message : String(error);
+      }
+      const completed = await first.done;
+      const afterRelease = await spawnReviewSummary(
+        ${JSON.stringify(request)},
+        { runtime: "claude" }
+      );
+      await afterRelease.done;
+      console.log(JSON.stringify({ duplicateError, completed }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  assert.match(result.duplicateError, /already in flight/);
+  assert.equal(result.completed.current_run_pid, undefined);
+  assert.equal(result.completed.current_run_id, undefined);
 });
 
 test("disk write race does not corrupt reviews.json under concurrent summarizations", () => {

@@ -71,7 +71,6 @@ export interface Task {
   // Orchestration metadata
   paused?: boolean; // when true, the worker skips this task during polls
   session_id?: string;
-  reviewer_session_id?: string;
   pr_url?: string;
   branch_name?: string;
   worktree_path?: string;
@@ -97,14 +96,11 @@ export interface Task {
   codex_cumulative_input_tokens?: number;
   codex_cumulative_cached_input_tokens?: number;
   codex_cumulative_output_tokens?: number;
-  reviewer_codex_usage_session_id?: string;
-  reviewer_codex_cumulative_input_tokens?: number;
-  reviewer_codex_cumulative_cached_input_tokens?: number;
-  reviewer_codex_cumulative_output_tokens?: number;
   // Review tracking
-  reviewer_run_pending?: boolean;
-  reviewer_last_reviewed_head_sha?: string;
   last_review_gh_state?: string; // hash of PR state captured after each run
+  // Rollout marker for a head already covered by the retired task reviewer.
+  // The unified reviewer takes over after the PR moves to a new head.
+  review_migration_head_sha?: string;
   pr_status?: "clean" | "checks_failing" | "checks_pending" | "needs_approval" | "conflicts" | "unstable" | "unknown";
   notes?: string;
   issue_id?: string;
@@ -127,7 +123,7 @@ export interface AgentConfig {
 
 export type PromptMode = "initial" | "review" | "cleanup";
 
-export type TaskRunMode = "initial" | "review" | "reviewer" | "cleanup";
+export type TaskRunMode = "initial" | "review" | "cleanup";
 
 export type ResumableTaskRunMode = Exclude<TaskRunMode, "cleanup">;
 
@@ -184,7 +180,19 @@ export type PRStatus =
   | "unstable"
   | "unknown";
 
+export type ReviewSource = "inbound" | "task";
+
 export interface ReviewRequest {
+  // Omitted by legacy callers/records. The review store normalizes an omitted
+  // or unknown source to "inbound" so existing review data remains safe.
+  source?: ReviewSource;
+  // Task linkage is populated only for Cortex-owned PRs. Keeping the task goal
+  // beside the review target lets the shared reviewer assess implementation
+  // completeness without coupling review execution back to the task runner.
+  task_id?: string;
+  task_title?: string;
+  task_description?: string;
+  task_plan?: string;
   pr_url: string;
   pr_number: number;
   repo_slug: string;
@@ -224,6 +232,12 @@ export type ReviewAgentStatus =
   | "needs_human_decision"
   | "blocked";
 
+export interface ReviewSessionProfile {
+  runtime: AgentRuntime;
+  effort?: TaskEffort;
+  model?: string;
+}
+
 // Single backend-derived state that merges the pipeline/freshness axis
 // (ReviewStatus) with the agent verdict axis (ReviewAgentStatus). The verdict
 // wins whenever it is present; otherwise the pipeline/freshness state shows.
@@ -252,11 +266,15 @@ export interface ReviewSummary extends ReviewRequest {
   runtime?: AgentRuntime;
   effort?: TaskEffort;
   model?: string;
+  // Presence means the complete resolved profile was snapshotted, including
+  // intentional undefined model/effort values that defer to the CLI.
+  session_profile?: ReviewSessionProfile;
   session_id?: string;
   duration_ms?: number;
   input_tokens?: number;
   output_tokens?: number;
   error?: string;
+  error_at?: string;
   agent_review_status?: ReviewAgentStatus;
   followups?: ReviewFollowup[];
   final_at?: string;
@@ -269,6 +287,7 @@ export interface ReviewSummary extends ReviewRequest {
   retro_run_pid?: number;
   retro_error?: string;
   current_run_pid?: number;
+  current_run_id?: string;
 }
 
 export interface ReviewFollowup {
@@ -277,6 +296,7 @@ export interface ReviewFollowup {
   answered_at: string;
   answer: string;
   session_id?: string;
+  session_profile?: ReviewSessionProfile;
   resumed: boolean;
   error?: string;
 }

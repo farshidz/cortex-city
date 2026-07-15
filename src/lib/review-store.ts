@@ -1,16 +1,77 @@
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { createHash } from "crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "fs";
+import { tmpdir } from "os";
 import path from "path";
+import * as lockfile from "proper-lockfile";
 import { withReviewState, withReviewStatus } from "./review-status";
 import type { ReviewState, ReviewStatus, ReviewSummary } from "./types";
 import { snapshotCortex } from "./cortex-git";
 import { ensureCortexDir } from "./store";
 
 const REVIEWS_FILE = path.join(process.cwd(), ".cortex", "reviews.json");
+const REVIEW_STORE_LOCK_TARGET = path.join(
+  tmpdir(),
+  "cortex-city-review-store-locks",
+  createHash("sha256").update(REVIEWS_FILE).digest("hex")
+);
 
 let writeLock: Promise<void> = Promise.resolve();
+const configuredLockStaleMs = Number(
+  process.env.CORTEX_REVIEW_STORE_LOCK_STALE_MS
+);
+const LOCK_STALE_MS = Number.isFinite(configuredLockStaleMs)
+  ? Math.max(5_000, configuredLockStaleMs)
+  : 30_000;
+const LOCK_UPDATE_MS = Math.max(1_000, Math.floor(LOCK_STALE_MS / 3));
 
-function withWriteLock<T>(fn: () => T): Promise<T> {
-  const result = writeLock.then(fn);
+interface AcquiredFileLock {
+  release: () => Promise<void>;
+  compromised: () => Error | undefined;
+}
+
+async function acquireFileLock(): Promise<AcquiredFileLock> {
+  ensureCortexDir();
+  mkdirSync(path.dirname(REVIEW_STORE_LOCK_TARGET), { recursive: true });
+  let compromised: Error | undefined;
+  const release = await lockfile.lock(REVIEW_STORE_LOCK_TARGET, {
+    realpath: false,
+    stale: LOCK_STALE_MS,
+    update: LOCK_UPDATE_MS,
+    retries: {
+      retries: 400,
+      factor: 1,
+      minTimeout: 25,
+      maxTimeout: 25,
+    },
+    onCompromised: (error) => {
+      compromised = error;
+    },
+  });
+  return { release, compromised: () => compromised };
+}
+
+function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  const result = writeLock.then(async () => {
+    const lock = await acquireFileLock();
+    try {
+      const value = await fn();
+      const compromised = lock.compromised();
+      if (compromised) throw compromised;
+      return value;
+    } finally {
+      try {
+        await lock.release();
+      } catch (error) {
+        if (!lock.compromised()) throw error;
+      }
+    }
+  });
   writeLock = result.then(() => {}, () => {});
   return result;
 }
@@ -23,7 +84,21 @@ type ReviewMap = Record<string, ReviewSummary>;
 type RawReviewMap = Record<string, ReviewSummaryInput>;
 
 function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
-  const normalized = { ...review };
+  const normalized: ReviewSummaryInput = {
+    ...review,
+    source: review.source === "task" ? "task" : "inbound",
+  };
+  if (normalized.source === "task") {
+    // Human approval/change-request signals belong to inbound reviews. They
+    // must never make a task owner's own PR look approved or changes-requested.
+    normalized.my_approval_sha = undefined;
+    normalized.my_changes_requested_sha = undefined;
+  } else {
+    normalized.task_id = undefined;
+    normalized.task_title = undefined;
+    normalized.task_description = undefined;
+    normalized.task_plan = undefined;
+  }
   if (normalized.summary?.trim() && !normalized.summary_head_sha) {
     normalized.summary_head_sha = normalized.head_sha;
   }
@@ -58,7 +133,12 @@ function readMap(): ReviewMap {
 
 function writeMapLocked(map: ReviewMap): void {
   ensureCortexDir();
-  writeFileSync(REVIEWS_FILE, JSON.stringify(map, null, 2));
+  const temp = path.join(
+    path.dirname(REVIEWS_FILE),
+    `.${path.basename(REVIEWS_FILE)}.${process.pid}.${Date.now()}.tmp`
+  );
+  writeFileSync(temp, JSON.stringify(map, null, 2));
+  renameSync(temp, REVIEWS_FILE);
   snapshotCortex("reviews");
 }
 
@@ -101,11 +181,63 @@ export function patchReviewSummary(
   });
 }
 
+export function mutateReviewSummary(
+  prUrl: string,
+  updater: (
+    current: ReviewSummary | undefined
+  ) => ReviewSummaryInput | undefined
+): Promise<ReviewSummary | undefined> {
+  return withWriteLock(() => {
+    const map = readMap();
+    const next = updater(map[prUrl]);
+    if (!next) return undefined;
+    const normalized = normalizeReview({ ...next, pr_url: prUrl });
+    map[prUrl] = normalized;
+    writeMapLocked(map);
+    return normalized;
+  });
+}
+
+export function clearReviewRunIfMatching(
+  prUrl: string,
+  currentRunPid: number,
+  currentRunId?: string
+): Promise<ReviewSummary | undefined> {
+  return mutateReviewSummary(prUrl, (current) => {
+    if (
+      !current ||
+      current.current_run_pid !== currentRunPid ||
+      current.current_run_id !== currentRunId
+    ) {
+      return undefined;
+    }
+    return {
+      ...current,
+      current_run_pid: undefined,
+      current_run_id: undefined,
+    };
+  });
+}
+
 export function deleteReviewSummary(prUrl: string): Promise<void> {
   return withWriteLock(() => {
     const map = readMap();
     if (!(prUrl in map)) return;
     delete map[prUrl];
     writeMapLocked(map);
+  });
+}
+
+export function deleteReviewSummaryIf(
+  prUrl: string,
+  predicate: (current: ReviewSummary) => boolean
+): Promise<boolean> {
+  return withWriteLock(() => {
+    const map = readMap();
+    const current = map[prUrl];
+    if (!current || !predicate(current)) return false;
+    delete map[prUrl];
+    writeMapLocked(map);
+    return true;
   });
 }

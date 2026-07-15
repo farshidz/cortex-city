@@ -22,6 +22,20 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const cached = getReviewSummary(prUrl);
+  if (decision !== "comment" && !cached) {
+    return NextResponse.json(
+      { error: "PR is not cached as an inbound review" },
+      { status: 404 }
+    );
+  }
+  if (cached?.source === "task" && decision !== "comment") {
+    return NextResponse.json(
+      { error: "Task-owned pull requests cannot be approved or rejected by their owner" },
+      { status: 400 }
+    );
+  }
+
   const result = await submitPRReview(prUrl, decision, reviewBody);
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
@@ -35,7 +49,6 @@ export async function POST(request: NextRequest) {
   // agent verdict, so the row can't keep showing e.g. "Ready to approve" after
   // the human has requested changes. The two signals are mutually exclusive.
   if (decision !== "comment") {
-    const cached = getReviewSummary(prUrl);
     if (cached?.head_sha) {
       const approving = decision === "approve";
       await patchReviewSummary(prUrl, {

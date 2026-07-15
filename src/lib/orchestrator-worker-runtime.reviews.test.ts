@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import {
   FINAL_CLASSIFICATION_RETRY_MS,
   PRUNE_AGE_MS,
+  REVIEW_ERROR_RETRY_MS,
   pollOnce,
+  shouldRetryErroredReview,
   type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
 import { withReviewStatus } from "./review-status";
@@ -12,6 +14,7 @@ import type {
   OrchestratorConfig,
   ReviewRequest,
   ReviewSummary,
+  Task,
 } from "./types";
 
 interface HarnessOptions {
@@ -23,6 +26,9 @@ interface HarnessOptions {
   isPidRunning?: (pid: number) => boolean;
   spawnPid?: () => number;
   learnings?: string;
+  tasks?: Task[];
+  prHeadShas?: Record<string, string>;
+  getReviewRequestedPRs?: () => Promise<ReviewRequest[]>;
 }
 
 interface Harness {
@@ -32,6 +38,11 @@ interface Harness {
   retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }>;
   deletedPrUrls: string[];
   activeReviewPids: Map<string, number>;
+  activeTaskPids: Map<string, number>;
+  builderCalls: Array<{ task: Task; mode: string }>;
+  stoppedLegacyReviewerPids: number[];
+  reviewCompletions: Array<(summary: ReviewSummary) => Promise<void>>;
+  tasks: Task[];
 }
 
 function makeConfig(
@@ -74,20 +85,45 @@ function makeSummary(
   }) as ReviewSummary;
 }
 
+function makeTask(overrides: Partial<Task> = {}): Task {
+  return {
+    id: "task-1",
+    title: "Implement fizzbuzz",
+    description: "Build the task-owned behavior",
+    plan: "Add focused tests",
+    status: "in_review",
+    agent: "cortex-city-swe",
+    reviewer_agent_enabled: true,
+    pr_url: "https://github.com/acme/widget/pull/1",
+    created_at: "2026-05-01T00:00:00.000Z",
+    updated_at: "2026-05-01T00:10:00.000Z",
+    ...overrides,
+  };
+}
+
 function makeHarness(options: HarnessOptions = {}): Harness {
   const reviews: Record<string, ReviewSummary> = { ...(options.reviews || {}) };
   const spawnCalls: ReviewRequest[] = [];
   const retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }> = [];
   const deletedPrUrls: string[] = [];
+  const tasks = [...(options.tasks || [])];
+  const builderCalls: Array<{ task: Task; mode: string }> = [];
+  const stoppedLegacyReviewerPids: number[] = [];
+  const reviewCompletions: Array<
+    (summary: ReviewSummary) => Promise<void>
+  > = [];
   let nextPid = 50_000;
   const spawnPid = options.spawnPid || (() => nextPid++);
 
   const deps: WorkerRuntimeDeps = {
     deleteTask: async () => {},
+    getPRHeadSha: async (prUrl) => options.prHeadShas?.[prUrl] || "",
     getPRStateHash: async () => "",
     getPRStatus: async () => "unknown",
-    getReviewRequestedPRs: async () => options.openReviewRequests || [],
-    getTask: async () => undefined,
+    getReviewRequestedPRs:
+      options.getReviewRequestedPRs ||
+      (async () => options.openReviewRequests || []),
+    getTask: async (id) => tasks.find((task) => task.id === id),
     isPRMergedOrClosed:
       options.isPRMergedOrClosed ||
       (async (prUrl) =>
@@ -95,17 +131,20 @@ function makeHarness(options: HarnessOptions = {}): Harness {
           ? options.prFinalStates[prUrl]
           : null),
     isPidRunning: options.isPidRunning || (() => true),
+    stopLegacyReviewerProcess: (pid) => {
+      stoppedLegacyReviewerPids.push(pid);
+    },
     logger: { log: () => {}, error: () => {} },
     readConfig: () => makeConfig(options.config),
     readReviewLearnings: () => options.learnings || "",
     readReviewSummaries: () => Object.values(reviews),
     readReviewSummaryMap: () => ({ ...reviews }),
-    readTasks: () => [],
+    readTasks: () => tasks,
     removeWorktree: async () => {},
-    spawnAgentSession: async () => ({
-      pid: 0,
-      child: {} as never,
-    }),
+    spawnAgentSession: async (task, mode) => {
+      builderCalls.push({ task, mode });
+      return { pid: spawnPid(), child: {} as never };
+    },
     spawnReviewSummary: async (request, _opts, onComplete) => {
       spawnCalls.push(request);
       const pid = spawnPid();
@@ -116,14 +155,15 @@ function makeHarness(options: HarnessOptions = {}): Harness {
           current_run_pid: pid,
         }),
       };
+      if (onComplete) {
+        reviewCompletions.push(async (summary) => {
+          await onComplete(summary);
+        });
+      }
       return {
         pid,
         child: {} as never,
-        done: (async () => {
-          const entry = reviews[request.pr_url] || makeSummary(request);
-          await onComplete?.(entry);
-          return entry;
-        })(),
+        done: new Promise<ReviewSummary>(() => {}),
       };
     },
     spawnReviewRetro: async (review, learningsBefore) => {
@@ -142,14 +182,48 @@ function makeHarness(options: HarnessOptions = {}): Harness {
         done: new Promise<void>(() => {}),
       };
     },
-    updateTask: async () => ({}) as never,
+    updateTask: async (id, updates) => {
+      const index = tasks.findIndex((task) => task.id === id);
+      if (index < 0) throw new Error(`Task ${id} not found`);
+      tasks[index] = { ...tasks[index], ...updates };
+      return tasks[index];
+    },
     upsertReviewSummary: async (entry) => {
       reviews[entry.pr_url] = withReviewStatus(entry) as ReviewSummary;
       return reviews[entry.pr_url];
     },
+    clearReviewRunIfMatching: async (prUrl, currentRunPid, currentRunId) => {
+      const current = reviews[prUrl];
+      if (
+        !current ||
+        current.current_run_pid !== currentRunPid ||
+        current.current_run_id !== currentRunId
+      ) {
+        return undefined;
+      }
+      reviews[prUrl] = withReviewStatus({
+        ...current,
+        current_run_pid: undefined,
+        current_run_id: undefined,
+      }) as ReviewSummary;
+      return reviews[prUrl];
+    },
+    mutateReviewSummary: async (prUrl, updater) => {
+      const next = updater(reviews[prUrl]);
+      if (!next) return undefined;
+      reviews[prUrl] = withReviewStatus(next) as ReviewSummary;
+      return reviews[prUrl];
+    },
     deleteReviewSummary: async (prUrl) => {
       deletedPrUrls.push(prUrl);
       delete reviews[prUrl];
+    },
+    deleteReviewSummaryIf: async (prUrl, predicate) => {
+      const current = reviews[prUrl];
+      if (!current || !predicate(current)) return false;
+      deletedPrUrls.push(prUrl);
+      delete reviews[prUrl];
+      return true;
     },
   };
 
@@ -160,6 +234,11 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     retroCalls,
     deletedPrUrls,
     activeReviewPids: new Map(),
+    activeTaskPids: new Map(),
+    builderCalls,
+    stoppedLegacyReviewerPids,
+    reviewCompletions,
+    tasks,
   };
 }
 
@@ -352,6 +431,481 @@ test("pollOnce respects max_parallel_reviews", async () => {
   assert.equal(h.activeReviewPids.size, 1);
 });
 
+test("pollOnce queues a task-owned review with task context when task slots are full", async () => {
+  const task = makeTask();
+  const unrelatedActiveTask = makeTask({
+    id: "active-builder",
+    status: "in_progress",
+    pr_url: undefined,
+    current_run_pid: 41_000,
+  });
+  const h = makeHarness({
+    config: { max_parallel_sessions: 1 },
+    tasks: [unrelatedActiveTask, task],
+    prHeadShas: { [task.pr_url!]: "task-head" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.builderCalls.length, 0);
+  assert.equal(h.spawnCalls.length, 1);
+  assert.deepEqual(h.spawnCalls[0], {
+    source: "task",
+    task_id: task.id,
+    task_title: task.title,
+    task_description: task.description,
+    task_plan: task.plan,
+    pr_url: task.pr_url,
+    pr_number: 1,
+    repo_slug: "acme/widget",
+    title: task.title,
+    author: "",
+    head_sha: "task-head",
+    created_at: task.created_at,
+    updated_at: task.updated_at,
+  });
+});
+
+test("pollOnce excludes task-owned reviews while their builder is active", async () => {
+  const task = makeTask({ current_run_pid: 41_001 });
+  const h = makeHarness({
+    tasks: [task],
+    // Even if GitHub discovery unexpectedly returns the owner's PR, task
+    // coordination must prevent the inbound path from bypassing the builder.
+    openReviewRequests: [makeRequest()],
+    prHeadShas: { [task.pr_url!]: "task-head" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.activeTaskPids.get(task.id), 41_001);
+  assert.equal(h.spawnCalls.length, 0);
+  assert.equal(h.reviews[task.pr_url!], undefined);
+});
+
+test("pollOnce stops a live retired task reviewer before unified review", async () => {
+  const task = makeTask({
+    current_run_pid: 41_002,
+    current_run_mode: "reviewer" as never,
+  });
+  const h = makeHarness({
+    tasks: [task],
+    prHeadShas: { [task.pr_url!]: "task-head" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.stoppedLegacyReviewerPids, [41_002]);
+  assert.equal(h.activeTaskPids.get(task.id), 41_002);
+  assert.deepEqual(h.spawnCalls, []);
+});
+
+test("pollOnce skips a head covered during migration and reviews the next head", async () => {
+  const task = makeTask({ review_migration_head_sha: "legacy-head" });
+  const heads = { [task.pr_url!]: "legacy-head" };
+  const h = makeHarness({ tasks: [task], prHeadShas: heads });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.spawnCalls.length, 0);
+  assert.equal(h.tasks[0].review_migration_head_sha, "legacy-head");
+
+  heads[task.pr_url!] = "unified-head";
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.tasks[0].review_migration_head_sha, undefined);
+  assert.equal(h.spawnCalls.length, 1);
+  assert.equal(h.spawnCalls[0].head_sha, "unified-head");
+  assert.equal(h.spawnCalls[0].source, "task");
+});
+
+test("pollOnce deduplicates an inbound request in favor of task ownership", async () => {
+  const task = makeTask({
+    resume_requested: true,
+    resume_run_mode: "review",
+  });
+  const inbound = makeRequest({
+    title: "Inbound title must not win",
+    author: "someone-else",
+    head_sha: "same-head",
+    my_approval_sha: "same-head",
+  });
+  const h = makeHarness({
+    tasks: [task],
+    openReviewRequests: [inbound],
+    reviews: {
+      [inbound.pr_url]: makeSummary(inbound, {
+        source: "inbound",
+        summary: "Reviewed without task context.",
+        summary_head_sha: inbound.head_sha,
+        generated_at: "2026-05-01T00:05:00.000Z",
+      }),
+    },
+    prHeadShas: { [task.pr_url!]: "same-head" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.builderCalls, []);
+  assert.equal(h.spawnCalls.length, 1);
+  assert.equal(h.spawnCalls[0].source, "task");
+  assert.equal(h.spawnCalls[0].task_id, task.id);
+  assert.equal(h.spawnCalls[0].title, task.title);
+  assert.equal(h.spawnCalls[0].my_approval_sha, undefined);
+  assert.equal(h.reviews[task.pr_url!].source, "task");
+  assert.equal(h.reviews[task.pr_url!].task_id, task.id);
+});
+
+test("pollOnce invalidates review context when the head and owner change together", async () => {
+  const task = makeTask();
+  const inbound = makeRequest({
+    head_sha: "old-head",
+    title: "Inbound title",
+    author: "someone-else",
+  });
+  const h = makeHarness({
+    tasks: [task],
+    reviews: {
+      [inbound.pr_url]: makeSummary(inbound, {
+        source: "inbound",
+        summary: "Reviewed under inbound policy.",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:05:00.000Z",
+        session_id: "inbound-session",
+        session_profile: { runtime: "codex", model: "gpt-old" },
+        followups: [
+          {
+            asked_at: "2026-05-01T00:06:00.000Z",
+            question: "old question",
+            answered_at: "2026-05-01T00:07:00.000Z",
+            answer: "old answer",
+            resumed: true,
+          },
+        ],
+      }),
+    },
+    prHeadShas: { [task.pr_url!]: "new-head" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.spawnCalls.length, 1);
+  assert.equal(h.spawnCalls[0].source, "task");
+  const stored = h.reviews[task.pr_url!];
+  assert.equal(stored.source, "task");
+  assert.equal(stored.head_sha, "new-head");
+  assert.equal(stored.summary, "");
+  assert.equal(stored.summary_head_sha, undefined);
+  assert.equal(stored.session_id, undefined);
+  assert.equal(stored.session_profile, undefined);
+  assert.deepEqual(stored.followups, []);
+});
+
+test("pollOnce retries an errored current-head refresh after backoff", async () => {
+  const pr = makeRequest();
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: {
+      [pr.pr_url]: makeSummary(pr, {
+        summary: "Last successful summary.",
+        summary_head_sha: pr.head_sha,
+        error: "Temporary runtime failure",
+        error_at: "2020-01-01T00:00:00.000Z",
+        runtime: "claude",
+        session_profile: { runtime: "claude" },
+      }),
+    },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.spawnCalls.length, 1);
+  assert.equal(h.spawnCalls[0].pr_url, pr.pr_url);
+});
+
+test("pollOnce lets resumable implementation work proceed when a review head is unavailable", async () => {
+  const task = makeTask({
+    resume_requested: true,
+    resume_run_mode: "review",
+  });
+  const h = makeHarness({ tasks: [task] });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.builderCalls.length, 1);
+  assert.equal(h.builderCalls[0].mode, "review");
+  assert.deepEqual(h.spawnCalls, []);
+});
+
+test("pollOnce reviews the fetched head before resuming a task builder", async () => {
+  const task = makeTask({
+    resume_requested: true,
+    resume_run_mode: "review",
+  });
+  const cachedRequest = makeRequest({
+    source: "task",
+    task_id: task.id,
+    task_title: task.title,
+    task_description: task.description,
+    task_plan: task.plan,
+    head_sha: "old-head",
+  });
+  const h = makeHarness({
+    tasks: [task],
+    reviews: {
+      [task.pr_url!]: makeSummary(cachedRequest, {
+        summary: "The old head was clean.",
+        summary_head_sha: "old-head",
+      }),
+    },
+    prHeadShas: { [task.pr_url!]: "new-head" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.builderCalls, []);
+  assert.equal(h.spawnCalls.length, 1);
+  assert.equal(h.spawnCalls[0].head_sha, "new-head");
+});
+
+test("errored reviews back off unless the reviewer profile changes", () => {
+  const request = makeRequest();
+  const failedAt = new Date("2026-05-01T00:00:00.000Z");
+  const review = makeSummary(request, {
+    error: "Unsupported model",
+    error_at: failedAt.toISOString(),
+    runtime: "codex",
+    effort: "high",
+    model: "gpt-unavailable",
+    session_profile: {
+      runtime: "codex",
+      effort: "high",
+      model: "gpt-unavailable",
+    },
+  });
+  const sameProfile = makeConfig({
+    review_runtime: "codex",
+    review_effort: "high",
+    review_model: "gpt-unavailable",
+  });
+
+  assert.equal(
+    shouldRetryErroredReview(
+      review,
+      sameProfile,
+      failedAt.getTime() + REVIEW_ERROR_RETRY_MS - 1
+    ),
+    false
+  );
+  assert.equal(
+    shouldRetryErroredReview(
+      review,
+      sameProfile,
+      failedAt.getTime() + REVIEW_ERROR_RETRY_MS
+    ),
+    true
+  );
+  assert.equal(
+    shouldRetryErroredReview(
+      review,
+      { ...sameProfile, review_model: "gpt-fixed" },
+      failedAt.getTime() + 1
+    ),
+    true
+  );
+});
+
+test("pollOnce keeps a task builder queued while its shared review is running", async () => {
+  const task = makeTask({
+    resume_requested: true,
+    resume_run_mode: "review",
+  });
+  const request = makeRequest({
+    source: "task",
+    task_id: task.id,
+    task_title: task.title,
+    task_description: task.description,
+    task_plan: task.plan,
+  });
+  const cached = makeSummary(request, {
+    current_run_pid: 41_002,
+  });
+  const h = makeHarness({
+    tasks: [task],
+    reviews: { [request.pr_url]: cached },
+    prHeadShas: { [task.pr_url!]: request.head_sha },
+    isPidRunning: (pid) => pid === 41_002,
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.builderCalls, []);
+  assert.equal(h.tasks[0].resume_requested, true);
+  assert.equal(h.tasks[0].resume_run_mode, "review");
+  assert.equal(h.activeReviewPids.get(request.pr_url), 41_002);
+  assert.deepEqual(h.spawnCalls, []);
+});
+
+test("task review completion wakes the builder only for current actionable findings", async () => {
+  const actionableTask = makeTask();
+  const actionable = makeHarness({
+    tasks: [actionableTask],
+    prHeadShas: { [actionableTask.pr_url!]: "actionable-head" },
+  });
+  await pollOnce(
+    actionable.activeTaskPids,
+    actionable.deps,
+    actionable.activeReviewPids
+  );
+  assert.equal(actionable.reviewCompletions.length, 1);
+
+  const actionableRequest = actionable.spawnCalls[0];
+  await actionable.reviewCompletions[0](
+    makeSummary(actionableRequest, {
+      summary: "## Summary\nChanges are required.",
+      summary_head_sha: actionableRequest.head_sha,
+      generated_at: "2026-05-01T00:20:00.000Z",
+      agent_review_status: "needs_author_changes",
+      current_run_pid: undefined,
+    })
+  );
+
+  assert.equal(actionable.tasks[0].resume_requested, true);
+  assert.equal(actionable.tasks[0].resume_run_mode, "review");
+  assert.equal(actionable.activeReviewPids.has(actionableRequest.pr_url), false);
+
+  const cleanTask = makeTask({
+    id: "clean-task",
+    pr_url: "https://github.com/acme/widget/pull/2",
+  });
+  const clean = makeHarness({
+    tasks: [cleanTask],
+    prHeadShas: { [cleanTask.pr_url!]: "clean-head" },
+  });
+  await pollOnce(clean.activeTaskPids, clean.deps, clean.activeReviewPids);
+  assert.equal(clean.reviewCompletions.length, 1);
+
+  const cleanRequest = clean.spawnCalls[0];
+  await clean.reviewCompletions[0](
+    makeSummary(cleanRequest, {
+      summary: "## Summary\nNo blocking findings.",
+      summary_head_sha: cleanRequest.head_sha,
+      generated_at: "2026-05-01T00:20:00.000Z",
+      agent_review_status: "ready_for_human_approval",
+      current_run_pid: undefined,
+    })
+  );
+
+  assert.equal(clean.tasks[0].resume_requested, undefined);
+  assert.equal(clean.tasks[0].resume_run_mode, undefined);
+  assert.equal(clean.activeReviewPids.has(cleanRequest.pr_url), false);
+
+  const optedOutTask = makeTask({ id: "opted-out-task" });
+  const optedOut = makeHarness({
+    tasks: [optedOutTask],
+    prHeadShas: { [optedOutTask.pr_url!]: "opted-out-head" },
+  });
+  await pollOnce(
+    optedOut.activeTaskPids,
+    optedOut.deps,
+    optedOut.activeReviewPids
+  );
+  assert.equal(optedOut.reviewCompletions.length, 1);
+  optedOut.tasks[0].reviewer_agent_enabled = false;
+
+  const optedOutRequest = optedOut.spawnCalls[0];
+  await optedOut.reviewCompletions[0](
+    makeSummary(optedOutRequest, {
+      summary: "## Summary\nChanges are required.",
+      summary_head_sha: optedOutRequest.head_sha,
+      generated_at: "2026-05-01T00:20:00.000Z",
+      agent_review_status: "needs_author_changes",
+      current_run_pid: undefined,
+    })
+  );
+
+  assert.equal(optedOut.tasks[0].resume_requested, undefined);
+  assert.equal(optedOut.tasks[0].resume_run_mode, undefined);
+});
+
+test("paused and automatic-review-disabled task PRs stay live without spawning", async () => {
+  const pausedTask = makeTask({ paused: true });
+  const disabledTask = makeTask({
+    id: "disabled-task",
+    pr_url: "https://github.com/acme/widget/pull/2",
+    reviewer_agent_enabled: false,
+  });
+  const pausedRequest = makeRequest({
+    source: "task",
+    task_id: pausedTask.id,
+  });
+  const disabledRequest = makeRequest({
+    source: "task",
+    task_id: disabledTask.id,
+    pr_url: disabledTask.pr_url!,
+    pr_number: 2,
+    head_sha: "disabled-head",
+  });
+  const h = makeHarness({
+    tasks: [pausedTask, disabledTask],
+    reviews: {
+      [pausedRequest.pr_url]: makeSummary(pausedRequest, {
+        summary: "paused summary",
+        generated_at: "2026-05-01T00:00:00.000Z",
+      }),
+      [disabledRequest.pr_url]: makeSummary(disabledRequest, {
+        summary: "disabled summary",
+        generated_at: "2026-05-01T00:00:00.000Z",
+      }),
+    },
+    prFinalStates: {
+      [pausedRequest.pr_url]: "closed",
+      [disabledRequest.pr_url]: null,
+    },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.spawnCalls, []);
+  assert.equal(h.reviews[pausedRequest.pr_url].final_at, undefined);
+  assert.equal(h.reviews[disabledRequest.pr_url].final_at, undefined);
+  assert.deepEqual(h.deletedPrUrls, []);
+});
+
+test("a merged task-owned review enters the shared retrospective flow", async () => {
+  const task = makeTask();
+  const request = makeRequest({
+    source: "task",
+    task_id: task.id,
+    task_title: task.title,
+    task_description: task.description,
+    task_plan: task.plan,
+  });
+  const h = makeHarness({
+    tasks: [task],
+    reviews: {
+      [request.pr_url]: makeSummary(request, {
+        summary: "## Summary\nReviewed task implementation.",
+        summary_head_sha: request.head_sha,
+        generated_at: "2026-05-01T00:00:00.000Z",
+        agent_review_status: "ready_for_human_approval",
+      }),
+    },
+    prFinalStates: { [request.pr_url]: "merged" },
+    learnings: "Existing learning context",
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.tasks[0].status, "merged");
+  assert.equal(h.reviews[request.pr_url].final_state, "merged");
+  assert.equal(h.reviews[request.pr_url].retro_status, "pending");
+  assert.equal(h.retroCalls.length, 1);
+  assert.equal(h.retroCalls[0].review.source, "task");
+  assert.equal(h.retroCalls[0].review.task_id, task.id);
+  assert.equal(h.retroCalls[0].learningsBefore, "Existing learning context");
+});
+
 test("pollOnce stamps final_at when a PR drops out of the live list", async () => {
   const pr = makeRequest();
   const cached = makeSummary(pr, {
@@ -371,6 +925,87 @@ test("pollOnce stamps final_at when a PR drops out of the live list", async () =
   // Summary is preserved during the 24h grace period.
   assert.equal(stored.summary, "old summary");
   assert.equal(h.deletedPrUrls.length, 0);
+});
+
+test("final-state lookup does not overwrite a review claimed while lookup is in flight", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  let lookupStartedResolve!: () => void;
+  const lookupStarted = new Promise<void>((resolve) => {
+    lookupStartedResolve = resolve;
+  });
+  let finishLookup!: (state: "closed") => void;
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPRMergedOrClosed: async () => {
+      lookupStartedResolve();
+      return new Promise<"closed">((resolve) => {
+        finishLookup = resolve;
+      });
+    },
+  });
+
+  const poll = pollOnce(new Map(), h.deps, h.activeReviewPids);
+  await lookupStarted;
+  h.reviews[pr.pr_url] = makeSummary(pr, {
+    summary: "new run in flight",
+    generated_at: "2026-05-01T00:10:00.000Z",
+    current_run_pid: 70_000,
+    current_run_id: "new-owner",
+  });
+  finishLookup("closed");
+  await poll;
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.summary, "new run in flight");
+  assert.equal(stored.current_run_pid, 70_000);
+  assert.equal(stored.current_run_id, "new-owner");
+  assert.equal(stored.final_at, undefined);
+  assert.equal(stored.final_state, undefined);
+});
+
+test("final-state lookup merges into a review completed while lookup is in flight", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "old summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  let lookupStartedResolve!: () => void;
+  const lookupStarted = new Promise<void>((resolve) => {
+    lookupStartedResolve = resolve;
+  });
+  let finishLookup!: (state: "closed") => void;
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPRMergedOrClosed: async () => {
+      lookupStartedResolve();
+      return new Promise<"closed">((resolve) => {
+        finishLookup = resolve;
+      });
+    },
+  });
+
+  const poll = pollOnce(new Map(), h.deps, h.activeReviewPids);
+  await lookupStarted;
+  h.reviews[pr.pr_url] = makeSummary(pr, {
+    summary: "new completed summary",
+    summary_head_sha: pr.head_sha,
+    generated_at: "2026-05-01T00:10:00.000Z",
+    session_id: "new-session",
+  });
+  finishLookup("closed");
+  await poll;
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.summary, "new completed summary");
+  assert.equal(stored.session_id, "new-session");
+  assert.equal(stored.final_state, "closed");
+  assert.ok(stored.final_at);
 });
 
 test("pollOnce marks merged reviews pending and spawns one retro", async () => {
@@ -755,6 +1390,44 @@ test("pollOnce marks dead persisted retro pids as errors", async () => {
   assert.equal(h.reviews[pr.pr_url].retro_run_pid, undefined);
 });
 
+test("dead-retro reconciliation does not overwrite a concurrent completion", async () => {
+  const pr = makeRequest();
+  const finalAt = new Date().toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_at: finalAt,
+    final_state: "merged",
+    retro_status: "pending",
+    retro_run_pid: 60_001,
+  });
+  let completeRetro = () => {};
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    isPidRunning: (pid) => {
+      if (pid === 60_001) completeRetro();
+      return false;
+    },
+  });
+  completeRetro = () => {
+    h.reviews[pr.pr_url] = makeSummary(pr, {
+      ...h.reviews[pr.pr_url],
+      retro_status: "done",
+      retro_done_at: "2026-05-01T00:30:00.000Z",
+      retro_run_pid: undefined,
+    });
+  };
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(stored.retro_status, "done");
+  assert.equal(stored.retro_done_at, "2026-05-01T00:30:00.000Z");
+  assert.equal(stored.retro_error, undefined);
+  assert.equal(stored.retro_run_pid, undefined);
+});
+
 test("pollOnce keeps in-flight retros through the review GC window", async () => {
   const pr = makeRequest();
   const aged = new Date(Date.now() - (PRUNE_AGE_MS + 60_000)).toISOString();
@@ -857,6 +1530,35 @@ test("pollOnce deletes review entries whose final_at is older than the prune age
 
   assert.deepEqual(h.deletedPrUrls, [pr.pr_url]);
   assert.equal(h.reviews[pr.pr_url], undefined);
+});
+
+test("review GC does not delete a record claimed after its snapshot", async () => {
+  const pr = makeRequest();
+  const aged = new Date(Date.now() - (PRUNE_AGE_MS + 60_000)).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_at: aged,
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+  });
+  const conditionalDelete = h.deps.deleteReviewSummaryIf!;
+  h.deps.deleteReviewSummaryIf = async (prUrl, predicate) => {
+    h.reviews[prUrl] = makeSummary(pr, {
+      ...h.reviews[prUrl],
+      current_run_pid: 70_001,
+      current_run_id: "new-owner",
+    });
+    return conditionalDelete(prUrl, predicate);
+  };
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.deletedPrUrls, []);
+  assert.equal(h.reviews[pr.pr_url].current_run_pid, 70_001);
+  assert.equal(h.reviews[pr.pr_url].current_run_id, "new-owner");
 });
 
 test("pollOnce clears orphaned review pids during pid reconcile", async () => {

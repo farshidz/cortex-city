@@ -1,10 +1,15 @@
 import { spawn, type ChildProcess } from "child_process";
+import { createHash, randomUUID } from "crypto";
+import { mkdirSync } from "fs";
+import os from "os";
+import path from "path";
+import * as lockfile from "proper-lockfile";
 import { buildEnv, buildModelArgsWith, buildPermissionArgs } from "./runtime-args";
 import { readReviewLearnings } from "./review-learnings-store";
 import {
   getReviewSummary,
+  mutateReviewSummary,
   patchReviewSummary,
-  upsertReviewSummary,
 } from "./review-store";
 import { readConfig } from "./store";
 import {
@@ -17,9 +22,105 @@ import type {
   ReviewAgentStatus,
   ReviewFollowup,
   ReviewRequest,
+  ReviewSessionProfile,
+  ReviewSource,
   ReviewSummary,
   TaskEffort,
 } from "./types";
+
+interface ReviewRunLockData {
+  token: string;
+}
+
+interface ReviewRunLock {
+  data: ReviewRunLockData;
+  release: () => Promise<void>;
+  compromised: () => Error | undefined;
+}
+
+const REVIEW_RUN_LOCK_STALE_MS = 30_000;
+const REVIEW_RUN_LOCK_UPDATE_MS = 10_000;
+
+export class ReviewRunInFlightError extends Error {}
+
+function isProcessRunning(pid?: number): boolean {
+  if (typeof pid !== "number" || !Number.isFinite(pid)) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function reviewRunLockTarget(prUrl: string): string {
+  const workspaceKey = createHash("sha256")
+    .update(process.cwd())
+    .digest("hex")
+    .slice(0, 20);
+  const prKey = createHash("sha256").update(prUrl).digest("hex");
+  const directory = path.join(
+    os.tmpdir(),
+    "cortex-city-review-locks",
+    workspaceKey
+  );
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return path.join(directory, `${prKey}.run`);
+}
+
+async function acquireReviewRunLock(prUrl: string): Promise<ReviewRunLock> {
+  const target = reviewRunLockTarget(prUrl);
+  let compromised: Error | undefined;
+  let release: () => Promise<void>;
+  try {
+    release = await lockfile.lock(target, {
+      realpath: false,
+      stale: REVIEW_RUN_LOCK_STALE_MS,
+      update: REVIEW_RUN_LOCK_UPDATE_MS,
+      retries: 0,
+      onCompromised: (error) => {
+        compromised = error;
+      },
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ELOCKED") {
+      throw new ReviewRunInFlightError(
+        `A review run is already in flight for ${prUrl}`
+      );
+    }
+    throw error;
+  }
+
+  const persisted = getReviewSummary(prUrl);
+  if (
+    persisted?.current_run_pid &&
+    isProcessRunning(persisted.current_run_pid)
+  ) {
+    await release();
+    throw new ReviewRunInFlightError(
+      `A review run is already in flight for ${prUrl}`
+    );
+  }
+
+  return {
+    data: { token: randomUUID() },
+    release,
+    compromised: () => compromised,
+  };
+}
+
+function assertReviewRunLockHealthy(lock: ReviewRunLock): void {
+  const compromised = lock.compromised();
+  if (compromised) throw compromised;
+}
+
+async function releaseReviewRunLock(lock: ReviewRunLock): Promise<void> {
+  try {
+    await lock.release();
+  } catch (error) {
+    if (!lock.compromised()) throw error;
+  }
+}
 
 const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
   "ready_for_human_approval",
@@ -28,7 +129,7 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
   "blocked",
 ];
 
-export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request that the signed-in user has been asked to review.
+export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request with Cortex City's unified review agent.
 
 Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused review as **GitHub-flavored Markdown**. Keep the existing review standard: surface the findings you would normally surface, but leave GitHub comments yourself when a finding requires the PR author to make a change. If you are unsure whether something should be posted as a PR comment, keep it in the generated review instead.
 
@@ -55,15 +156,18 @@ export function resolveReviewOpts(
   config: OrchestratorConfig,
   override?: Partial<SpawnOpts>
 ): SpawnOpts {
+  const configuredRuntime: AgentRuntime =
+    config.review_runtime || config.default_agent_runner || "claude";
   const runtime: AgentRuntime =
-    override?.runtime || config.review_runtime || config.default_agent_runner || "claude";
+    override?.runtime || configuredRuntime;
+  const usesConfiguredProfile = runtime === configuredRuntime;
   const effort: TaskEffort | undefined =
     override?.effort ??
-    config.review_effort ??
+    (usesConfiguredProfile ? config.review_effort : undefined) ??
     (runtime === "codex" ? config.default_codex_effort : config.default_claude_effort);
   const model =
     override?.model?.trim() ||
-    config.review_model?.trim() ||
+    (usesConfiguredProfile ? config.review_model?.trim() : undefined) ||
     (runtime === "codex"
       ? config.default_codex_model?.trim()
       : config.default_claude_model?.trim()) ||
@@ -82,6 +186,159 @@ export function resolveReviewRunTimeoutMs(
   config: Pick<OrchestratorConfig, "task_run_timeout_ms">
 ): number {
   return resolveTaskRunTimeoutMs(config);
+}
+
+function reviewSourceOf(
+  review?: Pick<ReviewRequest, "source">
+): ReviewSource {
+  return review?.source === "task" ? "task" : "inbound";
+}
+
+function normalizedModel(model?: string): string | undefined {
+  return model?.trim() || undefined;
+}
+
+function snapshotSessionProfile(opts: SpawnOpts): ReviewSessionProfile {
+  return {
+    runtime: opts.runtime,
+    effort: opts.effort,
+    model: normalizedModel(opts.model),
+  };
+}
+
+function savedSessionProfile(
+  review?: ReviewSummary
+): ReviewSessionProfile | undefined {
+  if (!review) return undefined;
+  if (review.session_profile) {
+    return {
+      runtime: review.session_profile.runtime,
+      effort: review.session_profile.effort,
+      model: normalizedModel(review.session_profile.model),
+    };
+  }
+  // Pre-profile records can still be compared conservatively using the
+  // resolved fields that older review runs already persisted.
+  if (!review.runtime) return undefined;
+  return {
+    runtime: review.runtime,
+    effort: review.effort,
+    model: normalizedModel(review.model),
+  };
+}
+
+export function isReviewSessionCompatible(
+  request: ReviewRequest,
+  cached: ReviewSummary | undefined,
+  opts: SpawnOpts
+): boolean {
+  if (!cached?.session_id) return false;
+  if (reviewSourceOf(request) !== reviewSourceOf(cached)) return false;
+  const saved = savedSessionProfile(cached);
+  if (!saved) return false;
+  const next = snapshotSessionProfile(opts);
+  return (
+    saved.runtime === next.runtime &&
+    saved.effort === next.effort &&
+    saved.model === next.model
+  );
+}
+
+function effectiveReviewRequest(
+  request: ReviewRequest,
+  cached?: ReviewSummary
+): ReviewRequest {
+  const source = request.source ?? cached?.source ?? "inbound";
+  if (source !== "task") {
+    return {
+      ...request,
+      source: "inbound",
+      task_id: undefined,
+      task_title: undefined,
+      task_description: undefined,
+      task_plan: undefined,
+    };
+  }
+  return {
+    ...request,
+    source: "task",
+    task_id: request.task_id ?? cached?.task_id,
+    task_title: request.task_title ?? cached?.task_title,
+    task_description: request.task_description ?? cached?.task_description,
+    task_plan: request.task_plan ?? cached?.task_plan,
+    // These decisions do not apply to a PR owned by the signed-in user.
+    my_approval_sha: undefined,
+    my_changes_requested_sha: undefined,
+  };
+}
+
+function reviewRequestSnapshot(review: ReviewRequest): ReviewRequest {
+  return {
+    source: review.source,
+    task_id: review.task_id,
+    task_title: review.task_title,
+    task_description: review.task_description,
+    task_plan: review.task_plan,
+    pr_url: review.pr_url,
+    pr_number: review.pr_number,
+    repo_slug: review.repo_slug,
+    title: review.title,
+    author: review.author,
+    head_sha: review.head_sha,
+    created_at: review.created_at,
+    updated_at: review.updated_at,
+    my_last_review_sha: review.my_last_review_sha,
+    my_approval_sha: review.my_approval_sha,
+    my_changes_requested_sha: review.my_changes_requested_sha,
+  };
+}
+
+function buildReviewSourceContext(
+  request: ReviewRequest,
+  taskInstructions?: string
+): string[] {
+  if (reviewSourceOf(request) !== "task") {
+    return [
+      "Review source: inbound pull request.",
+      "The signed-in user has been asked to review someone else's PR.",
+    ];
+  }
+
+  const context = [
+    "Review source: task-owned pull request.",
+    [
+      "The signed-in user owns this PR through a Cortex City task. Act as an",
+      "independent reviewer, but never approve it or request changes on GitHub.",
+    ].join(" "),
+    [
+      "Leave specific, actionable GitHub comments for every finding that",
+      "requires code changes so the implementation agent can address them.",
+    ].join(" "),
+    [
+      "A `ready_for_human_approval` status is only the internal no-blocking-findings",
+      "verdict for this shared pipeline. It never authorizes self-approval.",
+    ].join(" "),
+    "",
+    "## Cortex task context",
+    `Task ID: ${request.task_id || "(not recorded)"}`,
+    "<task_title>",
+    request.task_title?.trim() || "(not recorded)",
+    "</task_title>",
+    "<task_description>",
+    request.task_description?.trim() || "(not recorded)",
+    "</task_description>",
+    "<task_plan>",
+    request.task_plan?.trim() || "(not provided)",
+    "</task_plan>",
+  ];
+  if (taskInstructions?.trim()) {
+    context.push(
+      "",
+      "## Additional task-review instructions",
+      taskInstructions.trim()
+    );
+  }
+  return context;
 }
 
 function summaryHeadShaFor(
@@ -120,13 +377,20 @@ export function buildReviewWrapperPrompt(
   request: ReviewRequest,
   cached?: ReviewSummary
 ): string {
+  const target = effectiveReviewRequest(request, cached);
+  const source = reviewSourceOf(target);
   const base = resolveReviewPrompt(config);
   const reviewedHeadSha = summaryHeadShaFor(cached);
-  const followup = isFollowupReview(request, cached);
+  const followup = isFollowupReview(target, cached);
   const sections = [
     base,
     "",
     "Cortex City review protocol:",
+    ...buildReviewSourceContext(
+      target,
+      source === "task" ? config.reviewer_agent_prompt : undefined
+    ),
+    "",
     "- Start the generated review with `## Summary` and put the summary before any findings.",
     [
       "- The `## Summary` must always be a standalone, self-contained description of",
@@ -140,10 +404,15 @@ export function buildReviewWrapperPrompt(
     ].join(" "),
     "- Then include `## Agent Status` with one exact line: `Agent status: <status>`.",
     `- The status must be one of: ${REVIEW_AGENT_STATUSES.join(", ")}.`,
-    [
-      "- Use `ready_for_human_approval` only when you have no required",
-      "author changes and no unresolved issue that should block the human reviewer.",
-    ].join(" "),
+    source === "task"
+      ? [
+          "- Use `ready_for_human_approval` as an internal clean-review verdict only",
+          "when you have no required code changes and no unresolved blocking issue.",
+        ].join(" ")
+      : [
+          "- Use `ready_for_human_approval` only when you have no required",
+          "author changes and no unresolved issue that should block the human reviewer.",
+        ].join(" "),
     "- Use `needs_author_changes` when the author still needs to change code.",
     [
       "- Use `needs_human_decision` when the PR may be acceptable but you found",
@@ -166,7 +435,7 @@ export function buildReviewWrapperPrompt(
       "It must not change how you write the summary: the `## Summary` is still a",
       "standalone description of the PR's current state, as instructed above.",
       `Previously reviewed head SHA: ${reviewedHeadSha}`,
-      `Current head SHA: ${request.head_sha}`,
+      `Current head SHA: ${target.head_sha}`,
       [
         "Use GitHub tooling to inspect the current PR, your prior",
         "agent-authored comments, and any relevant review threads.",
@@ -188,7 +457,7 @@ export function buildReviewWrapperPrompt(
     sections.push(
       "",
       "This is an initial review of the current PR state.",
-      `Current head SHA: ${request.head_sha}`
+      `Current head SHA: ${target.head_sha}`
     );
   }
 
@@ -205,7 +474,7 @@ export function buildReviewWrapperPrompt(
     }
   }
 
-  sections.push("", `Review this PR: ${request.pr_url}`);
+  sections.push("", `Review this PR: ${target.pr_url}`);
   return sections.join("\n");
 }
 
@@ -470,22 +739,32 @@ export async function spawnReviewSummary(
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);
 
   const cachedBefore = getReviewSummary(request.pr_url);
+  const target = effectiveReviewRequest(request, cachedBefore);
   const cachedSummaryHeadSha = summaryHeadShaFor(cachedBefore);
-  const followupReview = isFollowupReview(request, cachedBefore);
-  const prompt = buildReviewWrapperPrompt(config, request, cachedBefore);
+  const followupReview = isFollowupReview(target, cachedBefore);
+  const sessionCompatible = isReviewSessionCompatible(
+    target,
+    cachedBefore,
+    opts
+  );
+  const compatibleCachedSessionId = sessionCompatible
+    ? cachedBefore?.session_id
+    : undefined;
+  const prompt = buildReviewWrapperPrompt(config, target, cachedBefore);
   const resumeSessionId =
-    followupReview && cachedBefore?.session_id
-      ? cachedBefore.session_id
+    followupReview && compatibleCachedSessionId
+      ? compatibleCachedSessionId
       : undefined;
   const baseEntry = {
-    ...request,
+    ...target,
     summary: cachedBefore?.summary ?? "",
     summary_head_sha: cachedSummaryHeadSha,
     generated_at: cachedBefore?.generated_at ?? "",
-    runtime: cachedBefore?.runtime,
-    effort: cachedBefore?.effort,
-    model: cachedBefore?.model,
-    session_id: cachedBefore?.session_id,
+    runtime: opts.runtime,
+    effort: opts.effort,
+    model: opts.model,
+    session_profile: snapshotSessionProfile(opts),
+    session_id: compatibleCachedSessionId,
     duration_ms: cachedBefore?.duration_ms,
     input_tokens: cachedBefore?.input_tokens,
     output_tokens: cachedBefore?.output_tokens,
@@ -495,25 +774,84 @@ export async function spawnReviewSummary(
     followups: cachedBefore?.followups,
     final_at: cachedBefore?.final_at,
     error: cachedBefore?.error,
+    error_at: cachedBefore?.error_at,
     ...retroFields(cachedBefore),
   };
 
-  const { pid, child, done } = spawnRuntime(
-    opts.runtime,
-    prompt,
-    opts,
-    resumeSessionId,
-    runTimeoutMs
-  );
-
-  await upsertReviewSummary({
-    ...baseEntry,
-    current_run_pid: pid,
-  });
+  const runLock = await acquireReviewRunLock(target.pr_url);
+  let spawned!: SpawnResult;
+  try {
+    spawned = spawnRuntime(
+      opts.runtime,
+      prompt,
+      opts,
+      resumeSessionId,
+      runTimeoutMs
+    );
+    assertReviewRunLockHealthy(runLock);
+    const claimed = await mutateReviewSummary(target.pr_url, (current) => {
+      const sameReviewContext = (a: ReviewRequest, b: ReviewRequest) =>
+        reviewSourceOf(a) === reviewSourceOf(b) &&
+        a.task_id === b.task_id &&
+        a.task_title === b.task_title &&
+        a.task_description === b.task_description &&
+        a.task_plan === b.task_plan;
+      const currentMatchesPreparedState = Boolean(
+        current &&
+          cachedBefore &&
+          current.head_sha === cachedBefore.head_sha &&
+          sameReviewContext(current, cachedBefore)
+      );
+      const currentMatchesTarget = Boolean(
+        current &&
+          current.head_sha === target.head_sha &&
+          sameReviewContext(current, target)
+      );
+      const targetChanged = Boolean(
+        current && !currentMatchesPreparedState && !currentMatchesTarget
+      );
+      if (
+        targetChanged ||
+        (current?.current_run_pid && isProcessRunning(current.current_run_pid))
+      ) {
+        return undefined;
+      }
+      return {
+        ...baseEntry,
+        // Signals and lifecycle metadata may have changed between discovery
+        // and launch. Claim the run under the store lock without reverting
+        // those newer fields.
+        my_last_review_sha: current
+          ? current.my_last_review_sha
+          : target.my_last_review_sha,
+        my_approval_sha: current
+          ? current.my_approval_sha
+          : target.my_approval_sha,
+        my_changes_requested_sha: current
+          ? current.my_changes_requested_sha
+          : target.my_changes_requested_sha,
+        ...retroFields(current || cachedBefore),
+        current_run_pid: spawned.pid,
+        current_run_id: runLock.data.token,
+      };
+    });
+    if (!claimed) {
+      throw new Error(`Review target changed before launching ${target.pr_url}`);
+    }
+  } catch (error) {
+    try {
+      spawned?.child.kill("SIGTERM");
+    } catch {}
+    await releaseReviewRunLock(runLock);
+    throw error;
+  }
+  const { pid, child, done } = spawned;
 
   const completion = done.then(async (output) => {
     let finalOutput = output;
+    let resumedSessionFailed = false;
     if (output.error && resumeSessionId) {
+      resumedSessionFailed = true;
       const fallbackPrompt = [
         "The previous review session could not be resumed.",
         [
@@ -530,52 +868,105 @@ export async function spawnReviewSummary(
         undefined,
         runTimeoutMs
       );
-      await patchReviewSummary(request.pr_url, { current_run_pid: fallback.pid });
+      assertReviewRunLockHealthy(runLock);
+      await patchReviewSummary(target.pr_url, {
+        current_run_pid: fallback.pid,
+        current_run_id: runLock.data.token,
+      });
       finalOutput = await fallback.done;
     }
 
     const generatedAt = new Date().toISOString();
     const successful = !finalOutput.error;
-    const latestBeforeSave = getReviewSummary(request.pr_url) || cachedBefore;
-    const next = {
-      ...request,
-      summary: successful
-        ? finalOutput.result_text.trim()
-        : (cachedBefore?.summary ?? ""),
-      summary_head_sha: successful ? request.head_sha : cachedSummaryHeadSha,
-      generated_at: successful ? generatedAt : cachedBefore?.generated_at ?? "",
-      runtime: opts.runtime,
-      effort: opts.effort,
-      model: opts.model,
-      session_id:
-        finalOutput.session_id ||
-        (successful ? resumeSessionId : cachedBefore?.session_id) ||
-        undefined,
-      duration_ms: finalOutput.duration_ms,
-      input_tokens: finalOutput.usage?.input_tokens,
-      output_tokens: finalOutput.usage?.output_tokens,
-      error: finalOutput.error,
-      agent_review_status: successful
-        ? parseReviewAgentStatus(finalOutput.result_text)
-        : cachedBefore?.agent_review_status,
-      followups:
-        followupReview || finalOutput.error ? cachedBefore?.followups || [] : [],
-      // Review signals are owned by the worker poll and the submit route, which
-      // may have updated them (e.g. an optimistic approval) while this run was
-      // in flight. Preserve the latest persisted values rather than the stale
-      // spawn-time request so completion does not clobber them.
-      my_last_review_sha: latestBeforeSave?.my_last_review_sha,
-      my_approval_sha: latestBeforeSave?.my_approval_sha,
-      my_changes_requested_sha: latestBeforeSave?.my_changes_requested_sha,
-      final_at: undefined,
-      current_run_pid: undefined,
-      ...retroFields(latestBeforeSave),
-    };
-    const saved = await upsertReviewSummary(next);
+    assertReviewRunLockHealthy(runLock);
+    const saved = await mutateReviewSummary(target.pr_url, (latestBeforeSave) => {
+      if (latestBeforeSave?.current_run_id !== runLock.data.token) {
+        return undefined;
+      }
+      const latestTarget = effectiveReviewRequest(
+        reviewRequestSnapshot(latestBeforeSave),
+        latestBeforeSave
+      );
+      const headMovedDuringRun = latestTarget.head_sha !== target.head_sha;
+      const reviewContextChangedDuringRun =
+        reviewSourceOf(latestTarget) !== reviewSourceOf(target) ||
+        latestTarget.task_id !== target.task_id ||
+        latestTarget.task_title !== target.task_title ||
+        latestTarget.task_description !== target.task_description ||
+        latestTarget.task_plan !== target.task_plan;
+      return {
+        // Reconciliation may discover a new HEAD or change review context while
+        // the agent is running. Keep the latest identity; a changed context is
+        // invalidated so the next poll reruns under the right policy.
+        ...latestTarget,
+        summary: reviewContextChangedDuringRun
+          ? ""
+          : successful
+            ? finalOutput.result_text.trim()
+            : latestBeforeSave.summary,
+        summary_head_sha: reviewContextChangedDuringRun
+          ? undefined
+          : successful
+            ? target.head_sha
+            : summaryHeadShaFor(latestBeforeSave),
+        generated_at: reviewContextChangedDuringRun
+          ? ""
+          : successful
+            ? generatedAt
+            : latestBeforeSave.generated_at,
+        runtime: opts.runtime,
+        effort: opts.effort,
+        model: opts.model,
+        session_profile: snapshotSessionProfile(opts),
+        session_id:
+          (reviewContextChangedDuringRun
+            ? undefined
+            : finalOutput.session_id ||
+              (successful
+                ? resumeSessionId
+                : resumedSessionFailed
+                  ? undefined
+                  : compatibleCachedSessionId)) || undefined,
+        duration_ms: finalOutput.duration_ms,
+        input_tokens: finalOutput.usage?.input_tokens,
+        output_tokens: finalOutput.usage?.output_tokens,
+        error: reviewContextChangedDuringRun ? undefined : finalOutput.error,
+        error_at:
+          reviewContextChangedDuringRun || successful ? undefined : generatedAt,
+        agent_review_status: successful
+          ? headMovedDuringRun || reviewContextChangedDuringRun
+            ? undefined
+            : parseReviewAgentStatus(finalOutput.result_text)
+          : latestBeforeSave.agent_review_status,
+        followups: reviewContextChangedDuringRun
+          ? []
+          : followupReview || finalOutput.error
+            ? latestBeforeSave.followups || []
+            : [],
+        // Review signals are owned by the worker poll and the submit route,
+        // which may update them while this run is in flight. This mutation
+        // executes under the store's cross-process lock, so it merges the
+        // newest persisted signals and verifies ownership in one step.
+        my_last_review_sha: latestBeforeSave.my_last_review_sha,
+        my_approval_sha: latestBeforeSave.my_approval_sha,
+        my_changes_requested_sha: latestBeforeSave.my_changes_requested_sha,
+        final_at: undefined,
+        current_run_pid: undefined,
+        current_run_id: undefined,
+        ...retroFields(latestBeforeSave),
+      };
+    });
+    if (!saved) {
+      throw new Error(
+        `Review run ownership was lost before saving ${target.pr_url}`
+      );
+    }
     if (onComplete) {
       await onComplete(saved);
     }
     return saved;
+  }).finally(async () => {
+    await releaseReviewRunLock(runLock);
   });
 
   return { pid, child, done: completion };
@@ -605,16 +996,27 @@ export async function askFollowup(
   }
   const config = readConfig();
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);
-  const runtime: AgentRuntime =
-    cached.runtime || config.review_runtime || config.default_agent_runner || "claude";
-  const effort: TaskEffort | undefined = cached.effort ?? config.review_effort;
-  const model = cached.model ?? config.review_model;
-  const opts: SpawnOpts = { runtime, effort, model };
+  const opts: SpawnOpts = cached.session_profile
+    ? snapshotSessionProfile(cached.session_profile)
+    : resolveReviewOpts(config, {
+        runtime: cached.runtime,
+        effort: cached.effort,
+        model: cached.model,
+      });
+  const profile = snapshotSessionProfile(opts);
+  const canResume = isReviewSessionCompatible(cached, cached, opts);
 
   const askedAt = new Date().toISOString();
   const isSummaryStale =
     Boolean(cached.summary_head_sha) && cached.summary_head_sha !== cached.head_sha;
   const followupPrompt = [
+    ...buildReviewSourceContext(
+      cached,
+      reviewSourceOf(cached) === "task"
+        ? config.reviewer_agent_prompt
+        : undefined
+    ),
+    "",
     `PR URL: ${prUrl}`,
     isSummaryStale
       ? `The cached summary was generated for ${cached.summary_head_sha}, but the current head is ${cached.head_sha}. Answer against the current PR state when the latest code matters.`
@@ -624,9 +1026,9 @@ export async function askFollowup(
     .filter(Boolean)
     .join("\n");
 
-  if (cached.session_id) {
+  if (canResume && cached.session_id) {
     const resumed = spawnRuntime(
-      runtime,
+      opts.runtime,
       followupPrompt,
       opts,
       cached.session_id,
@@ -640,6 +1042,7 @@ export async function askFollowup(
         answered_at: new Date().toISOString(),
         answer: result.result_text.trim(),
         session_id: result.session_id || cached.session_id,
+        session_profile: profile,
         resumed: true,
       };
     }
@@ -658,13 +1061,25 @@ export async function askFollowup(
     "</summary>",
     "",
     "The user is asking a follow-up question. Use the summary plus any tools you have to answer.",
+    ...buildReviewSourceContext(
+      cached,
+      reviewSourceOf(cached) === "task"
+        ? config.reviewer_agent_prompt
+        : undefined
+    ),
     "",
     `Question: ${question}`,
   ]
     .filter(Boolean)
     .join("\n");
 
-  const fresh = spawnRuntime(runtime, seededPrompt, opts, undefined, runTimeoutMs);
+  const fresh = spawnRuntime(
+    opts.runtime,
+    seededPrompt,
+    opts,
+    undefined,
+    runTimeoutMs
+  );
   const result = await fresh.done;
   return {
     asked_at: askedAt,
@@ -672,6 +1087,7 @@ export async function askFollowup(
     answered_at: new Date().toISOString(),
     answer: (result.result_text || "").trim(),
     session_id: result.session_id,
+    session_profile: profile,
     resumed: false,
     error: result.error,
   };
@@ -684,5 +1100,17 @@ export async function appendFollowup(
   const current = getReviewSummary(prUrl);
   if (!current) return undefined;
   const followups = [...(current.followups || []), followup];
-  return patchReviewSummary(prUrl, { followups });
+  const profile = followup.session_profile;
+  return patchReviewSummary(prUrl, {
+    followups,
+    ...(followup.session_id && profile
+      ? {
+          session_id: followup.session_id,
+          session_profile: profile,
+          runtime: profile.runtime,
+          effort: profile.effort,
+          model: profile.model,
+        }
+      : {}),
+  });
 }

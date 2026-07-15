@@ -9,6 +9,7 @@ import {
   shouldStartFinalCleanup,
 } from "./final-task-cleanup";
 import {
+  getPRHeadSha,
   getPRStateHash,
   getPRStatus,
   getReviewRequestedPRs,
@@ -17,19 +18,20 @@ import {
 import {
   buildInterruptedTaskUpdates,
   getTaskRunMode,
-  isReviewerAgentEnabled,
-  shouldDeferBuilderRunForReviewer,
   shouldResumeTask,
 } from "./orchestrator-runtime";
 import {
+  clearReviewRunIfMatching,
   deleteReviewSummary,
+  deleteReviewSummaryIf,
+  mutateReviewSummary,
   readReviewSummaries,
   readReviewSummaryMap,
   upsertReviewSummary,
 } from "./review-store";
 import { readReviewLearnings } from "./review-learnings-store";
 import { spawnReviewRetro } from "./review-learnings-runner";
-import { spawnReviewSummary } from "./review-runner";
+import { resolveReviewOpts, spawnReviewSummary } from "./review-runner";
 import { unlinkTask as unlinkIssueTask } from "./issue-store";
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
 import { assertSufficientDiskSpace } from "./disk-guard";
@@ -38,6 +40,7 @@ import type { ReviewRequest, ReviewSummary, Task, TaskRunMode } from "./types";
 export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 export const DEAD_OWNED_PID_GRACE_MS = 10_000;
 export const FINAL_CLASSIFICATION_RETRY_MS = 15 * 60 * 1000;
+export const REVIEW_ERROR_RETRY_MS = 5 * 60 * 1000;
 
 export interface DeadOwnedPid {
   pid: number;
@@ -109,12 +112,14 @@ interface WorkerLogger {
 
 export interface WorkerRuntimeDeps {
   deleteTask: typeof deleteTask;
+  getPRHeadSha?: typeof getPRHeadSha;
   getPRStateHash: typeof getPRStateHash;
   getPRStatus: typeof getPRStatus;
   getReviewRequestedPRs: typeof getReviewRequestedPRs;
   getTask: typeof getTask;
   isPRMergedOrClosed: typeof isPRMergedOrClosed;
   isPidRunning: (pid: number) => boolean;
+  stopLegacyReviewerProcess?: (pid: number) => void;
   logger: WorkerLogger;
   readConfig: typeof readConfig;
   readReviewSummaries: typeof readReviewSummaries;
@@ -127,11 +132,15 @@ export interface WorkerRuntimeDeps {
   spawnReviewSummary: typeof spawnReviewSummary;
   updateTask: typeof updateTask;
   upsertReviewSummary: typeof upsertReviewSummary;
+  clearReviewRunIfMatching?: typeof clearReviewRunIfMatching;
+  deleteReviewSummaryIf?: typeof deleteReviewSummaryIf;
+  mutateReviewSummary?: typeof mutateReviewSummary;
   deleteReviewSummary: typeof deleteReviewSummary;
 }
 
 export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   deleteTask,
+  getPRHeadSha,
   getPRStateHash,
   getPRStatus,
   getReviewRequestedPRs,
@@ -140,6 +149,11 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   isPidRunning: (pid) => {
     process.kill(pid, 0);
     return true;
+  },
+  stopLegacyReviewerProcess: (pid) => {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
   },
   logger: console,
   readConfig,
@@ -153,6 +167,9 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   spawnReviewSummary,
   updateTask,
   upsertReviewSummary,
+  clearReviewRunIfMatching,
+  deleteReviewSummaryIf,
+  mutateReviewSummary,
   deleteReviewSummary,
 };
 
@@ -168,6 +185,110 @@ interface ReviewRunCandidate {
   task: Task & { pr_url: string };
   ghState: string;
   hasConflicts: boolean;
+}
+
+function isAutomaticReviewEnabled(
+  task: Pick<Task, "reviewer_agent_enabled">
+): boolean {
+  return task.reviewer_agent_enabled !== false;
+}
+
+function taskReviewRequest(
+  task: Task & { pr_url: string },
+  headSha: string
+): ReviewRequest | undefined {
+  const match = task.pr_url.match(
+    /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/
+  );
+  if (!match || !headSha.trim()) return undefined;
+
+  return {
+    source: "task",
+    task_id: task.id,
+    task_title: task.title,
+    task_description: task.description,
+    task_plan: task.plan,
+    pr_url: task.pr_url,
+    pr_number: Number(match[3]),
+    repo_slug: `${match[1]}/${match[2]}`,
+    title: task.title,
+    author: "",
+    head_sha: headSha.trim(),
+    created_at: task.created_at,
+    updated_at: task.updated_at,
+  };
+}
+
+function shouldDeferBuilderForStoredReview(
+  task: Task,
+  reviewMap: Record<string, ReviewSummary>,
+  activeReviewPids: Map<string, number>,
+  taskReviewHeads: Map<string, string>
+): boolean {
+  if (
+    task.status !== "in_review" ||
+    !task.pr_url ||
+    !isAutomaticReviewEnabled(task)
+  ) {
+    return false;
+  }
+  if (activeReviewPids.has(task.pr_url)) return true;
+  const review = reviewMap[task.pr_url];
+  if (review?.current_run_pid != null) return true;
+  // A currently unschedulable review must not deadlock explicit implementation
+  // work. Once schedulable, however, a review from another source or older task
+  // context must be rerun before the builder can proceed.
+  const currentHeadSha = taskReviewHeads.get(task.pr_url);
+  if (!currentHeadSha) return false;
+  if (task.review_migration_head_sha === currentHeadSha) return false;
+  const taskContextMatches =
+    review?.source === "task" &&
+    review.task_id === task.id &&
+    review.task_title === task.title &&
+    review.task_description === task.description &&
+    review.task_plan === task.plan;
+  if (!taskContextMatches) return true;
+  // A failed review retries independently with backoff, but must not deadlock
+  // explicit implementation work while the reviewer configuration is repaired.
+  if (review.error) return false;
+  if (!review || !review.summary?.trim()) return true;
+  return summaryHeadShaFor(review) !== currentHeadSha;
+}
+
+function normalizedReviewProfile(review: ReviewSummary) {
+  if (review.session_profile) {
+    return {
+      runtime: review.session_profile.runtime,
+      effort: review.session_profile.effort,
+      model: review.session_profile.model?.trim() || undefined,
+    };
+  }
+  if (!review.runtime) return undefined;
+  return {
+    runtime: review.runtime,
+    effort: review.effort,
+    model: review.model?.trim() || undefined,
+  };
+}
+
+export function shouldRetryErroredReview(
+  review: ReviewSummary,
+  config: ReturnType<typeof readConfig>,
+  now = Date.now()
+): boolean {
+  if (!review.error) return true;
+  const previous = normalizedReviewProfile(review);
+  const next = resolveReviewOpts(config);
+  if (
+    !previous ||
+    previous.runtime !== next.runtime ||
+    previous.effort !== next.effort ||
+    previous.model !== (next.model?.trim() || undefined)
+  ) {
+    return true;
+  }
+  const failedAt = review.error_at ? new Date(review.error_at).getTime() : NaN;
+  return !Number.isFinite(failedAt) || now - failedAt >= REVIEW_ERROR_RETRY_MS;
 }
 
 let activeRetroPid: number | undefined;
@@ -248,6 +369,12 @@ export async function pollOnce(
     try {
       if (!deps.isPidRunning(task.current_run_pid)) {
         throw new Error("process not running");
+      }
+      if ((task.current_run_mode as string | undefined) === "reviewer") {
+        deps.logger.log(
+          `[worker] Stopping retired reviewer PID ${task.current_run_pid} for task ${task.id}`
+        );
+        deps.stopLegacyReviewerProcess?.(task.current_run_pid);
       }
       activePids.set(task.id, task.current_run_pid);
       deadOwnedPids.delete(task.id);
@@ -394,8 +521,44 @@ export async function pollOnce(
 
   tasks = deps.readTasks();
 
+  deps.logger.log("[worker] Poll phase: resolve task review heads");
+  const taskReviewHeads = new Map<string, string>();
+  await Promise.all(
+    tasks
+      .filter(
+        (task): task is Task & { pr_url: string } =>
+          !task.paused &&
+          task.status === "in_review" &&
+          typeof task.pr_url === "string" &&
+          isAutomaticReviewEnabled(task) &&
+          !activePids.has(task.id)
+      )
+      .map(async (task) => {
+        try {
+          const headSha = (await deps.getPRHeadSha?.(task.pr_url))?.trim();
+          if (headSha) {
+            if (
+              task.review_migration_head_sha &&
+              task.review_migration_head_sha !== headSha
+            ) {
+              const updated = await deps.updateTask(task.id, {
+                review_migration_head_sha: undefined,
+              });
+              task.review_migration_head_sha = undefined;
+              task.updated_at = updated.updated_at;
+            }
+            taskReviewHeads.set(task.pr_url, headSha);
+          }
+        } catch (error) {
+          deps.logger.error(
+            `[worker] Failed to resolve review head for ${task.id}:`,
+            error
+          );
+        }
+      })
+  );
   let availableSlots = config.max_parallel_sessions - activePids.size;
-  if (availableSlots <= 0) return;
+  const storedReviewsBeforeTaskRuns = deps.readReviewSummaryMap();
 
   deps.logger.log("[worker] Poll phase: resume interrupted tasks");
   const resumableTasks = tasks
@@ -404,7 +567,12 @@ export async function pollOnce(
         !task.paused &&
         !activePids.has(task.id) &&
         shouldResumeTask(task) &&
-        !shouldDeferBuilderRunForReviewer(task)
+        !shouldDeferBuilderForStoredReview(
+          task,
+          storedReviewsBeforeTaskRuns,
+          activeReviewPids,
+          taskReviewHeads
+        )
     )
     .sort(
       (a, b) => new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime()
@@ -432,8 +600,6 @@ export async function pollOnce(
     });
     if (didLaunch) availableSlots--;
   }
-
-  if (availableSlots <= 0) return;
 
   deps.logger.log("[worker] Poll phase: pick open tasks");
   const openTasks = tasks
@@ -470,11 +636,19 @@ export async function pollOnce(
   }
 
   deps.logger.log("[worker] Poll phase: scan in_review tasks");
+  const liveTaskPrUrls = new Set(
+    tasks
+      .filter(
+        (task): task is Task & { pr_url: string } =>
+          task.status === "in_review" && typeof task.pr_url === "string"
+      )
+      .map((task) => task.pr_url)
+  );
   const inReviewTasks = tasks.filter(
     (task): task is Task & { pr_url: string } =>
       !task.paused && task.status === "in_review" && typeof task.pr_url === "string"
   );
-  const tasksToRunReviewer: Array<Task & { pr_url: string }> = [];
+  const taskReviewRequests: ReviewRequest[] = [];
   const tasksToReview: ReviewRunCandidate[] = [];
 
   await Promise.all(
@@ -484,6 +658,7 @@ export async function pollOnce(
         const prState = await deps.isPRMergedOrClosed(task.pr_url);
         if (prState) {
           deps.logger.log(`[worker] PR ${prState} for "${task.title}"`);
+          liveTaskPrUrls.delete(task.pr_url);
           await deps.updateTask(task.id, { status: prState, pr_status: undefined });
           return;
         }
@@ -495,9 +670,26 @@ export async function pollOnce(
         }
 
         if (activePids.has(task.id)) return;
-        if (task.reviewer_run_pending && isReviewerAgentEnabled(task)) {
-          tasksToRunReviewer.push(task);
-          return;
+
+        if (isAutomaticReviewEnabled(task)) {
+          const headSha = taskReviewHeads.get(task.pr_url) || "";
+          const request =
+            task.review_migration_head_sha === headSha
+              ? undefined
+              : taskReviewRequest(task, headSha);
+          if (request) {
+            taskReviewRequests.push(request);
+            const cached = deps.readReviewSummaryMap()[task.pr_url];
+            const reviewedHeadSha = cached ? summaryHeadShaFor(cached) : undefined;
+            if (cached?.current_run_pid != null) return;
+            if (
+              (!cached?.summary?.trim() ||
+                reviewedHeadSha !== request.head_sha) &&
+              !cached?.error
+            ) {
+              return;
+            }
+          }
         }
 
         if (prStatus === "checks_pending" && !hasManualInstruction) return;
@@ -517,41 +709,6 @@ export async function pollOnce(
     })
   );
 
-  for (const candidate of tasksToRunReviewer) {
-    if (availableSlots <= 0) break;
-    const task = await deps.getTask(candidate.id);
-    if (
-      !task ||
-      task.status !== "in_review" ||
-      typeof task.pr_url !== "string" ||
-      task.pr_url !== candidate.pr_url ||
-      !task.reviewer_run_pending ||
-      !isReviewerAgentEnabled(task)
-    ) {
-      continue;
-    }
-    if (task.current_run_pid || activePids.has(task.id)) continue;
-
-    deps.logger.log(`[worker] Picking up task "${task.title}" (${task.id}) [reviewer]`);
-    const didLaunch = await launchTaskRun(
-      { ...task, pending_manual_instruction: undefined },
-      activePids,
-      deps,
-      {
-        mode: "reviewer",
-        preSpawnUpdates: {
-          reviewer_run_pending: false,
-        },
-        rollbackOnError: {
-          reviewer_run_pending: true,
-          current_run_pid: undefined,
-          current_run_mode: undefined,
-        },
-      }
-    );
-    if (didLaunch) availableSlots--;
-  }
-
   for (const candidate of tasksToReview) {
     if (availableSlots <= 0) break;
     const task = await deps.getTask(candidate.task.id);
@@ -567,7 +724,16 @@ export async function pollOnce(
     const hasManualInstruction = Boolean(task.pending_manual_instruction);
     const hasConflicts = task.pr_status === "conflicts" || candidate.hasConflicts;
     if (task.current_run_pid || activePids.has(task.id)) continue;
-    if (shouldDeferBuilderRunForReviewer(task)) continue;
+    if (
+      shouldDeferBuilderForStoredReview(
+        task,
+        deps.readReviewSummaryMap(),
+        activeReviewPids,
+        taskReviewHeads
+      )
+    ) {
+      continue;
+    }
     if (!candidate.ghState && !hasManualInstruction) continue;
     if (
       !hasManualInstruction &&
@@ -587,11 +753,24 @@ export async function pollOnce(
     if (didLaunch) availableSlots--;
   }
 
-  await runReviewPhases(activeReviewPids, deps, config);
+  await runReviewPhases(
+    activeReviewPids,
+    deps,
+    config,
+    taskReviewRequests.filter(
+      (request) => !request.task_id || !activePids.has(request.task_id)
+    ),
+    liveTaskPrUrls
+  );
 }
 
 function prFieldsFromRequest(request: ReviewRequest) {
   return {
+    source: request.source || "inbound",
+    task_id: request.task_id,
+    task_title: request.task_title,
+    task_description: request.task_description,
+    task_plan: request.task_plan,
     pr_url: request.pr_url,
     pr_number: request.pr_number,
     repo_slug: request.repo_slug,
@@ -612,10 +791,38 @@ function summaryHeadShaFor(
   return review.summary_head_sha || (review.summary?.trim() ? review.head_sha : undefined);
 }
 
+async function mutateStoredReview(
+  deps: WorkerRuntimeDeps,
+  prUrl: string,
+  updater: Parameters<typeof mutateReviewSummary>[1]
+): Promise<ReviewSummary | undefined> {
+  if (deps.mutateReviewSummary) {
+    return deps.mutateReviewSummary(prUrl, updater);
+  }
+  const next = updater(deps.readReviewSummaryMap()[prUrl]);
+  return next ? deps.upsertReviewSummary(next) : undefined;
+}
+
+async function deleteStoredReviewIf(
+  deps: WorkerRuntimeDeps,
+  prUrl: string,
+  predicate: (current: ReviewSummary) => boolean
+): Promise<boolean> {
+  if (deps.deleteReviewSummaryIf) {
+    return deps.deleteReviewSummaryIf(prUrl, predicate);
+  }
+  const current = deps.readReviewSummaryMap()[prUrl];
+  if (!current || !predicate(current)) return false;
+  await deps.deleteReviewSummary(prUrl);
+  return true;
+}
+
 async function runReviewPhases(
   activeReviewPids: Map<string, number>,
   deps: WorkerRuntimeDeps,
-  config: ReturnType<typeof readConfig>
+  config: ReturnType<typeof readConfig>,
+  taskReviewRequests: ReviewRequest[] = [],
+  liveTaskPrUrls: Set<string> = new Set()
 ): Promise<void> {
   const learningEnabled = config.review_learning_enabled !== false;
 
@@ -634,11 +841,40 @@ async function runReviewPhases(
       activeReviewPids.set(review.pr_url, review.current_run_pid);
       liveReviewKeys.add(review.pr_url);
     } catch {
-      deps.logger.log(
-        `[worker] Clearing orphaned review PID ${review.current_run_pid} for ${review.pr_url}`
-      );
-      activeReviewPids.delete(review.pr_url);
-      await deps.upsertReviewSummary({ ...review, current_run_pid: undefined });
+      const cleared = deps.clearReviewRunIfMatching
+        ? await deps.clearReviewRunIfMatching(
+            review.pr_url,
+            review.current_run_pid,
+            review.current_run_id
+          )
+        : await deps.upsertReviewSummary({
+            ...review,
+            current_run_pid: undefined,
+            current_run_id: undefined,
+          });
+      if (cleared) {
+        deps.logger.log(
+          `[worker] Cleared orphaned review PID ${review.current_run_pid} for ${review.pr_url}`
+        );
+        activeReviewPids.delete(review.pr_url);
+      } else {
+        // Completion or a newer run won the store race. Re-read instead of
+        // clearing that newer owner's state from the worker-local map.
+        const latest = deps.readReviewSummaryMap()[review.pr_url];
+        let latestIsLive = false;
+        try {
+          latestIsLive = Boolean(
+            latest?.current_run_pid &&
+              deps.isPidRunning(latest.current_run_pid)
+          );
+        } catch {}
+        if (latest?.current_run_pid && latestIsLive) {
+          activeReviewPids.set(review.pr_url, latest.current_run_pid);
+          liveReviewKeys.add(review.pr_url);
+        } else {
+          activeReviewPids.delete(review.pr_url);
+        }
+      }
     }
   }
   for (const prUrl of [...activeReviewPids.keys()]) {
@@ -648,67 +884,124 @@ async function runReviewPhases(
   }
 
   deps.logger.log("[worker] Poll phase: scan review requests");
-  let openReviewRequests: ReviewRequest[] = [];
+  let inboundReviewRequests: ReviewRequest[] = [];
+  let inboundFetchFailed = false;
   try {
-    openReviewRequests = await deps.getReviewRequestedPRs();
+    inboundReviewRequests = await deps.getReviewRequestedPRs();
   } catch (error) {
     deps.logger.error("[worker] Failed to fetch review-requested PRs:", error);
-    return;
+    inboundFetchFailed = true;
   }
 
+  const requestsByUrl = new Map<string, ReviewRequest>();
+  const schedulableTaskUrls = new Set(
+    taskReviewRequests.map((request) => request.pr_url)
+  );
+  for (const request of inboundReviewRequests) {
+    // A live Cortex task owns its PR even while paused, opted out, or running
+    // its builder. Do not let the inbound discovery path bypass those task
+    // scheduling guards for the same URL.
+    if (
+      liveTaskPrUrls.has(request.pr_url) &&
+      !schedulableTaskUrls.has(request.pr_url)
+    ) {
+      continue;
+    }
+    requestsByUrl.set(request.pr_url, {
+      ...request,
+      source: request.source || "inbound",
+    });
+  }
+  // A Cortex task is the authoritative source when a URL somehow appears in
+  // both inputs: task context and builder coordination must not be lost.
+  for (const request of taskReviewRequests) {
+    requestsByUrl.set(request.pr_url, { ...request, source: "task" });
+  }
+  const openReviewRequests = [...requestsByUrl.values()];
+
   for (const pr of openReviewRequests) {
-    const cached = deps.readReviewSummaryMap()[pr.pr_url];
-    if (!cached) {
-      await deps.upsertReviewSummary({
+    await mutateStoredReview(deps, pr.pr_url, (current) => {
+      if (!current) {
+        return {
+          ...prFieldsFromRequest(pr),
+          summary: "",
+          generated_at: "",
+        };
+      }
+      const reviewContextChanged =
+        (current.source || "inbound") !== (pr.source || "inbound") ||
+        current.task_id !== pr.task_id ||
+        current.task_title !== pr.task_title ||
+        current.task_description !== pr.task_description ||
+        current.task_plan !== pr.task_plan;
+      if (current.head_sha !== pr.head_sha) {
+        return {
+          ...current,
+          ...prFieldsFromRequest(pr),
+          summary: reviewContextChanged ? "" : current.summary,
+          summary_head_sha: reviewContextChanged
+            ? undefined
+            : summaryHeadShaFor(current),
+          generated_at: reviewContextChanged ? "" : current.generated_at,
+          session_id: reviewContextChanged ? undefined : current.session_id,
+          session_profile: reviewContextChanged
+            ? undefined
+            : current.session_profile,
+          agent_review_status: undefined,
+          error: undefined,
+          error_at: undefined,
+          followups: reviewContextChanged ? [] : current.followups,
+          final_at: undefined,
+          final_state_lookup_started_at: undefined,
+          final_state_lookup_error_started_at: undefined,
+          final_state_lookup_error: undefined,
+        };
+      }
+
+      const wasFinal = Boolean(current.final_at);
+      const hadFinalLookup = Boolean(
+        current.final_state_lookup_started_at || current.final_state_lookup_error
+      );
+      const reviewShaChanged =
+        current.my_last_review_sha !== pr.my_last_review_sha ||
+        current.my_approval_sha !== pr.my_approval_sha ||
+        current.my_changes_requested_sha !== pr.my_changes_requested_sha;
+      const sourceMetadataChanged =
+        reviewContextChanged ||
+        current.title !== pr.title ||
+        current.updated_at !== pr.updated_at;
+      if (!wasFinal && !reviewShaChanged && !sourceMetadataChanged && !hadFinalLookup) {
+        return undefined;
+      }
+      // An approval going set -> undefined means the human requested changes
+      // or dismissed their approval. It supersedes a stale agent verdict.
+      const approvalWithdrawn =
+        Boolean(current.my_approval_sha) && !pr.my_approval_sha;
+      return {
+        ...current,
         ...prFieldsFromRequest(pr),
-        summary: "",
-        generated_at: "",
-      });
-      continue;
-    }
-    if (cached.head_sha !== pr.head_sha) {
-      const staleSummaryHeadSha = summaryHeadShaFor(cached);
-      await deps.upsertReviewSummary({
-        ...cached,
-        ...prFieldsFromRequest(pr),
-        summary_head_sha: staleSummaryHeadSha,
-        agent_review_status: undefined,
-        error: undefined,
-        final_at: undefined,
-        final_state_lookup_started_at: undefined,
-        final_state_lookup_error_started_at: undefined,
-        final_state_lookup_error: undefined,
-      });
-      continue;
-    }
-    const wasFinal = Boolean(cached.final_at);
-    const hadFinalLookup = Boolean(
-      cached.final_state_lookup_started_at || cached.final_state_lookup_error
-    );
-    const reviewShaChanged =
-      cached.my_last_review_sha !== pr.my_last_review_sha ||
-      cached.my_approval_sha !== pr.my_approval_sha ||
-      cached.my_changes_requested_sha !== pr.my_changes_requested_sha;
-    // An approval going set -> undefined means the human requested changes or
-    // dismissed their approval on GitHub. That supersedes any stale agent
-    // verdict (mirrors the submit route) so the row can't keep showing e.g.
-    // "Ready to approve" after the approval was withdrawn.
-    const approvalWithdrawn =
-      Boolean(cached.my_approval_sha) && !pr.my_approval_sha;
-    if (wasFinal || reviewShaChanged || hadFinalLookup) {
-      await deps.upsertReviewSummary({
-        ...cached,
-        ...prFieldsFromRequest(pr),
-        agent_review_status: approvalWithdrawn
+        summary: reviewContextChanged ? "" : current.summary,
+        summary_head_sha: reviewContextChanged
           ? undefined
-          : cached.agent_review_status,
+          : current.summary_head_sha,
+        generated_at: reviewContextChanged ? "" : current.generated_at,
+        session_id: reviewContextChanged ? undefined : current.session_id,
+        session_profile: reviewContextChanged
+          ? undefined
+          : current.session_profile,
+        error: reviewContextChanged ? undefined : current.error,
+        error_at: reviewContextChanged ? undefined : current.error_at,
+        followups: reviewContextChanged ? [] : current.followups,
+        agent_review_status: approvalWithdrawn || reviewContextChanged
+          ? undefined
+          : current.agent_review_status,
         final_at: undefined,
         final_state: undefined,
         final_state_lookup_started_at: undefined,
         final_state_lookup_error_started_at: undefined,
         final_state_lookup_error: undefined,
-      });
-    }
+      };
+    });
   }
 
   const maxParallelReviews = Math.max(1, config.max_parallel_reviews ?? 2);
@@ -721,12 +1014,38 @@ async function runReviewPhases(
       const cached = refreshed[pr.pr_url];
       const needsSummary =
         !cached ||
+        Boolean(cached.error) ||
         !cached.summary ||
         summaryHeadShaFor(cached) !== cached.head_sha;
-      if (!needsSummary) continue;
+      if (
+        !needsSummary ||
+        (cached.error && !shouldRetryErroredReview(cached, config))
+      ) {
+        continue;
+      }
       try {
-        const { pid } = await deps.spawnReviewSummary(pr, {}, async () => {
+        const { pid } = await deps.spawnReviewSummary(pr, {}, async (summary) => {
           activeReviewPids.delete(pr.pr_url);
+          if (
+            summary.source === "task" &&
+            summary.task_id &&
+            summary.agent_review_status === "needs_author_changes" &&
+            summary.summary_head_sha === summary.head_sha
+          ) {
+            const task = await deps.getTask(summary.task_id);
+            if (
+              task &&
+              !task.paused &&
+              task.status === "in_review" &&
+              task.pr_url === summary.pr_url &&
+              isAutomaticReviewEnabled(task)
+            ) {
+              await deps.updateTask(task.id, {
+                resume_requested: true,
+                resume_run_mode: "review",
+              });
+            }
+          }
         });
         activeReviewPids.set(pr.pr_url, pid);
         reviewSlots--;
@@ -742,6 +1061,14 @@ async function runReviewPhases(
 
   deps.logger.log("[worker] Poll phase: finalize completed reviews");
   const openSet = new Set(openReviewRequests.map((r) => r.pr_url));
+  for (const prUrl of liveTaskPrUrls) openSet.add(prUrl);
+  if (inboundFetchFailed) {
+    for (const review of Object.values(deps.readReviewSummaryMap())) {
+      if ((review.source || "inbound") === "inbound" && !review.final_at) {
+        openSet.add(review.pr_url);
+      }
+    }
+  }
   const reviewsForFinalization: ReviewSummary[] = Object.values(
     deps.readReviewSummaryMap()
   );
@@ -761,53 +1088,73 @@ async function runReviewPhases(
     }
     if (!finalState) {
       const now = Date.now();
-      const lookupStartedAt =
-        review.final_state_lookup_started_at || new Date(now).toISOString();
-      const errorStartedAt = lookupError
-        ? review.final_state_lookup_error_started_at ||
-          new Date(now).toISOString()
-        : undefined;
-      const errorStartedMs = errorStartedAt
-        ? new Date(errorStartedAt).getTime()
-        : NaN;
-      const retryExpired =
-        Boolean(lookupError) &&
-        Number.isFinite(errorStartedMs) &&
-        now - errorStartedMs >= FINAL_CLASSIFICATION_RETRY_MS;
       const lookupMessage = lookupError
         ? errorMessage(lookupError)
         : "GitHub did not return merged or closed state.";
-      await deps.upsertReviewSummary({
-        ...review,
-        final_at: retryExpired ? new Date(now).toISOString() : undefined,
-        final_state_lookup_started_at: retryExpired
-          ? undefined
-          : lookupStartedAt,
-        final_state_lookup_error_started_at: retryExpired
-          ? undefined
-          : errorStartedAt,
-        final_state_lookup_error: retryExpired
-          ? `Final-state lookup timed out after ${Math.round(
-              FINAL_CLASSIFICATION_RETRY_MS / 60000
-            )} minutes: ${lookupMessage}`
-          : lookupMessage,
+      await mutateStoredReview(deps, review.pr_url, (current) => {
+        if (
+          !current ||
+          current.final_at ||
+          current.current_run_pid != null ||
+          current.current_run_id != null
+        ) {
+          return undefined;
+        }
+        const lookupStartedAt =
+          current.final_state_lookup_started_at || new Date(now).toISOString();
+        const errorStartedAt = lookupError
+          ? current.final_state_lookup_error_started_at ||
+            new Date(now).toISOString()
+          : undefined;
+        const errorStartedMs = errorStartedAt
+          ? new Date(errorStartedAt).getTime()
+          : NaN;
+        const retryExpired =
+          Boolean(lookupError) &&
+          Number.isFinite(errorStartedMs) &&
+          now - errorStartedMs >= FINAL_CLASSIFICATION_RETRY_MS;
+        return {
+          ...current,
+          final_at: retryExpired ? new Date(now).toISOString() : undefined,
+          final_state_lookup_started_at: retryExpired
+            ? undefined
+            : lookupStartedAt,
+          final_state_lookup_error_started_at: retryExpired
+            ? undefined
+            : errorStartedAt,
+          final_state_lookup_error: retryExpired
+            ? `Final-state lookup timed out after ${Math.round(
+                FINAL_CLASSIFICATION_RETRY_MS / 60000
+              )} minutes: ${lookupMessage}`
+            : lookupMessage,
+        };
       });
       continue;
     }
-    await deps.upsertReviewSummary({
-      ...review,
-      final_at: new Date().toISOString(),
-      final_state: finalState,
-      final_state_lookup_started_at: undefined,
-      final_state_lookup_error_started_at: undefined,
-      final_state_lookup_error: undefined,
-      retro_status:
-        finalState === "merged" &&
-        learningEnabled &&
-        review.retro_status == null &&
-        review.summary?.trim()
-          ? "pending"
-          : review.retro_status,
+    await mutateStoredReview(deps, review.pr_url, (current) => {
+      if (
+        !current ||
+        current.final_at ||
+        current.current_run_pid != null ||
+        current.current_run_id != null
+      ) {
+        return undefined;
+      }
+      return {
+        ...current,
+        final_at: new Date().toISOString(),
+        final_state: finalState,
+        final_state_lookup_started_at: undefined,
+        final_state_lookup_error_started_at: undefined,
+        final_state_lookup_error: undefined,
+        retro_status:
+          finalState === "merged" &&
+          learningEnabled &&
+          current.retro_status == null &&
+          current.summary?.trim()
+            ? "pending"
+            : current.retro_status,
+      };
     });
   }
 
@@ -842,15 +1189,18 @@ async function runReviewPhases(
     if (activeRetroPid === retroPid) {
       activeRetroPid = undefined;
     }
-    await deps.upsertReviewSummary({
-      ...review,
-      retro_status:
-        review.retro_status === "pending" ? "error" : review.retro_status,
-      retro_error:
-        review.retro_status === "pending"
-          ? "Retro process exited before completion."
-          : review.retro_error,
-      retro_run_pid: undefined,
+    await mutateStoredReview(deps, review.pr_url, (current) => {
+      if (!current || current.retro_run_pid !== retroPid) return undefined;
+      return {
+        ...current,
+        retro_status:
+          current.retro_status === "pending" ? "error" : current.retro_status,
+        retro_error:
+          current.retro_status === "pending"
+            ? "Retro process exited before completion."
+            : current.retro_error,
+        retro_run_pid: undefined,
+      };
     });
   }
 
@@ -914,7 +1264,15 @@ async function runReviewPhases(
       review.final_at &&
       now - new Date(review.final_at).getTime() > PRUNE_AGE_MS
     ) {
-      await deps.deleteReviewSummary(review.pr_url);
+      await deleteStoredReviewIf(deps, review.pr_url, (current) => {
+        return (
+          current.final_at === review.final_at &&
+          current.current_run_pid == null &&
+          current.current_run_id == null &&
+          current.retro_run_pid == null &&
+          (!learningEnabled || current.retro_status !== "pending")
+        );
+      });
     }
   }
 }
