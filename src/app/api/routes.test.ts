@@ -1424,12 +1424,13 @@ test("reviews route lists cached reviews by merged state group then recency", ()
   );
 });
 
-test("reviews route excludes task-owned review records", () => {
+test("reviews route excludes persisted and newly claimed task-owned review records", () => {
   runRouteAssertions(
     withReviewState(`
       const reviewsPath = path.join(cortexDir, "reviews.json");
       const seeded = readJson(reviewsPath);
       const taskReviewUrl = "https://github.com/acme/widget/pull/6";
+      const newlyClaimedUrl = "https://github.com/acme/widget/pull/7";
       seeded[taskReviewUrl] = {
         ...seeded[needsReviewUrl],
         source: "task",
@@ -1438,13 +1439,36 @@ test("reviews route excludes task-owned review records", () => {
         pr_number: 6,
         title: "Task-owned review",
       };
+      seeded[newlyClaimedUrl] = {
+        ...seeded[needsReviewUrl],
+        source: "inbound",
+        pr_url: newlyClaimedUrl,
+        pr_number: 7,
+        title: "Cached before task ownership",
+      };
       writeJson(reviewsPath, seeded);
+      writeJson(path.join(cortexDir, "tasks.json"), [
+        {
+          id: "task-7",
+          title: "Live task owner",
+          description: "Own the previously inbound PR",
+          status: "in_review",
+          agent: "cortex-city-swe",
+          pr_url: newlyClaimedUrl,
+          created_at: "2026-05-06T00:00:00.000Z",
+          updated_at: "2026-05-06T00:01:00.000Z",
+        },
+      ]);
 
       const reviewsRoute = await loadRoute("./src/app/api/reviews/route.ts");
       const reviews = await json(await reviewsRoute.GET());
       assert.equal(reviews.status, 200);
       assert.equal(
         reviews.body.some((review) => review.pr_url === taskReviewUrl),
+        false
+      );
+      assert.equal(
+        reviews.body.some((review) => review.pr_url === newlyClaimedUrl),
         false
       );
       assert.equal(
@@ -1609,12 +1633,13 @@ test("review submit route invokes gh for valid submissions", () => {
   );
 });
 
-test("review submit route rejects owner decisions for task-owned reviews without calling GitHub", () => {
+test("review submit route rejects owner decisions for persisted and newly claimed task reviews", () => {
   runRouteAssertions(
     withReviewState(`
       const reviewsPath = path.join(cortexDir, "reviews.json");
       const seeded = readJson(reviewsPath);
       const taskReviewUrl = "https://github.com/acme/widget/pull/6";
+      const newlyClaimedUrl = "https://github.com/acme/widget/pull/7";
       seeded[taskReviewUrl] = {
         ...seeded[prUrl],
         source: "task",
@@ -1623,26 +1648,47 @@ test("review submit route rejects owner decisions for task-owned reviews without
         pr_number: 6,
         title: "Task-owned review",
       };
+      seeded[newlyClaimedUrl] = {
+        ...seeded[prUrl],
+        source: "inbound",
+        pr_url: newlyClaimedUrl,
+        pr_number: 7,
+        title: "Cached before task ownership",
+      };
       writeJson(reviewsPath, seeded);
+      writeJson(path.join(cortexDir, "tasks.json"), [
+        {
+          id: "task-7",
+          title: "Live task owner",
+          description: "Own the previously inbound PR",
+          status: "in_review",
+          agent: "cortex-city-swe",
+          pr_url: newlyClaimedUrl,
+          created_at: "2026-05-06T00:00:00.000Z",
+          updated_at: "2026-05-06T00:01:00.000Z",
+        },
+      ]);
       fs.writeFileSync(process.env.FAKE_GH_CALLS_FILE, "");
 
       const submitRoute = await loadRoute("./src/app/api/reviews/submit/route.ts");
-      for (const decision of ["approve", "request-changes"]) {
-        const response = await json(
-          await submitRoute.POST(
-            request("http://localhost/api/reviews/submit", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                pr_url: taskReviewUrl,
-                decision,
-                body: decision === "approve" ? "LGTM" : "Please fix this",
-              }),
-            })
-          )
-        );
-        assert.equal(response.status, 400);
-        assert.match(response.body.error, /task-owned pull requests/i);
+      for (const ownedUrl of [taskReviewUrl, newlyClaimedUrl]) {
+        for (const decision of ["approve", "request-changes"]) {
+          const response = await json(
+            await submitRoute.POST(
+              request("http://localhost/api/reviews/submit", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  pr_url: ownedUrl,
+                  decision,
+                  body: decision === "approve" ? "LGTM" : "Please fix this",
+                }),
+              })
+            )
+          );
+          assert.equal(response.status, 400);
+          assert.match(response.body.error, /task-owned pull requests/i);
+        }
       }
 
       for (const bypassUrl of [

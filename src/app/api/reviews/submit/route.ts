@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { submitPRReview } from "@/lib/github";
 import { getReviewSummary, patchReviewSummary } from "@/lib/review-store";
+import { readTasks } from "@/lib/store";
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
@@ -29,7 +30,13 @@ export async function POST(request: NextRequest) {
       { status: 404 }
     );
   }
-  if (cached?.source === "task" && decision !== "comment") {
+  const ownedByLiveTask = readTasks().some(
+    (task) => task.status === "in_review" && task.pr_url === prUrl
+  );
+  if (
+    decision !== "comment" &&
+    (cached?.source === "task" || ownedByLiveTask)
+  ) {
     return NextResponse.json(
       { error: "Task-owned pull requests cannot be approved or rejected by their owner" },
       { status: 400 }

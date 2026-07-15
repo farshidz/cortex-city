@@ -647,13 +647,13 @@ export async function pollOnce(
   }
 
   deps.logger.log("[worker] Poll phase: scan in_review tasks");
-  const liveTaskPrUrls = new Set(
+  const liveTaskOwners = new Map(
     tasks
       .filter(
         (task): task is Task & { pr_url: string } =>
           task.status === "in_review" && typeof task.pr_url === "string"
       )
-      .map((task) => task.pr_url)
+      .map((task) => [task.pr_url, task] as const)
   );
   const inReviewTasks = tasks.filter(
     (task): task is Task & { pr_url: string } =>
@@ -670,7 +670,7 @@ export async function pollOnce(
         const prState = await deps.isPRMergedOrClosed(task.pr_url);
         if (prState) {
           deps.logger.log(`[worker] PR ${prState} for "${task.title}"`);
-          liveTaskPrUrls.delete(task.pr_url);
+          liveTaskOwners.delete(task.pr_url);
           await deps.updateTask(task.id, { status: prState, pr_status: undefined });
           return;
         }
@@ -784,7 +784,7 @@ export async function pollOnce(
     refreshOnlyTaskReviewRequests.filter(
       (request) => !request.task_id || !activePids.has(request.task_id)
     ),
-    liveTaskPrUrls
+    liveTaskOwners
   );
 }
 
@@ -847,9 +847,10 @@ async function runReviewPhases(
   config: ReturnType<typeof readConfig>,
   taskReviewRequests: ReviewRequest[] = [],
   refreshOnlyTaskReviewRequests: ReviewRequest[] = [],
-  liveTaskPrUrls: Set<string> = new Set()
+  liveTaskOwners: Map<string, Task & { pr_url: string }> = new Map()
 ): Promise<void> {
   const learningEnabled = config.review_learning_enabled !== false;
+  const liveTaskPrUrls = new Set(liveTaskOwners.keys());
 
   deps.logger.log("[worker] Poll phase: reconcile review pids");
   const reviewMap = deps.readReviewSummaryMap();
@@ -857,6 +858,27 @@ async function runReviewPhases(
   for (const review of Object.values(reviewMap)) {
     if (!review.current_run_pid) {
       activeReviewPids.delete(review.pr_url);
+      if (review.current_run_id != null) {
+        const cleared = await mutateStoredReview(
+          deps,
+          review.pr_url,
+          (current) => {
+            if (
+              !current ||
+              current.current_run_pid != null ||
+              current.current_run_id !== review.current_run_id
+            ) {
+              return undefined;
+            }
+            return { ...current, current_run_id: undefined };
+          }
+        );
+        if (cleared) {
+          deps.logger.log(
+            `[worker] Cleared orphaned review run ID for ${review.pr_url}`
+          );
+        }
+      }
       continue;
     }
     try {
@@ -927,6 +949,9 @@ async function runReviewPhases(
       .map((request) => request.pr_url)
       .filter((prUrl) => !schedulableTaskUrls.has(prUrl))
   );
+  const inboundRequestsByUrl = new Map(
+    inboundReviewRequests.map((request) => [request.pr_url, request] as const)
+  );
   for (const request of inboundReviewRequests) {
     // A live Cortex task owns its PR even while paused, opted out, or running
     // its builder. Do not let the inbound discovery path bypass those task
@@ -951,6 +976,34 @@ async function runReviewPhases(
     if (!schedulableTaskUrls.has(request.pr_url)) {
       requestsByUrl.set(request.pr_url, { ...request, source: "task" });
     }
+  }
+  const ownershipOnlyTaskUrls = new Set<string>();
+  const cachedBeforeOwnership = deps.readReviewSummaryMap();
+  for (const [prUrl, taskSnapshot] of liveTaskOwners) {
+    if (schedulableTaskUrls.has(prUrl) || refreshOnlyTaskUrls.has(prUrl)) {
+      continue;
+    }
+    const cached = cachedBeforeOwnership[prUrl];
+    if (!cached || cached.source === "task") continue;
+    const task = await deps.getTask(taskSnapshot.id);
+    if (
+      !task ||
+      task.status !== "in_review" ||
+      typeof task.pr_url !== "string" ||
+      task.pr_url !== prUrl
+    ) {
+      continue;
+    }
+    const request = taskReviewRequest(
+      { ...task, pr_url: task.pr_url },
+      inboundRequestsByUrl.get(prUrl)?.head_sha || cached.head_sha
+    );
+    if (!request) continue;
+    // The live task owns this URL even when its scheduling guards prevent a
+    // review run. Reconcile the cached inbound row into task context so it is
+    // neither actionable in the inbound UI nor eligible for owner decisions.
+    requestsByUrl.set(prUrl, request);
+    ownershipOnlyTaskUrls.add(prUrl);
   }
   const openReviewRequests = [...requestsByUrl.values()];
 
@@ -1050,12 +1103,35 @@ async function runReviewPhases(
   const maxParallelReviews = Math.max(1, config.max_parallel_reviews ?? 2);
   let reviewSlots = maxParallelReviews - activeReviewPids.size;
   if (reviewSlots > 0) {
-    const refreshed = deps.readReviewSummaryMap();
     for (const pr of openReviewRequests) {
-      if (refreshOnlyTaskUrls.has(pr.pr_url)) continue;
+      if (
+        refreshOnlyTaskUrls.has(pr.pr_url) ||
+        ownershipOnlyTaskUrls.has(pr.pr_url)
+      ) {
+        continue;
+      }
       if (reviewSlots <= 0) break;
       if (activeReviewPids.has(pr.pr_url)) continue;
-      const cached = refreshed[pr.pr_url];
+      if (pr.source === "task" && pr.task_id) {
+        const task = await deps.getTask(pr.task_id);
+        if (
+          !task ||
+          task.paused ||
+          task.status !== "in_review" ||
+          task.pr_url !== pr.pr_url ||
+          task.current_run_pid != null ||
+          !isAutomaticReviewEnabled(task)
+        ) {
+          continue;
+        }
+      }
+      const cached = deps.readReviewSummaryMap()[pr.pr_url];
+      if (
+        cached?.current_run_pid != null ||
+        cached?.current_run_id != null
+      ) {
+        continue;
+      }
       const needsSummary =
         !cached ||
         Boolean(cached.error) ||
@@ -1068,28 +1144,41 @@ async function runReviewPhases(
         continue;
       }
       try {
-        const { pid } = await deps.spawnReviewSummary(pr, {}, async (summary) => {
-          activeReviewPids.delete(pr.pr_url);
-          if (
-            summary.source === "task" &&
-            summary.task_id &&
-            summary.agent_review_status === "needs_author_changes" &&
-            summary.summary_head_sha === summary.head_sha
-          ) {
-            const task = await deps.getTask(summary.task_id);
+        const { pid, done } = await deps.spawnReviewSummary(
+          pr,
+          {},
+          async (summary) => {
+            activeReviewPids.delete(pr.pr_url);
             if (
-              task &&
-              !task.paused &&
-              task.status === "in_review" &&
-              task.pr_url === summary.pr_url &&
-              isAutomaticReviewEnabled(task)
+              summary.source === "task" &&
+              summary.task_id &&
+              summary.agent_review_status === "needs_author_changes" &&
+              summary.summary_head_sha === summary.head_sha
             ) {
-              await deps.updateTask(task.id, {
-                resume_requested: true,
-                resume_run_mode: "review",
-              });
+              const task = await deps.getTask(summary.task_id);
+              if (
+                task &&
+                !task.paused &&
+                task.status === "in_review" &&
+                task.pr_url === summary.pr_url &&
+                isAutomaticReviewEnabled(task)
+              ) {
+                await deps.updateTask(task.id, {
+                  resume_requested: true,
+                  resume_run_mode: "review",
+                });
+              }
             }
           }
+        );
+        void done.catch((error) => {
+          if (activeReviewPids.get(pr.pr_url) === pid) {
+            activeReviewPids.delete(pr.pr_url);
+          }
+          deps.logger.error(
+            `[worker] Review summary run failed for ${pr.pr_url}:`,
+            error
+          );
         });
         activeReviewPids.set(pr.pr_url, pid);
         reviewSlots--;

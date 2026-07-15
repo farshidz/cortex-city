@@ -431,6 +431,31 @@ test("pollOnce respects max_parallel_reviews", async () => {
   assert.equal(h.activeReviewPids.size, 1);
 });
 
+test("pollOnce handles a review completion rejected after its owner is cleared", async () => {
+  const pr = makeRequest();
+  const h = makeHarness({ openReviewRequests: [pr] });
+  const spawnReviewSummary = h.deps.spawnReviewSummary;
+  let rejectDone!: (reason: unknown) => void;
+  h.deps.spawnReviewSummary = async (...args) => {
+    const spawned = await spawnReviewSummary(...args);
+    return {
+      ...spawned,
+      done: new Promise<ReviewSummary>((_resolve, reject) => {
+        rejectDone = reject;
+      }),
+    };
+  };
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+  assert.equal(h.activeReviewPids.has(pr.pr_url), true);
+
+  h.reviews[pr.pr_url] = makeSummary(pr);
+  rejectDone(new Error("Review run ownership was cleared"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(h.activeReviewPids.has(pr.pr_url), false);
+});
+
 test("pollOnce queues a task-owned review with task context when task slots are full", async () => {
   const task = makeTask();
   const unrelatedActiveTask = makeTask({
@@ -481,6 +506,140 @@ test("pollOnce excludes task-owned reviews while their builder is active", async
   assert.equal(h.activeTaskPids.get(task.id), 41_001);
   assert.equal(h.spawnCalls.length, 0);
   assert.equal(h.reviews[task.pr_url!], undefined);
+});
+
+test("pollOnce reclassifies cached inbound reviews owned by unschedulable live tasks", async () => {
+  const pausedTask = makeTask({
+    id: "paused-task",
+    paused: true,
+  });
+  const disabledTask = makeTask({
+    id: "disabled-task",
+    pr_url: "https://github.com/acme/widget/pull/2",
+    reviewer_agent_enabled: false,
+  });
+  const builderTask = makeTask({
+    id: "builder-task",
+    pr_url: "https://github.com/acme/widget/pull/3",
+    current_run_pid: 41_003,
+  });
+  const tasks = [pausedTask, disabledTask, builderTask];
+  const inboundRequests = tasks.map((task, index) =>
+    makeRequest({
+      pr_url: task.pr_url!,
+      pr_number: index + 1,
+      head_sha: `fresh-head-${index + 1}`,
+    })
+  );
+  const reviews = Object.fromEntries(
+    inboundRequests.map((request, index) => [
+      request.pr_url,
+      makeSummary(
+        { ...request, head_sha: `cached-head-${index + 1}` },
+        {
+          summary: "Inbound result must not remain actionable.",
+          generated_at: "2026-05-01T00:05:00.000Z",
+          agent_review_status: "ready_for_human_approval",
+          my_approval_sha: `cached-head-${index + 1}`,
+        }
+      ),
+    ])
+  );
+  // Cover both a still-discovered inbound request and a cached row that is no
+  // longer returned by discovery.
+  const h = makeHarness({
+    tasks,
+    openReviewRequests: inboundRequests.slice(1),
+    reviews,
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.spawnCalls, []);
+  for (const [index, task] of tasks.entries()) {
+    const stored = h.reviews[task.pr_url!];
+    assert.equal(stored.source, "task");
+    assert.equal(stored.task_id, task.id);
+    assert.equal(stored.task_title, task.title);
+    assert.equal(
+      stored.head_sha,
+      index === 0 ? `cached-head-${index + 1}` : `fresh-head-${index + 1}`
+    );
+    assert.equal(stored.summary, "");
+    assert.equal(stored.agent_review_status, undefined);
+    assert.equal(stored.my_approval_sha, undefined);
+    assert.equal(deriveReviewState(stored), "queued");
+  }
+});
+
+test("pollOnce does not claim an inbound review after its task stops being live", async () => {
+  const task = makeTask({ paused: true });
+  const inbound = makeRequest();
+  const h = makeHarness({
+    tasks: [task],
+    openReviewRequests: [inbound],
+    reviews: {
+      [inbound.pr_url]: makeSummary(inbound, {
+        summary: "Keep the inbound result.",
+        generated_at: "2026-05-01T00:05:00.000Z",
+      }),
+    },
+  });
+  h.deps.getTask = async (id) => {
+    const current = h.tasks.find((candidate) => candidate.id === id);
+    return current ? { ...current, status: "merged" } : undefined;
+  };
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.reviews[inbound.pr_url].source, undefined);
+  assert.equal(h.reviews[inbound.pr_url].summary, "Keep the inbound result.");
+  assert.deepEqual(h.spawnCalls, []);
+});
+
+test("pollOnce rechecks task policy immediately before spawning a review", async () => {
+  const task = makeTask();
+  const h = makeHarness({
+    tasks: [task],
+    prHeadShas: { [task.pr_url!]: "task-head" },
+  });
+  h.deps.getTask = async (id) => {
+    const current = h.tasks.find((candidate) => candidate.id === id);
+    return current
+      ? { ...current, reviewer_agent_enabled: false }
+      : undefined;
+  };
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.spawnCalls, []);
+  assert.equal(h.reviews[task.pr_url!].source, "task");
+  assert.equal(deriveReviewState(h.reviews[task.pr_url!]), "queued");
+});
+
+test("pollOnce does not spawn over a review claimed during its final task check", async () => {
+  const task = makeTask();
+  const h = makeHarness({
+    tasks: [task],
+    prHeadShas: { [task.pr_url!]: "task-head" },
+  });
+  h.deps.getTask = async (id) => {
+    const current = h.tasks.find((candidate) => candidate.id === id);
+    if (current) {
+      h.reviews[task.pr_url!] = {
+        ...h.reviews[task.pr_url!],
+        current_run_pid: 70_002,
+        current_run_id: "external-owner",
+      };
+    }
+    return current;
+  };
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.spawnCalls, []);
+  assert.equal(h.reviews[task.pr_url!].current_run_pid, 70_002);
+  assert.equal(h.reviews[task.pr_url!].current_run_id, "external-owner");
 });
 
 test("pollOnce stops a live retired task reviewer before unified review", async () => {
@@ -1634,6 +1793,26 @@ test("pollOnce clears orphaned review pids during pid reconcile", async () => {
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
   assert.equal(h.reviews[pr.pr_url].current_run_pid, undefined);
+});
+
+test("pollOnce clears an ID-only review owner before finalizing", async () => {
+  const pr = makeRequest();
+  const cached = makeSummary(pr, {
+    summary: "previous",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    current_run_id: "stopped-run",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: "closed" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.reviews[pr.pr_url].current_run_id, undefined);
+  assert.equal(h.reviews[pr.pr_url].final_state, "closed");
+  assert.ok(h.reviews[pr.pr_url].final_at);
 });
 
 test("pollOnce clears final_at if a PR comes back into the live list", async () => {

@@ -7,7 +7,11 @@ import type {
   ReviewSummary,
   Task,
 } from "./types";
-import { readReviewSummaries, patchReviewSummary } from "./review-store";
+import {
+  clearReviewRunIfMatching,
+  readReviewSummaries,
+  patchReviewSummary,
+} from "./review-store";
 import { readConfig, readTasks, updateTask } from "./store";
 
 // The orchestrator now runs as a separate process (orchestrator-worker.ts).
@@ -230,14 +234,18 @@ export function getOrchestrator() {
       const pid =
         target === "retro" ? review?.retro_run_pid : review?.current_run_pid;
       if (!pid) return false;
-      const updates: Partial<ReviewSummary> =
+      const clearRun = () =>
         target === "retro"
-          ? {
+          ? patchReviewSummary(prUrl, {
               retro_run_pid: undefined,
               retro_status: "error",
               retro_error: "Retro run stopped by user.",
-            }
-          : { current_run_pid: undefined };
+            })
+          : clearReviewRunIfMatching(
+              prUrl,
+              pid,
+              review?.current_run_id
+            );
       try {
         process.kill(pid, "SIGTERM");
         setTimeout(() => {
@@ -245,10 +253,10 @@ export function getOrchestrator() {
             process.kill(pid, "SIGKILL");
           } catch {}
         }, 5000);
-        void patchReviewSummary(prUrl, updates);
+        void clearRun();
         return true;
       } catch {
-        void patchReviewSummary(prUrl, updates);
+        void clearRun();
         return false;
       }
     },
