@@ -463,12 +463,36 @@ function runRenderScript(body: string): string[] {
                 quota: {
                   rate_limits: {
                     codex: {
+                      limitName: null,
+                      planType: "pro",
                       primary: {
                         usedPercent: 25,
                         windowDurationMins: 10080,
                         resetsAt: 1800000000,
                       },
+                      secondary: null,
                     },
+                    codex_spark: {
+                      limitName: "GPT-5.3-Codex-Spark",
+                      planType: "pro",
+                      primary: {
+                        usedPercent: 5,
+                        windowDurationMins: 10080,
+                        resetsAt: 1800100000,
+                      },
+                      secondary: null,
+                    },
+                  },
+                  rate_limit_reset_credits: {
+                    availableCount: 1,
+                    credits: [
+                      {
+                        id: "credit-1",
+                        title: "Full reset",
+                        status: "available",
+                        expiresAt: 1800200000,
+                      },
+                    ],
                   },
                 },
               },
@@ -477,13 +501,36 @@ function runRenderScript(body: string): string[] {
                 state: "available",
                 fetched_at: now,
                 quota: {
-                  five_hour: {
-                    utilization: 40,
-                    resets_at: "2026-05-19T12:00:00.000Z",
-                  },
-                  seven_day: {
-                    utilization: 60,
-                    resets_at: "2026-05-25T12:00:00.000Z",
+                  limits: [
+                    {
+                      kind: "session",
+                      group: "session",
+                      percent: 40,
+                      severity: "normal",
+                      resets_at: "2026-05-19T12:00:00.000Z",
+                      is_active: true,
+                    },
+                    {
+                      kind: "weekly_all",
+                      group: "weekly",
+                      percent: 60,
+                      severity: "warning",
+                      resets_at: "2026-05-25T12:00:00.000Z",
+                      is_active: true,
+                    },
+                    {
+                      kind: "weekly_scoped",
+                      group: "weekly",
+                      percent: 0,
+                      severity: "normal",
+                      resets_at: null,
+                      scope: { model: { id: null, display_name: "Fable" } },
+                      is_active: false,
+                    },
+                  ],
+                  account: {
+                    subscription_type: "team",
+                    rate_limit_tier: "default_claude_max_5x",
                   },
                 },
               },
@@ -575,15 +622,24 @@ test("sessions page renders quota status returned by both agent runtimes", () =>
     const html = await renderPage("./src/app/sessions/page.tsx");
     console.log(JSON.stringify({
       heading: html.includes("Agent quota status"),
-      codexWindow: html.includes("25%") && html.includes("7 days"),
-      claudeWindows: html.includes("Five Hour") && html.includes("Seven Day"),
+      codexWindow: html.includes("25% used") && html.includes("Weekly limit"),
+      codexNamedLimit: html.includes("GPT-5.3-Codex-Spark"),
+      codexResetCredits:
+        html.includes("Resets available") && html.includes("Full reset"),
+      claudeSession: html.includes("Current session") && html.includes("40% used"),
+      claudeWeekly: html.includes("All models") && html.includes("Fable"),
+      claudeNotUsed: html.includes("Not used yet"),
     }));
   `);
 
   assert.deepEqual(JSON.parse(output[0]), {
     heading: true,
     codexWindow: true,
-    claudeWindows: true,
+    codexNamedLimit: true,
+    codexResetCredits: true,
+    claudeSession: true,
+    claudeWeekly: true,
+    claudeNotUsed: true,
   });
 });
 
