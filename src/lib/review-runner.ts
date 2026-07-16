@@ -129,6 +129,8 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
   "blocked",
 ];
 
+export const REVIEWER_GITHUB_COMMENT_PREFIX = "🤖[Cortex City Reviewer]";
+
 export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request with Cortex City's unified review agent.
 
 Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused review as **GitHub-flavored Markdown**. Keep the existing review standard: surface the findings you would normally surface, but leave GitHub comments yourself when a finding requires the PR author to make a change. If you are unsure whether something should be posted as a PR comment, keep it in the generated review instead.
@@ -438,6 +440,10 @@ export function buildReviewWrapperPrompt(
     ].join(" "),
     "- Use `blocked` when you could not complete the review.",
     "- Leave GitHub comments yourself for findings that require author changes.",
+    [
+      `- Start every GitHub comment you post with \`${REVIEWER_GITHUB_COMMENT_PREFIX}\``,
+      "as the first characters of the comment body.",
+    ].join(" "),
     [
       "- Put uncertain or advisory points in the generated review instead of",
       "posting them to GitHub.",

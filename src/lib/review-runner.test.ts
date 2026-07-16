@@ -242,6 +242,10 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.match(taskPrompt, /Review source: task-owned pull request/);
   assert.match(taskPrompt, /never approve it or request changes on GitHub/i);
   assert.match(taskPrompt, /specific, actionable GitHub comments/i);
+  assert.match(
+    taskPrompt,
+    /Start every GitHub comment you post with `🤖\[Cortex City Reviewer\]`/
+  );
   assert.match(taskPrompt, /Task ID: task-42/);
   assert.match(taskPrompt, /Improve keyboard navigation/);
   assert.match(taskPrompt, /Make every dialog keyboard accessible/);
