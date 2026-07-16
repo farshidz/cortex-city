@@ -125,7 +125,7 @@ function readCodexQuota(
         }
       }
       if (usageResult) {
-        quota.usage = usageResult.summary ?? usageResult;
+        quota.usage = usageResult;
       }
 
       settled = true;

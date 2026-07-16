@@ -98,7 +98,10 @@ test("Codex quota status includes all named limits, reset credits, and usage sum
       },
     },
     rate_limit_reset_credits: { availableCount: 2 },
-    usage: { lifetimeTokens: 12_345 },
+    usage: {
+      summary: { lifetimeTokens: 12_345 },
+      dailyUsageBuckets: [{ startDate: "2026-07-16", tokens: 100 }],
+    },
   });
   assert.deepEqual(requests, [
     "initialize",
