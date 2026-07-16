@@ -192,15 +192,31 @@ function isRateLimitWindow(value: unknown): boolean {
 }
 
 /**
+ * Detects the single `RateLimitSnapshot` shape. A keyed map's top-level keys
+ * are arbitrary limit ids, so the presence of snapshot-specific fields — the
+ * `limitId` field, a window, or any spend-control field — identifies a lone
+ * snapshot even when both windows are null (a spend-control-only response).
+ */
+function isRateLimitSnapshot(record: Record<string, unknown>): boolean {
+  return (
+    "limitId" in record ||
+    isRateLimitWindow(record.primary) ||
+    isRateLimitWindow(record.secondary) ||
+    asRecord(record.individualLimit) != null ||
+    record.spendControlReached === true ||
+    asString(record.rateLimitReachedType) != null
+  );
+}
+
+/**
  * The app-server returns rate limits keyed by limit id, but falls back to a
- * single `RateLimitSnapshot` (windows directly under `primary`/`secondary`)
- * when `rateLimitsByLimitId` is null. Normalize the snapshot into a one-entry
- * map so both shapes iterate the same way.
+ * single `RateLimitSnapshot` when `rateLimitsByLimitId` is null. Normalize the
+ * snapshot into a one-entry map so both shapes iterate the same way.
  */
 function normalizeCodexRateLimits(
   rateLimits: Record<string, unknown>
 ): Record<string, unknown> {
-  if (isRateLimitWindow(rateLimits.primary) || isRateLimitWindow(rateLimits.secondary)) {
+  if (isRateLimitSnapshot(rateLimits)) {
     return { [asString(rateLimits.limitId) ?? "codex"]: rateLimits };
   }
   return rateLimits;
@@ -417,10 +433,49 @@ function deriveClaudePlan(account: Record<string, unknown> | undefined): string 
   return null;
 }
 
+function formatMinorAmount(minor: number, decimals: number, currency: string | null): string {
+  const amount = (minor / 10 ** decimals).toFixed(Math.max(0, decimals));
+  return currency ? `${amount} ${currency}` : amount;
+}
+
+/**
+ * Overage/extra-usage budget, present when a plan allows spending beyond its
+ * limits. Surfaced so an account consuming its overage isn't left invisible.
+ */
+function presentClaudeExtraUsage(quota: Record<string, unknown>): QuotaSection | null {
+  const extra = asRecord(quota.extra_usage);
+  if (!extra || extra.is_enabled !== true) return null;
+  const utilization = asNumber(extra.utilization);
+  const used = asNumber(extra.used_credits);
+  const limit = asNumber(extra.monthly_limit);
+  const currency = asString(extra.currency);
+  const decimals = asNumber(extra.decimal_places) ?? 2;
+  const note =
+    used != null && limit != null
+      ? `${formatMinorAmount(used, decimals, null)} / ${formatMinorAmount(limit, decimals, currency)}`
+      : undefined;
+  return {
+    key: "extra-usage",
+    title: "",
+    bars: [
+      {
+        key: "extra-usage",
+        label: "Extra usage",
+        usedPercent: utilization,
+        resetsAtMs: null,
+        severity: severityForPercent(utilization),
+        note,
+      },
+    ],
+  };
+}
+
 function presentClaudeQuota(quota: Record<string, unknown>): QuotaView {
   const limits = Array.isArray(quota.limits) ? quota.limits : null;
   const sections =
     limits && limits.length > 0 ? presentClaudeLimits(limits) : presentClaudeLegacy(quota);
+  const extraUsage = presentClaudeExtraUsage(quota);
+  if (extraUsage) sections.push(extraUsage);
   return {
     sections,
     resetCredits: null,

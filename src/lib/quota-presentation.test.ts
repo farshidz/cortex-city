@@ -229,6 +229,62 @@ test("Codex synthesizes a bar when only spend-control fields are populated", () 
   assert.equal(view.sections[0].bars[0].note, "Rate limit reached");
 });
 
+test("Codex normalizes a spend-control-only snapshot with null windows", () => {
+  const view = presentQuota("codex", {
+    rate_limits: {
+      limitId: "codex",
+      limitName: null,
+      primary: null,
+      secondary: null,
+      individualLimit: { limit: "30", used: "30", remainingPercent: 0, resetsAt: 1_785_000_000 },
+      spendControlReached: true,
+      rateLimitReachedType: "workspace_owner_credits_depleted",
+    },
+  });
+  assert.equal(view.empty, false);
+  const spend = view.sections[0].bars.find((bar) => bar.label === "Spend cap");
+  assert.ok(spend);
+  assert.equal(spend?.severity, "critical");
+  assert.equal(spend?.note, "Workspace credits depleted");
+});
+
+test("Claude surfaces enabled extra usage as its own bar", () => {
+  const view = presentQuota("claude", {
+    limits: [
+      {
+        kind: "session",
+        group: "session",
+        percent: 3,
+        resets_at: "2026-07-16T09:29:59Z",
+        is_active: true,
+      },
+    ],
+    extra_usage: {
+      is_enabled: true,
+      monthly_limit: 3000,
+      used_credits: 3038,
+      utilization: 100,
+      currency: "AUD",
+      decimal_places: 2,
+    },
+  });
+  const extra = view.sections.at(-1);
+  assert.equal(extra?.bars[0].label, "Extra usage");
+  assert.equal(extra?.bars[0].usedPercent, 100);
+  assert.equal(extra?.bars[0].severity, "critical");
+  assert.equal(extra?.bars[0].note, "30.38 / 30.00 AUD");
+});
+
+test("Claude omits extra usage when it is disabled", () => {
+  const view = presentQuota("claude", {
+    limits: [
+      { kind: "session", group: "session", percent: 3, resets_at: "2026-07-16T09:29:59Z", is_active: true },
+    ],
+    extra_usage: { is_enabled: false, monthly_limit: 3000, used_credits: 0, utilization: 0 },
+  });
+  assert.ok(!view.sections.some((section) => section.key === "extra-usage"));
+});
+
 test("Claude reached severities escalate to critical below the percent thresholds", () => {
   const view = presentQuota("claude", {
     limits: [
