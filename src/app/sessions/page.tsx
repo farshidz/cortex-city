@@ -17,6 +17,15 @@ import type {
   AgentRuntime,
   OrchestratorStatus,
 } from "@/lib/types";
+import {
+  formatExpiry,
+  formatResetTime,
+  presentQuota,
+  type QuotaBar,
+  type QuotaResetCredits,
+  type QuotaSeverity,
+} from "@/lib/quota-presentation";
+import { cn } from "@/lib/utils";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -29,71 +38,65 @@ function humanizeQuotaKey(key: string): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-function formatQuotaValue(key: string, value: string | number | boolean): string {
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (typeof value === "number") {
-    if (/percent|utilization/i.test(key)) return `${value.toLocaleString()}%`;
-    if (/duration.*mins/i.test(key)) {
-      const hours = value / 60;
-      return Number.isInteger(hours / 24)
-        ? `${hours / 24} days`
-        : Number.isInteger(hours)
-          ? `${hours} hours`
-          : `${value} minutes`;
-    }
-    if (/(resets|expires|granted).*at/i.test(key)) {
-      return new Date(value < 1_000_000_000_000 ? value * 1000 : value).toLocaleString();
-    }
-    return value.toLocaleString();
-  }
-  if (/(resets|expires|granted).*at/i.test(key)) {
-    const timestamp = new Date(value);
-    if (!Number.isNaN(timestamp.getTime())) return timestamp.toLocaleString();
-  }
-  return value;
+const SEVERITY_BAR_CLASSES: Record<QuotaSeverity, string> = {
+  normal: "bg-green-500",
+  warning: "bg-yellow-500",
+  critical: "bg-red-500",
+};
+
+function UsageBar({ bar, now }: { bar: QuotaBar; now: number }) {
+  const reset = formatResetTime(bar.resetsAtMs, now);
+  const width = bar.usedPercent == null ? 0 : Math.min(100, Math.max(0, bar.usedPercent));
+  const detail = bar.note ?? reset;
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5">
+      <div className="min-w-0">
+        <div className="flex items-baseline gap-2">
+          <span className="truncate text-sm font-medium">{bar.label}</span>
+          {bar.sublabel ? (
+            <span className="text-xs text-muted-foreground">{bar.sublabel}</span>
+          ) : null}
+        </div>
+        {detail ? <div className="text-xs text-muted-foreground">{detail}</div> : null}
+      </div>
+      <div className="text-right text-sm tabular-nums text-muted-foreground">
+        {bar.usedPercent == null ? "—" : `${bar.usedPercent}% used`}
+      </div>
+      <div className="col-span-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn("h-full rounded-full transition-all", SEVERITY_BAR_CLASSES[bar.severity])}
+          style={{ width: `${width}%` }}
+        />
+      </div>
+    </div>
+  );
 }
 
-function QuotaDetails({ value }: { value: unknown }) {
-  if (Array.isArray(value)) {
-    if (value.length === 0) return <span className="text-muted-foreground">None</span>;
-    return (
-      <div className="grid gap-2">
-        {value.map((item, index) => (
-          <div key={index} className="rounded-md border p-2">
-            <QuotaDetails value={item} />
-          </div>
-        ))}
+function ResetCredits({ data }: { data: QuotaResetCredits }) {
+  return (
+    <div className="grid gap-2 border-t border-foreground/10 pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Resets available
+        </span>
+        <Badge variant="secondary">{data.availableCount}</Badge>
       </div>
-    );
-  }
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value).filter(([, item]) => item != null);
-    if (entries.length === 0) {
-      return <span className="text-muted-foreground">No data</span>;
-    }
-    return (
-      <div className="grid gap-2">
-        {entries.map(([key, item]) =>
-          item && typeof item === "object" ? (
-            <div key={key} className="rounded-md border p-2">
-              <div className="mb-2 text-xs font-medium text-muted-foreground">
-                {humanizeQuotaKey(key)}
-              </div>
-              <QuotaDetails value={item} />
-            </div>
-          ) : (
-            <div key={key} className="flex items-start justify-between gap-4">
-              <span className="text-muted-foreground">{humanizeQuotaKey(key)}</span>
-              <span className="text-right font-medium">
-                {formatQuotaValue(key, item as string | number | boolean)}
+      {data.credits.length > 0 ? (
+        <ul className="grid gap-1 text-sm">
+          {data.credits.map((credit) => (
+            <li key={credit.key} className="flex items-center justify-between gap-4">
+              <span className="truncate">{credit.title}</span>
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {formatExpiry(credit.expiresAtMs)}
               </span>
-            </div>
-          )
-        )}
-      </div>
-    );
-  }
-  return <span>{value == null ? "No data" : String(value)}</span>;
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="text-sm text-muted-foreground">No resets available.</div>
+      )}
+    </div>
+  );
 }
 
 export default function SessionsPage() {
@@ -256,17 +259,22 @@ export default function SessionsPage() {
               (candidate) => candidate.runtime === runtime
             );
             const state = quotaStatus?.state || "loading";
+            const view = presentQuota(runtime, quotaStatus?.quota);
+            const description = [
+              view.planLabel,
+              quotaStatus
+                ? `Updated ${new Date(quotaStatus.fetched_at).toLocaleTimeString()}`
+                : "Reading quota status",
+            ]
+              .filter(Boolean)
+              .join(" · ");
             return (
               <Card key={runtime} size="sm">
                 <CardHeader>
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <CardTitle>{humanizeQuotaKey(runtime)}</CardTitle>
-                      <CardDescription>
-                        {quotaStatus
-                          ? `Updated ${new Date(quotaStatus.fetched_at).toLocaleTimeString()}`
-                          : "Reading quota status"}
-                      </CardDescription>
+                      <CardDescription>{description}</CardDescription>
                     </div>
                     <Badge
                       variant={
@@ -281,19 +289,34 @@ export default function SessionsPage() {
                     </Badge>
                   </div>
                 </CardHeader>
-                <CardContent className="max-h-96 overflow-auto">
-                  {quotaStatus?.quota ? (
-                    <QuotaDetails value={quotaStatus.quota} />
+                <CardContent className="grid gap-4">
+                  {state === "available" && !view.empty ? (
+                    <>
+                      {view.sections.map((section) => (
+                        <div key={section.key} className="grid gap-3">
+                          {section.title ? (
+                            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                              {section.title}
+                            </div>
+                          ) : null}
+                          {section.bars.map((bar) => (
+                            <UsageBar key={bar.key} bar={bar} now={now} />
+                          ))}
+                        </div>
+                      ))}
+                      {view.resetCredits ? <ResetCredits data={view.resetCredits} /> : null}
+                      {quotaStatus?.message ? (
+                        <div className="text-xs text-muted-foreground">{quotaStatus.message}</div>
+                      ) : null}
+                    </>
                   ) : (
-                    <div className="text-muted-foreground">
-                      {quotaStatus?.message || "Loading quota status..."}
+                    <div className="text-sm text-muted-foreground">
+                      {quotaStatus?.message ||
+                        (state === "available"
+                          ? "No quota data to display."
+                          : "Loading quota status...")}
                     </div>
                   )}
-                  {quotaStatus?.quota && quotaStatus.message ? (
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      {quotaStatus.message}
-                    </div>
-                  ) : null}
                 </CardContent>
               </Card>
             );
