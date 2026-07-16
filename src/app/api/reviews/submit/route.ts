@@ -35,10 +35,14 @@ export async function POST(request: NextRequest) {
   );
   if (
     decision !== "comment" &&
-    (cached?.source === "task" || ownedByLiveTask)
+    (cached?.source === "task" || cached?.self_authored || ownedByLiveTask)
   ) {
     return NextResponse.json(
-      { error: "Task-owned pull requests cannot be approved or rejected by their owner" },
+      {
+        error: cached?.self_authored
+          ? "Self-authored pull requests cannot be approved or rejected by their owner"
+          : "Task-owned pull requests cannot be approved or rejected by their owner",
+      },
       { status: 400 }
     );
   }

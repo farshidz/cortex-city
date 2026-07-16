@@ -795,6 +795,8 @@ function prFieldsFromRequest(request: ReviewRequest) {
     task_title: request.task_title,
     task_description: request.task_description,
     task_plan: request.task_plan,
+    label_only: request.label_only,
+    self_authored: request.self_authored,
     pr_url: request.pr_url,
     pr_number: request.pr_number,
     repo_slug: request.repo_slug,
@@ -1026,6 +1028,7 @@ async function runReviewPhases(
       }
       const reviewContextChanged =
         (current.source || "inbound") !== (pr.source || "inbound") ||
+        current.self_authored !== pr.self_authored ||
         current.task_id !== pr.task_id ||
         current.task_title !== pr.task_title ||
         current.task_description !== pr.task_description ||
@@ -1064,6 +1067,7 @@ async function runReviewPhases(
         current.my_changes_requested_sha !== pr.my_changes_requested_sha;
       const sourceMetadataChanged =
         reviewContextChanged ||
+        current.label_only !== pr.label_only ||
         current.title !== pr.title ||
         current.updated_at !== pr.updated_at;
       if (!wasFinal && !reviewShaChanged && !sourceMetadataChanged && !hadFinalLookup) {
@@ -1220,6 +1224,29 @@ async function runReviewPhases(
       );
     }
     if (!finalState) {
+      if (!lookupError && review.label_only) {
+        const now = new Date().toISOString();
+        await mutateStoredReview(deps, review.pr_url, (current) => {
+          if (
+            !current ||
+            !current.label_only ||
+            current.final_at ||
+            current.current_run_pid != null ||
+            current.current_run_id != null
+          ) {
+            return undefined;
+          }
+          return {
+            ...current,
+            final_at: now,
+            final_state: undefined,
+            final_state_lookup_started_at: undefined,
+            final_state_lookup_error_started_at: undefined,
+            final_state_lookup_error: undefined,
+          };
+        });
+        continue;
+      }
       const now = Date.now();
       const lookupMessage = lookupError
         ? errorMessage(lookupError)

@@ -322,32 +322,36 @@ export default function ReviewDetailPage({
       <div className="space-y-2">
         <div className="text-sm font-medium">Submit a review</div>
         <div className="flex gap-2 flex-wrap">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() =>
-              setSubmitState({
-                decision: "approve",
-                body: "",
-                submitting: false,
-              })
-            }
-          >
-            Approve
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() =>
-              setSubmitState({
-                decision: "request-changes",
-                body: "",
-                submitting: false,
-              })
-            }
-          >
-            Request changes
-          </Button>
+          {!review.self_authored && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  setSubmitState({
+                    decision: "approve",
+                    body: "",
+                    submitting: false,
+                  })
+                }
+              >
+                Approve
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  setSubmitState({
+                    decision: "request-changes",
+                    body: "",
+                    submitting: false,
+                  })
+                }
+              >
+                Request changes
+              </Button>
+            </>
+          )}
           <Button
             size="sm"
             variant="outline"

@@ -678,14 +678,16 @@ test("pollOnce skips a head covered during migration and reviews the next head",
   assert.equal(h.spawnCalls[0].source, "task");
 });
 
-test("pollOnce deduplicates an inbound request in favor of task ownership", async () => {
+test("pollOnce gives task ownership precedence over a self-authored labeled request", async () => {
   const task = makeTask({
     resume_requested: true,
     resume_run_mode: "review",
   });
   const inbound = makeRequest({
+    label_only: true,
+    self_authored: true,
     title: "Inbound title must not win",
-    author: "someone-else",
+    author: "me",
     head_sha: "same-head",
     my_approval_sha: "same-head",
   });
@@ -710,9 +712,13 @@ test("pollOnce deduplicates an inbound request in favor of task ownership", asyn
   assert.equal(h.spawnCalls[0].source, "task");
   assert.equal(h.spawnCalls[0].task_id, task.id);
   assert.equal(h.spawnCalls[0].title, task.title);
+  assert.equal(h.spawnCalls[0].label_only, undefined);
+  assert.equal(h.spawnCalls[0].self_authored, undefined);
   assert.equal(h.spawnCalls[0].my_approval_sha, undefined);
   assert.equal(h.reviews[task.pr_url!].source, "task");
   assert.equal(h.reviews[task.pr_url!].task_id, task.id);
+  assert.equal(h.reviews[task.pr_url!].label_only, undefined);
+  assert.equal(h.reviews[task.pr_url!].self_authored, undefined);
 });
 
 test("pollOnce invalidates review context when the head and owner change together", async () => {
@@ -1141,6 +1147,28 @@ test("pollOnce stamps final_at when a PR drops out of the live list", async () =
   // Summary is preserved during the 24h grace period.
   assert.equal(stored.summary, "old summary");
   assert.equal(h.deletedPrUrls.length, 0);
+});
+
+test("pollOnce archives an open label-only review when the label is removed", async () => {
+  const pr = makeRequest({ label_only: true });
+  const cached = makeSummary(pr, {
+    summary: "label-selected summary",
+    generated_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    prFinalStates: { [pr.pr_url]: null },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.ok(stored.final_at, "the removed label should retire the review");
+  assert.equal(stored.final_state, undefined);
+  assert.equal(stored.final_state_lookup_started_at, undefined);
+  assert.equal(stored.final_state_lookup_error, undefined);
+  assert.equal(stored.summary, "label-selected summary");
 });
 
 test("final-state lookup does not overwrite a review claimed while lookup is in flight", async () => {

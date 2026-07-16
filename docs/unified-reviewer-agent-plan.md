@@ -16,6 +16,7 @@ Add one global reviewer model setting so the user can select GPT-5.6 or provide 
 
 - There will be one review engine, prompt policy, learning store, runtime profile, and review concurrency pool.
 - Task-owned and assigned PRs remain distinct workflow sources. They share review behavior but retain source-appropriate actions and presentation.
+- A live Cortex task takes precedence when its PR is also selected by `cortex-city-review`; the label does not bypass task pause, automatic-review opt-out, or builder-coordination rules.
 - The existing per-task reviewer on/off choice remains as an **Automatic review** opt-out. It controls whether a task PR enters the unified review queue; it does not select a different reviewer.
 - Settings defines the default reviewer runtime, model, and effort. The reviewer model is Settings-only; existing per-review runtime and effort overrides can remain. A task's runtime, model, and effort continue to configure its implementation agent only.
 - The Reviews area remains focused on PRs requiring the user's review decision and explicitly filters by review source. Task-owned results remain associated with the task workflow and GitHub feedback, where self-approval actions and inbound-review wording do not apply.

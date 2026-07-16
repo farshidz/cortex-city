@@ -262,6 +262,8 @@ function effectiveReviewRequest(
   return {
     ...request,
     source: "task",
+    label_only: undefined,
+    self_authored: undefined,
     task_id: request.task_id ?? cached?.task_id,
     task_title: request.task_title ?? cached?.task_title,
     task_description: request.task_description ?? cached?.task_description,
@@ -279,6 +281,8 @@ function reviewRequestSnapshot(review: ReviewRequest): ReviewRequest {
     task_title: review.task_title,
     task_description: review.task_description,
     task_plan: review.task_plan,
+    label_only: review.label_only,
+    self_authored: review.self_authored,
     pr_url: review.pr_url,
     pr_number: review.pr_number,
     repo_slug: review.repo_slug,
@@ -298,6 +302,20 @@ function buildReviewSourceContext(
   taskInstructions?: string
 ): string[] {
   if (reviewSourceOf(request) !== "task") {
+    if (request.self_authored) {
+      return [
+        "Review source: label-selected self-authored pull request.",
+        [
+          "The signed-in user owns this PR and opted it into Cortex City review",
+          "with the `cortex-city-review` label. Act as an independent reviewer,",
+          "but never approve it or request changes on GitHub.",
+        ].join(" "),
+        [
+          "Leave specific, actionable GitHub comments for findings that require",
+          "code changes so the PR author can address them.",
+        ].join(" "),
+      ];
+    }
     return [
       "Review source: inbound pull request.",
       "The signed-in user has been asked to review someone else's PR.",

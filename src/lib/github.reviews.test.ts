@@ -299,6 +299,8 @@ test("getReviewRequestedPRs includes a self-authored PR solely by its cortex-cit
 
   assert.deepEqual(result, [
     {
+      label_only: true,
+      self_authored: true,
       pr_url: labeledResult.url,
       pr_number: 5,
       repo_slug: "acme/widget",

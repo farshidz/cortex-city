@@ -93,11 +93,17 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
     // must never make a task owner's own PR look approved or changes-requested.
     normalized.my_approval_sha = undefined;
     normalized.my_changes_requested_sha = undefined;
+    normalized.label_only = undefined;
+    normalized.self_authored = undefined;
   } else {
     normalized.task_id = undefined;
     normalized.task_title = undefined;
     normalized.task_description = undefined;
     normalized.task_plan = undefined;
+    if (normalized.self_authored) {
+      normalized.my_approval_sha = undefined;
+      normalized.my_changes_requested_sha = undefined;
+    }
   }
   if (normalized.summary?.trim() && !normalized.summary_head_sha) {
     normalized.summary_head_sha = normalized.head_sha;

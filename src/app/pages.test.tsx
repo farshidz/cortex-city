@@ -1125,6 +1125,42 @@ test("review detail allows followups on stale visible summaries", () => {
   assert.doesNotMatch(result.sendButton, /\\sdisabled(?:=|\\s|>|$)/);
 });
 
+test("self-authored labeled review detail suppresses owner decisions", () => {
+  const output = runRenderScript(`
+    const selfAuthoredReview = {
+      ...review,
+      label_only: true,
+      self_authored: true,
+      author: "me",
+    };
+    globalThis.__SWR_DATA__ = {
+      ...globalThis.__SWR_DATA__,
+      "/api/reviews": [selfAuthoredReview],
+    };
+    const html = await renderPage(
+      "./src/app/reviews/[id]/page.tsx",
+      {
+        params: Promise.resolve({
+          id: Buffer.from(selfAuthoredReview.pr_url, "utf-8").toString("base64url"),
+        }),
+      }
+    );
+    const buttons = [...html.matchAll(/<button\\b[^>]*>[\\s\\S]*?<\\/button>/g)]
+      .map((match) => match[0]);
+    console.log(JSON.stringify({
+      hasApprove: buttons.some((button) => button.includes("Approve")),
+      hasRequestChanges: buttons.some((button) => button.includes("Request changes")),
+      hasComment: buttons.some((button) => button.includes("Comment")),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    hasApprove: false,
+    hasRequestChanges: false,
+    hasComment: true,
+  });
+});
+
 test("review detail covers alternate submit and summary states", () => {
   const output = runRenderScript(`
     const originalData = globalThis.__SWR_DATA__;

@@ -11,7 +11,7 @@ Goal: add a **Reviews** section that
 - lets the user open, regenerate, approve, or request changes from inside Cortex City.
 
 Per user input:
-- Scope: **all** direct review requests, already-reviewed open PRs, and `cortex-city-review`-labeled PRs for the authenticated `gh` user (no repo filter). The label is sufficient even for a self-authored PR.
+- Scope: **all** direct review requests, already-reviewed open PRs, and `cortex-city-review`-labeled PRs for the authenticated `gh` user (no repo filter). The label is sufficient even for a self-authored PR. Removing it retires a PR selected only by the label. A live Cortex task remains authoritative when its PR also has the label.
 - Summary: **auto on first view**, cached keyed on PR head SHA, with manual **regenerate** button.
 - Runtime: a single, user-editable **review prompt** lives in Cortex City config (not per-agent). The wrapper prefixes a fixed line `Review this PR: <pr_url>`. User picks **runtime (claude | codex)** and **effort level** in settings (with per-run override on the page).
 - Row actions: Open PR · Regenerate summary · Approve / Request changes (inline GH review) · **Ask follow-up** (chat with the agent about its summary).
@@ -31,7 +31,7 @@ A new lightweight, **task-free** runner — review summarization does not spawn 
 - Manual **force-regenerate** is still synchronous (`POST /api/reviews/summarize`) — the user is in front of the page waiting; bypassing the worker keeps the latency tight. The endpoint reuses the same `spawnReviewSummary` and adds its pid to `activeReviewPids` so a worker tick fired mid-run won't double-spawn.
 - Follow-up Q&A (`POST /api/reviews/followup`) also runs synchronously — user-initiated, short-lived, no worker involvement.
 
-GitHub data: `gh search prs user-review-requested:@me --state=open --json …` plus `gh search prs reviewed-by:<login> --state=open --json …` plus `gh search prs label:cortex-city-review --state=open --json …`, de-duplicated, then per-PR `gh pr view` calls to enrich with head SHA + mergeable state, parallelized. Self-authored PRs are filtered out unless they appear in the label search.
+GitHub data: `gh search prs user-review-requested:@me --state=open --json …` plus `gh search prs reviewed-by:<login> --state=open --json …` plus `gh search prs label:cortex-city-review --state=open --json …`, de-duplicated, then per-PR `gh pr view` calls to enrich with head SHA + mergeable state, parallelized. Self-authored PRs are filtered out unless they appear in the label search. Those self-authored rows retain comment actions but suppress owner approval/change-request actions.
 
 **Session lifecycle:**
 - Each summary run captures the session id (`session_id` on Claude's JSON result, `thread.started.thread_id` on Codex — same fields the existing runner reads in `agent-runner.ts:614,1221`) and stores it on the cached `ReviewSummary`.
