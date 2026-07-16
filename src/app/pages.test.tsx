@@ -455,6 +455,39 @@ function runRenderScript(body: string): string[] {
                 status: "running",
               },
             ],
+            "/api/agent-status": [
+              {
+                runtime: "codex",
+                state: "available",
+                fetched_at: now,
+                quota: {
+                  rate_limits: {
+                    codex: {
+                      primary: {
+                        usedPercent: 25,
+                        windowDurationMins: 10080,
+                        resetsAt: 1800000000,
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                runtime: "claude",
+                state: "available",
+                fetched_at: now,
+                quota: {
+                  five_hour: {
+                    utilization: 40,
+                    resets_at: "2026-05-19T12:00:00.000Z",
+                  },
+                  seven_day: {
+                    utilization: 60,
+                    resets_at: "2026-05-25T12:00:00.000Z",
+                  },
+                },
+              },
+            ],
             "/api/orchestrator": {
               running: true,
               healthy: true,
@@ -535,6 +568,23 @@ test("app pages render their initial state", () => {
   for (const line of output) {
     assert.ok(JSON.parse(line).length > 0);
   }
+});
+
+test("sessions page renders quota status returned by both agent runtimes", () => {
+  const output = runRenderScript(`
+    const html = await renderPage("./src/app/sessions/page.tsx");
+    console.log(JSON.stringify({
+      heading: html.includes("Agent quota status"),
+      codexWindow: html.includes("25%") && html.includes("7 days"),
+      claudeWindows: html.includes("Five Hour") && html.includes("Seven Day"),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    heading: true,
+    codexWindow: true,
+    claudeWindows: true,
+  });
 });
 
 test("app pages render editable and alternate states", () => {

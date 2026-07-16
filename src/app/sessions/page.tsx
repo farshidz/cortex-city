@@ -7,12 +7,94 @@ import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import type { ActiveSession, OrchestratorStatus } from "@/lib/types";
+import type {
+  ActiveSession,
+  AgentQuotaStatus,
+  AgentRuntime,
+  OrchestratorStatus,
+} from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
+
+const RUNTIMES: AgentRuntime[] = ["codex", "claude"];
+
+function humanizeQuotaKey(key: string): string {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function formatQuotaValue(key: string, value: string | number | boolean): string {
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "number") {
+    if (/percent|utilization/i.test(key)) return `${value.toLocaleString()}%`;
+    if (/duration.*mins/i.test(key)) {
+      const hours = value / 60;
+      return Number.isInteger(hours / 24)
+        ? `${hours / 24} days`
+        : Number.isInteger(hours)
+          ? `${hours} hours`
+          : `${value} minutes`;
+    }
+    if (/(resets|expires|granted).*at/i.test(key)) {
+      return new Date(value < 1_000_000_000_000 ? value * 1000 : value).toLocaleString();
+    }
+    return value.toLocaleString();
+  }
+  if (/(resets|expires|granted).*at/i.test(key)) {
+    const timestamp = new Date(value);
+    if (!Number.isNaN(timestamp.getTime())) return timestamp.toLocaleString();
+  }
+  return value;
+}
+
+function QuotaDetails({ value }: { value: unknown }) {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-muted-foreground">None</span>;
+    return (
+      <div className="grid gap-2">
+        {value.map((item, index) => (
+          <div key={index} className="rounded-md border p-2">
+            <QuotaDetails value={item} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value).filter(([, item]) => item != null);
+    if (entries.length === 0) {
+      return <span className="text-muted-foreground">No data</span>;
+    }
+    return (
+      <div className="grid gap-2">
+        {entries.map(([key, item]) =>
+          item && typeof item === "object" ? (
+            <div key={key} className="rounded-md border p-2">
+              <div className="mb-2 text-xs font-medium text-muted-foreground">
+                {humanizeQuotaKey(key)}
+              </div>
+              <QuotaDetails value={item} />
+            </div>
+          ) : (
+            <div key={key} className="flex items-start justify-between gap-4">
+              <span className="text-muted-foreground">{humanizeQuotaKey(key)}</span>
+              <span className="text-right font-medium">
+                {formatQuotaValue(key, item as string | number | boolean)}
+              </span>
+            </div>
+          )
+        )}
+      </div>
+    );
+  }
+  return <span>{value == null ? "No data" : String(value)}</span>;
+}
 
 export default function SessionsPage() {
   const { data: sessions, mutate: mutateSessions } = useSWR<ActiveSession[]>(
@@ -24,6 +106,11 @@ export default function SessionsPage() {
     "/api/orchestrator",
     fetcher,
     { refreshInterval: 3000 }
+  );
+  const { data: agentQuotaStatuses } = useSWR<AgentQuotaStatus[]>(
+    "/api/agent-status",
+    fetcher,
+    { refreshInterval: 60_000 }
   );
   const [now, setNow] = useState(() => Date.now());
   const [recovering, setRecovering] = useState(false);
@@ -160,6 +247,59 @@ export default function SessionsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <div className="mb-4">
+        <h2 className="mb-3 text-lg font-semibold">Agent quota status</h2>
+        <div className="grid gap-3 lg:grid-cols-2">
+          {RUNTIMES.map((runtime) => {
+            const quotaStatus = agentQuotaStatuses?.find(
+              (candidate) => candidate.runtime === runtime
+            );
+            const state = quotaStatus?.state || "loading";
+            return (
+              <Card key={runtime} size="sm">
+                <CardHeader>
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <CardTitle>{humanizeQuotaKey(runtime)}</CardTitle>
+                      <CardDescription>
+                        {quotaStatus
+                          ? `Updated ${new Date(quotaStatus.fetched_at).toLocaleTimeString()}`
+                          : "Reading quota status"}
+                      </CardDescription>
+                    </div>
+                    <Badge
+                      variant={
+                        state === "error"
+                          ? "destructive"
+                          : state === "available"
+                            ? "default"
+                            : "secondary"
+                      }
+                    >
+                      {humanizeQuotaKey(state)}
+                    </Badge>
+                  </div>
+                </CardHeader>
+                <CardContent className="max-h-96 overflow-auto">
+                  {quotaStatus?.quota ? (
+                    <QuotaDetails value={quotaStatus.quota} />
+                  ) : (
+                    <div className="text-muted-foreground">
+                      {quotaStatus?.message || "Loading quota status..."}
+                    </div>
+                  )}
+                  {quotaStatus?.quota && quotaStatus.message ? (
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      {quotaStatus.message}
+                    </div>
+                  ) : null}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      </div>
 
       {/* Session cards */}
       {sessions && sessions.length > 0 ? (

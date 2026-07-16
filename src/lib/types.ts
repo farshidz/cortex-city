@@ -344,6 +344,16 @@ export interface OrchestratorStatus {
   poll_in_progress: boolean;
 }
 
+export type AgentQuotaState = "available" | "unavailable" | "error";
+
+export interface AgentQuotaStatus {
+  runtime: AgentRuntime;
+  state: AgentQuotaState;
+  fetched_at: string;
+  quota?: Record<string, unknown>;
+  message?: string;
+}
+
 export interface ClaudeRunResult {
   type: string;
   subtype: string;
