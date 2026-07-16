@@ -244,11 +244,11 @@ function NewTaskPageBody() {
                 checked={reviewerAgentEnabled}
                 onCheckedChange={setReviewerAgentEnabled}
               />
-              <Label>Reviewer agent</Label>
+              <Label>Automatic review</Label>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="model">Model</Label>
+              <Label htmlFor="model">Implementation model</Label>
               <Input
                 id="model"
                 value={model}
@@ -263,7 +263,7 @@ function NewTaskPageBody() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="effort">Effort</Label>
+              <Label htmlFor="effort">Implementation effort</Label>
               <Select
                 value={effort || "__default__"}
                 onValueChange={(v) =>

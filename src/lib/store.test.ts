@@ -199,6 +199,114 @@ test("updateTask merges concurrent writes without dropping earlier fields", () =
   );
 });
 
+test("readTasks clears legacy reviewer state without disturbing builder review state", () => {
+  const workspace = createTempWorkspace();
+  const legacyReviewerTask = {
+    ...sampleTask({
+      id: "legacy-reviewer",
+      status: "in_review",
+      session_id: "builder-session-kept",
+      last_review_gh_state: "builder-feedback-hash-kept",
+    }),
+    reviewer_session_id: "obsolete-reviewer-session",
+    reviewer_run_pending: true,
+    reviewer_last_reviewed_head_sha: "obsolete-reviewed-head",
+    reviewer_codex_usage_session_id: "obsolete-usage-session",
+    reviewer_codex_cumulative_input_tokens: 101,
+    reviewer_codex_cumulative_cached_input_tokens: 202,
+    reviewer_codex_cumulative_output_tokens: 303,
+    resume_requested: true,
+    resume_run_mode: "reviewer",
+  };
+  const builderReviewTask = {
+    ...sampleTask({
+      id: "builder-review",
+      status: "in_review",
+      session_id: "builder-review-session",
+      current_run_pid: 4242,
+      current_run_mode: "review",
+      resume_requested: true,
+      resume_run_mode: "review",
+      codex_usage_session_id: "builder-usage-session",
+      codex_cumulative_input_tokens: 11,
+      codex_cumulative_cached_input_tokens: 22,
+      codex_cumulative_output_tokens: 33,
+      last_review_gh_state: "builder-review-feedback-hash",
+    }),
+    reviewer_session_id: "obsolete-reviewer-session-2",
+    reviewer_run_pending: true,
+    reviewer_last_reviewed_head_sha: "obsolete-reviewed-head-2",
+    reviewer_codex_usage_session_id: "obsolete-usage-session-2",
+    reviewer_codex_cumulative_input_tokens: 404,
+    reviewer_codex_cumulative_cached_input_tokens: 505,
+    reviewer_codex_cumulative_output_tokens: 606,
+  };
+
+  mkdirSync(path.join(workspace, ".cortex"), { recursive: true });
+  writeFileSync(
+    path.join(workspace, ".cortex", "tasks.json"),
+    JSON.stringify([legacyReviewerTask, builderReviewTask], null, 2)
+  );
+
+  const result = runStoreScript(
+    workspace,
+    `
+      const normalized = store.readTasks();
+      await store.writeTasks(normalized);
+      const persisted = JSON.parse(
+        require("node:fs").readFileSync(
+          require("node:path").join(process.cwd(), ".cortex", "tasks.json"),
+          "utf-8"
+        )
+      );
+      console.log(JSON.stringify({ normalized, persisted }));
+    `
+  );
+
+  assert.deepEqual(result.persisted, result.normalized);
+  const obsoleteFields = [
+    "reviewer_session_id",
+    "reviewer_run_pending",
+    "reviewer_last_reviewed_head_sha",
+    "reviewer_codex_usage_session_id",
+    "reviewer_codex_cumulative_input_tokens",
+    "reviewer_codex_cumulative_cached_input_tokens",
+    "reviewer_codex_cumulative_output_tokens",
+  ];
+  for (const task of result.normalized) {
+    for (const field of obsoleteFields) {
+      assert.equal(Object.hasOwn(task, field), false, `${field} should be removed`);
+    }
+  }
+
+  const legacy = result.normalized.find(
+    (task: Task) => task.id === "legacy-reviewer"
+  );
+  assert.equal(legacy.session_id, "builder-session-kept");
+  assert.equal(legacy.last_review_gh_state, "builder-feedback-hash-kept");
+  assert.equal(legacy.review_migration_head_sha, "obsolete-reviewed-head");
+  assert.equal(Object.hasOwn(legacy, "resume_requested"), false);
+  assert.equal(Object.hasOwn(legacy, "resume_run_mode"), false);
+
+  const builder = result.normalized.find(
+    (task: Task) => task.id === "builder-review"
+  );
+  assert.equal(builder.session_id, "builder-review-session");
+  assert.equal(builder.current_run_pid, 4242);
+  assert.equal(builder.current_run_mode, "review");
+  assert.equal(builder.resume_requested, true);
+  assert.equal(builder.resume_run_mode, "review");
+  assert.equal(builder.codex_usage_session_id, "builder-usage-session");
+  assert.equal(builder.codex_cumulative_input_tokens, 11);
+  assert.equal(builder.codex_cumulative_cached_input_tokens, 22);
+  assert.equal(builder.codex_cumulative_output_tokens, 33);
+  assert.equal(builder.last_review_gh_state, "builder-review-feedback-hash");
+  assert.equal(
+    builder.review_migration_head_sha,
+    "obsolete-reviewed-head-2"
+  );
+});
+
 test("readTasks restores from last-good backup when tasks file is corrupt", () => {
   const workspace = createTempWorkspace();
   const task = sampleTask();

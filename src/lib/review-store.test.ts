@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -37,6 +37,63 @@ function runStoreScript(workspace: string, body: string) {
     }
   );
   return JSON.parse(output.trim().split(/\r?\n/).pop()!);
+}
+
+function spawnStoreScript(
+  workspace: string,
+  body: string,
+  env: NodeJS.ProcessEnv = process.env
+) {
+  const child = spawn(
+    TSX_BIN,
+    [
+      "--eval",
+      [
+        `import * as store from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+        "(async () => {",
+        body,
+        "})().catch((error) => {",
+        "  console.error(error);",
+        "  process.exit(1);",
+        "});",
+      ].join("\n"),
+    ],
+    {
+      cwd: workspace,
+      env,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  const done = new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    stdout: string;
+    stderr: string;
+  }>((resolve) => {
+    child.on("close", (code, signal) => {
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
+  return { child, done };
+}
+
+async function waitForFile(file: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (!existsSync(file)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for ${file}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function sampleReviewLiteral(prUrl: string) {
@@ -80,6 +137,7 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   );
 
   assert.equal(result.saved.pr_url, entry.pr_url);
+  assert.equal(result.saved.source, "inbound");
   assert.equal(result.saved.review_status, "pending_summary");
   assert.equal(result.saved.review_state, "queued");
   assert.deepEqual(result.all, [result.saved]);
@@ -90,6 +148,7 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   );
   assert.equal(Object.keys(persisted).length, 1);
   assert.equal(persisted[entry.pr_url].pr_url, entry.pr_url);
+  assert.equal(persisted[entry.pr_url].source, "inbound");
   assert.equal(persisted[entry.pr_url].review_status, "pending_summary");
   assert.equal(persisted[entry.pr_url].review_state, "queued");
 });
@@ -143,6 +202,43 @@ test("patchReviewSummary merges updates and returns the patched entry", () => {
   assert.deepEqual(result.fetched, result.patched);
 });
 
+test("clearReviewRunIfMatching cannot clear a newer run owner", () => {
+  const workspace = createTempWorkspace();
+  const entry = {
+    ...sampleReviewLiteral("https://github.com/acme/widget/pull/41"),
+    current_run_pid: 4100,
+    current_run_id: "new-owner",
+  };
+  const result = runStoreScript(
+    workspace,
+    `
+      await store.upsertReviewSummary(${JSON.stringify(entry)});
+      const stale = await store.clearReviewRunIfMatching(
+        ${JSON.stringify(entry.pr_url)},
+        4000,
+        "old-owner"
+      );
+      const afterStale = store.getReviewSummary(${JSON.stringify(entry.pr_url)});
+      const cleared = await store.clearReviewRunIfMatching(
+        ${JSON.stringify(entry.pr_url)},
+        4100,
+        "new-owner"
+      );
+      console.log(JSON.stringify({
+        stale: stale ?? null,
+        afterStale,
+        cleared,
+      }));
+    `
+  );
+
+  assert.equal(result.stale, null);
+  assert.equal(result.afterStale.current_run_pid, 4100);
+  assert.equal(result.afterStale.current_run_id, "new-owner");
+  assert.equal(result.cleared.current_run_pid, undefined);
+  assert.equal(result.cleared.current_run_id, undefined);
+});
+
 test("readReviewSummaries and readReviewSummaryMap backfill review_status and review_state", () => {
   const workspace = createTempWorkspace();
   const entry = {
@@ -179,6 +275,41 @@ test("readReviewSummaries and readReviewSummaryMap backfill review_status and re
   assert.equal(result.mapEntry.review_state, "needs_review");
   assert.equal(result.list.summary_head_sha, "abc123");
   assert.equal(result.mapEntry.summary_head_sha, "abc123");
+  assert.equal(result.list.source, "inbound");
+  assert.equal(result.mapEntry.source, "inbound");
+});
+
+test("task review records retain task context and discard inbound decision signals", () => {
+  const workspace = createTempWorkspace();
+  const entry = {
+    ...sampleReviewLiteral("https://github.com/acme/widget/pull/8"),
+    source: "task",
+    task_id: "task-8",
+    task_title: "Ship widget cache",
+    task_description: "Avoid duplicate fetches.",
+    task_plan: "Memoize by widget ID.",
+    summary: "Clean review",
+    my_approval_sha: "abc123",
+    my_changes_requested_sha: "abc123",
+  };
+  const result = runStoreScript(
+    workspace,
+    `
+      const saved = await store.upsertReviewSummary(${JSON.stringify(entry)});
+      console.log(JSON.stringify(saved));
+    `
+  );
+
+  assert.equal(result.source, "task");
+  assert.equal(result.task_id, "task-8");
+  assert.equal(result.task_title, "Ship widget cache");
+  assert.equal(result.task_description, "Avoid duplicate fetches.");
+  assert.equal(result.task_plan, "Memoize by widget ID.");
+  assert.equal(result.my_approval_sha, undefined);
+  assert.equal(result.my_changes_requested_sha, undefined);
+  assert.notEqual(result.review_state, "approved");
+  assert.notEqual(result.review_state, "changes_requested");
+  assert.equal(result.review_status, "up_to_date");
 });
 
 test("patchReviewSummary returns undefined for unknown pr_urls", () => {
@@ -216,6 +347,47 @@ test("deleteReviewSummary removes only the matching entry", () => {
   assert.equal(result.missing, undefined);
 });
 
+test("deleteReviewSummaryIf rechecks the latest record before deleting", () => {
+  const workspace = createTempWorkspace();
+  const entry = sampleReviewLiteral("https://github.com/acme/widget/pull/12");
+  const result = runStoreScript(
+    workspace,
+    `
+      await store.upsertReviewSummary(${JSON.stringify(entry)});
+      const skipped = await store.deleteReviewSummaryIf(
+        ${JSON.stringify(entry.pr_url)},
+        (current) => current.current_run_id === "missing-owner"
+      );
+      await store.patchReviewSummary(${JSON.stringify(entry.pr_url)}, {
+        current_run_pid: 7012,
+        current_run_id: "new-owner",
+      });
+      const protectedDelete = await store.deleteReviewSummaryIf(
+        ${JSON.stringify(entry.pr_url)},
+        (current) => current.current_run_pid == null
+      );
+      const protectedEntry = store.getReviewSummary(${JSON.stringify(entry.pr_url)});
+      const deleted = await store.deleteReviewSummaryIf(
+        ${JSON.stringify(entry.pr_url)},
+        (current) => current.current_run_id === "new-owner"
+      );
+      console.log(JSON.stringify({
+        skipped,
+        protectedDelete,
+        protectedPid: protectedEntry?.current_run_pid,
+        deleted,
+        remaining: store.getReviewSummary(${JSON.stringify(entry.pr_url)}) ?? null,
+      }));
+    `
+  );
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.protectedDelete, false);
+  assert.equal(result.protectedPid, 7012);
+  assert.equal(result.deleted, true);
+  assert.equal(result.remaining, null);
+});
+
 test("concurrent upserts persist both entries without dropping fields", () => {
   const workspace = createTempWorkspace();
   const a = sampleReviewLiteral("https://github.com/acme/widget/pull/1");
@@ -236,6 +408,97 @@ test("concurrent upserts persist both entries without dropping fields", () => {
   );
   assert.deepEqual(result.keys, [a.pr_url, b.pr_url]);
   assert.equal(result.sample.repo_slug, "acme/widget");
+});
+
+test("separate processes serialize review store writes", async () => {
+  const workspace = createTempWorkspace();
+  const a = sampleReviewLiteral("https://github.com/acme/widget/pull/31");
+  const b = sampleReviewLiteral("https://github.com/acme/widget/pull/32");
+  const first = spawnStoreScript(
+    workspace,
+    `
+      for (let i = 0; i < 20; i++) {
+        await store.upsertReviewSummary({
+          ...${JSON.stringify(a)},
+          title: "writer-a-" + i,
+        });
+      }
+    `
+  );
+  const second = spawnStoreScript(
+    workspace,
+    `
+      for (let i = 0; i < 20; i++) {
+        await store.upsertReviewSummary({
+          ...${JSON.stringify(b)},
+          title: "writer-b-" + i,
+        });
+      }
+    `
+  );
+
+  const [firstResult, secondResult] = await Promise.all([
+    first.done,
+    second.done,
+  ]);
+  assert.equal(firstResult.code, 0, firstResult.stderr);
+  assert.equal(secondResult.code, 0, secondResult.stderr);
+
+  const result = runStoreScript(
+    workspace,
+    `
+      const map = store.readReviewSummaryMap();
+      console.log(JSON.stringify({
+        keys: Object.keys(map).sort(),
+        titles: [map[${JSON.stringify(a.pr_url)}].title, map[${JSON.stringify(b.pr_url)}].title],
+      }));
+    `
+  );
+  assert.deepEqual(result.keys, [a.pr_url, b.pr_url]);
+  assert.deepEqual(result.titles, ["writer-a-19", "writer-b-19"]);
+});
+
+test("a separate process recovers a review store lock after its owner dies", async () => {
+  const workspace = createTempWorkspace();
+  const marker = path.join(workspace, "review-store-lock-held");
+  const entry = sampleReviewLiteral("https://github.com/acme/widget/pull/33");
+  const env = {
+    ...process.env,
+    CORTEX_REVIEW_STORE_LOCK_STALE_MS: "5000",
+  };
+  const holder = spawnStoreScript(
+    workspace,
+    `
+      await store.mutateReviewSummary(
+        ${JSON.stringify(entry.pr_url)},
+        () => {
+          require("node:fs").writeFileSync(${JSON.stringify(marker)}, "held");
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15_000);
+          return ${JSON.stringify(entry)};
+        }
+      );
+    `,
+    env
+  );
+  await waitForFile(marker);
+  assert.ok(holder.child.pid);
+  process.kill(-holder.child.pid, "SIGKILL");
+  const holderResult = await holder.done;
+  assert.equal(holderResult.signal, "SIGKILL");
+
+  const recovery = spawnStoreScript(
+    workspace,
+    `await store.upsertReviewSummary(${JSON.stringify(entry)});`,
+    env
+  );
+  const recoveryResult = await recovery.done;
+  assert.equal(recoveryResult.code, 0, recoveryResult.stderr);
+
+  const result = runStoreScript(
+    workspace,
+    `console.log(JSON.stringify(store.getReviewSummary(${JSON.stringify(entry.pr_url)})));`
+  );
+  assert.equal(result.pr_url, entry.pr_url);
 });
 
 test("readReviewSummaryMap recovers gracefully from malformed JSON on disk", () => {

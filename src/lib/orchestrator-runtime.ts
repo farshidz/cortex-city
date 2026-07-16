@@ -11,9 +11,17 @@ export function buildInterruptedTaskUpdates(task: Task): Partial<Task> {
   };
 
   if (isResumableStatus(task)) {
-    updates.resume_requested = true;
-    if (task.current_run_mode && task.current_run_mode !== "cleanup") {
-      updates.resume_run_mode = task.current_run_mode as ResumableTaskRunMode;
+    const currentMode = task.current_run_mode as string | undefined;
+    if (currentMode === "reviewer") {
+      // Legacy task-reviewer processes must never turn into builder resumes.
+      // The unified reviewer will independently pick up the task PR.
+      updates.resume_requested = undefined;
+      updates.resume_run_mode = undefined;
+    } else {
+      updates.resume_requested = true;
+      if (currentMode === "initial" || currentMode === "review") {
+        updates.resume_run_mode = currentMode;
+      }
     }
   } else if (task.final_cleanup_state === "running") {
     updates.final_cleanup_state = undefined;
@@ -30,28 +38,10 @@ export function shouldResumeTask(task: Task): boolean {
   );
 }
 
-export function isReviewerAgentEnabled(
-  task: Pick<Task, "reviewer_agent_enabled">
-): boolean {
-  return task.reviewer_agent_enabled !== false;
-}
-
-export function shouldDeferBuilderRunForReviewer(
-  task: Pick<
-    Task,
-    "reviewer_agent_enabled" | "reviewer_run_pending" | "resume_run_mode" | "status"
-  >
-): boolean {
-  return (
-    task.status === "in_review" &&
-    isReviewerAgentEnabled(task) &&
-    Boolean(task.reviewer_run_pending) &&
-    task.resume_run_mode !== "reviewer"
-  );
-}
-
 export function getTaskRunMode(task: Task): ResumableTaskRunMode {
-  if (task.resume_run_mode) return task.resume_run_mode;
+  if (task.resume_run_mode === "initial" || task.resume_run_mode === "review") {
+    return task.resume_run_mode;
+  }
   return task.status === "in_review" ? "review" : "initial";
 }
 
@@ -59,7 +49,8 @@ export function shouldUseContinuePrompt(
   task: Task,
   mode: ResumableTaskRunMode = getTaskRunMode(task)
 ): boolean {
-  const sessionId =
-    mode === "reviewer" ? task.reviewer_session_id : task.session_id;
-  return Boolean(task.resume_requested && sessionId);
+  // Review-mode resumes need the current PR-feedback prompt, including fresh
+  // GitHub state. A bare "continue" is reserved for interrupted implementation
+  // work where the existing session already owns the next step.
+  return mode !== "review" && Boolean(task.resume_requested && task.session_id);
 }

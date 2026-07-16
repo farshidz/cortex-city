@@ -1,6 +1,12 @@
-import type { ReviewAgentStatus, ReviewState, ReviewStatus } from "./types";
+import type {
+  ReviewAgentStatus,
+  ReviewSource,
+  ReviewState,
+  ReviewStatus,
+} from "./types";
 
 export interface ReviewStatusInput {
+  source?: ReviewSource;
   summary?: string;
   summary_head_sha?: string;
   error?: string;
@@ -48,6 +54,10 @@ export function deriveReviewStatus(review: ReviewStatusInput): ReviewStatus {
   if (review.current_run_pid != null) return "summarizing";
   if (review.error) return "summary_error";
   if (!hasSummary) return "pending_summary";
+  if (review.source === "task") {
+    const summaryHeadSha = review.summary_head_sha || review.head_sha;
+    return summaryHeadSha === review.head_sha ? "up_to_date" : "new_commits";
+  }
   if (!review.my_last_review_sha) return "needs_review";
   if (review.my_last_review_sha !== review.head_sha) return "new_commits";
   return "up_to_date";
@@ -83,10 +93,15 @@ export function deriveReviewState(review: ReviewStateInput): ReviewState {
   const summaryHeadSha = review.summary_head_sha || review.head_sha;
   if (summaryHeadSha !== review.head_sha) return "re_reviewing";
 
-  if (review.my_approval_sha && review.my_approval_sha === review.head_sha) {
+  if (
+    review.source !== "task" &&
+    review.my_approval_sha &&
+    review.my_approval_sha === review.head_sha
+  ) {
     return "approved";
   }
   if (
+    review.source !== "task" &&
     review.my_changes_requested_sha &&
     review.my_changes_requested_sha === review.head_sha
   ) {

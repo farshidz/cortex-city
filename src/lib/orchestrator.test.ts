@@ -328,7 +328,7 @@ test("getActiveSessions includes in-flight review retros", () => {
   assert.match(result[0].task_title, /review retro/);
 });
 
-test("killReviewSession clears current_run_pid on the cached review", () => {
+test("killReviewSession clears the review run owner on the cached review", () => {
   const workspace = createTempWorkspace();
   writeConfig(workspace);
   writeTasks(workspace, []);
@@ -346,6 +346,7 @@ test("killReviewSession clears current_run_pid on the cached review", () => {
       summary: "",
       generated_at: "",
       current_run_pid: 999999, // dead pid — kill should fail but still clear
+      current_run_id: "review-run-42",
     },
   });
   writeWorkerState(workspace, {
@@ -376,6 +377,7 @@ test("killReviewSession clears current_run_pid on the cached review", () => {
       console.log(JSON.stringify({
         killed,
         currentRunPid: cached[${JSON.stringify(reviewPrUrl)}].current_run_pid ?? null,
+        currentRunId: cached[${JSON.stringify(reviewPrUrl)}].current_run_id ?? null,
       }));
     `
   );
@@ -383,6 +385,7 @@ test("killReviewSession clears current_run_pid on the cached review", () => {
   // Dead pid — kill returns false but the entry is still cleared on disk.
   assert.equal(result.killed, false);
   assert.equal(result.currentRunPid, null);
+  assert.equal(result.currentRunId, null);
 });
 
 test("killReviewSession clears retro_run_pid and prevents automatic retry", () => {

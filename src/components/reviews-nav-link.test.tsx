@@ -78,3 +78,32 @@ test("countReadyActionableReviews only counts actionable merged states", () => {
 test("countReadyActionableReviews is undefined while reviews are loading", () => {
   assert.equal(countReadyActionableReviews(undefined), undefined);
 });
+
+test("countReadyActionableReviews excludes task-owned review records", () => {
+  assert.equal(
+    countReadyActionableReviews([
+      review({
+        pr_url: "https://github.com/acme/widget/pull/1",
+        source: "inbound",
+        review_state: "needs_review",
+      }),
+      review({
+        pr_url: "https://github.com/acme/widget/pull/2",
+        review_state: "ready_to_approve",
+      }),
+      review({
+        pr_url: "https://github.com/acme/widget/pull/3",
+        source: "task",
+        task_id: "task-1",
+        review_state: "blocked",
+      }),
+      review({
+        pr_url: "https://github.com/acme/widget/pull/4",
+        source: "task",
+        task_id: "task-2",
+        review_state: "needs_author_changes",
+      }),
+    ]),
+    2
+  );
+});

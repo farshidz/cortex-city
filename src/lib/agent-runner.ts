@@ -7,12 +7,11 @@ import { getCortexPath, readConfig, updateTask, createTask } from "./store";
 import {
   buildInitialPrompt,
   buildReviewPrompt,
-  buildReviewerPrompt,
   buildCleanupPrompt,
   buildContinuePrompt,
   buildManualInstructionPrompt,
 } from "./prompt-builder";
-import { getPRHeadSha, getPRStateHash, getSubmittedCommentIds } from "./github";
+import { getPRStateHash, getSubmittedCommentIds } from "./github";
 import { createSessionLog } from "./logger";
 import {
   getDefaultEffortForRuntime,
@@ -34,7 +33,6 @@ import type {
 import { resolveEnvPath } from "./agent-files";
 import {
   buildInterruptedTaskUpdates,
-  isReviewerAgentEnabled,
   shouldUseContinuePrompt,
 } from "./orchestrator-runtime";
 import { resolveTaskRunTimeoutMs } from "./run-timeout";
@@ -439,8 +437,7 @@ export async function spawnAgentSession(
   const permissionMode: PermissionMode =
     task.permission_mode || config.default_permission_mode || "bypassPermissions";
   const agentConfig = config.agents[task.agent];
-  const activeSessionId =
-    mode === "reviewer" ? task.reviewer_session_id : task.session_id;
+  const activeSessionId = task.session_id;
   const shouldResume = mode !== "cleanup" && Boolean(activeSessionId);
   const hasManualInstruction = Boolean(task.pending_manual_instruction?.trim());
   const isResumeAfterKill =
@@ -448,8 +445,6 @@ export async function spawnAgentSession(
   const runReason =
     mode === "cleanup"
       ? "cleanup"
-      : mode === "reviewer"
-        ? "reviewer"
       : hasManualInstruction
         ? "manual_instruction"
         : isResumeAfterKill
@@ -460,7 +455,7 @@ export async function spawnAgentSession(
 
   // Build prompt based on mode
   let prompt: string;
-  let promptMode: "initial" | "review" | "reviewer" | "cleanup" | "manual" | "resume";
+  let promptMode: "initial" | "review" | "cleanup" | "manual" | "resume";
   if (hasManualInstruction) {
     prompt = buildManualInstructionPrompt(task);
     promptMode = "manual";
@@ -476,9 +471,6 @@ export async function spawnAgentSession(
       baseBranch: agentConfig?.default_branch || "main",
     });
     promptMode = "review";
-  } else if (mode === "reviewer") {
-    prompt = buildReviewerPrompt(task);
-    promptMode = "reviewer";
   } else {
     prompt = buildCleanupPrompt(task);
     promptMode = "cleanup";
@@ -619,11 +611,7 @@ export async function spawnAgentSession(
     updateCodexResultAccumulator(accumulator, event);
     if (!capturedSessionId && event.type === "thread.started" && event.thread_id) {
       capturedSessionId = true;
-      const sessionUpdate: Partial<Task> =
-        mode === "reviewer"
-          ? { reviewer_session_id: event.thread_id }
-          : { session_id: event.thread_id };
-      void updateTask(task.id, sessionUpdate);
+      void updateTask(task.id, { session_id: event.thread_id });
     }
   };
 
@@ -673,8 +661,7 @@ export async function spawnAgentSession(
           runTimeoutMs,
           runtime,
           runtime === "codex" ? buildCodexResult(codexAccumulator) : undefined,
-          child.pid,
-          runReason === "reviewer" ? "reviewer" : "builder"
+          child.pid
         );
         return;
       }
@@ -889,8 +876,6 @@ interface UsageAccounting {
   updates: Partial<Task>;
 }
 
-type UsageScope = "builder" | "reviewer";
-
 function shouldClearCompletedRunPid(
   currentTask: Task | undefined,
   completedPid?: number
@@ -939,8 +924,7 @@ function computeCodexUsageDelta(
 function buildUsageAccounting(
   runtime: AgentRuntime,
   result: ClaudeRunResult,
-  currentTask?: Task,
-  scope: UsageScope = "builder"
+  currentTask?: Task
 ): UsageAccounting {
   const rawInputTokens = result.usage?.input_tokens || 0;
   const rawCachedInputTokens = result.usage?.cache_read_input_tokens || 0;
@@ -952,29 +936,16 @@ function buildUsageAccounting(
   const updates: Partial<Task> = {};
 
   if (runtime === "codex") {
-    const usageSessionId =
-      result.session_id ||
-      (scope === "reviewer"
-        ? currentTask?.reviewer_session_id
-        : currentTask?.session_id);
+    const usageSessionId = result.session_id || currentTask?.session_id;
     if (usageSessionId) {
-      const previousUsageSessionId =
-        scope === "reviewer"
-          ? currentTask?.reviewer_codex_usage_session_id
-          : currentTask?.codex_usage_session_id;
+      const previousUsageSessionId = currentTask?.codex_usage_session_id;
       const sameSession = previousUsageSessionId === usageSessionId;
       const previousInputTokens =
-        (scope === "reviewer"
-          ? currentTask?.reviewer_codex_cumulative_input_tokens
-          : currentTask?.codex_cumulative_input_tokens) || 0;
+        currentTask?.codex_cumulative_input_tokens || 0;
       const previousCachedInputTokens =
-        (scope === "reviewer"
-          ? currentTask?.reviewer_codex_cumulative_cached_input_tokens
-          : currentTask?.codex_cumulative_cached_input_tokens) || 0;
+        currentTask?.codex_cumulative_cached_input_tokens || 0;
       const previousOutputTokens =
-        (scope === "reviewer"
-          ? currentTask?.reviewer_codex_cumulative_output_tokens
-          : currentTask?.codex_cumulative_output_tokens) || 0;
+        currentTask?.codex_cumulative_output_tokens || 0;
       inputTokens = computeCodexUsageDelta(
         rawInputTokens,
         previousInputTokens,
@@ -999,18 +970,10 @@ function buildUsageAccounting(
       const cumulativeOutput = sameSession
         ? Math.max(rawOutputTokens, previousOutputTokens)
         : rawOutputTokens;
-      if (scope === "reviewer") {
-        updates.reviewer_codex_usage_session_id = usageSessionId;
-        updates.reviewer_codex_cumulative_input_tokens = cumulativeInput;
-        updates.reviewer_codex_cumulative_cached_input_tokens =
-          cumulativeCachedInput;
-        updates.reviewer_codex_cumulative_output_tokens = cumulativeOutput;
-      } else {
-        updates.codex_usage_session_id = usageSessionId;
-        updates.codex_cumulative_input_tokens = cumulativeInput;
-        updates.codex_cumulative_cached_input_tokens = cumulativeCachedInput;
-        updates.codex_cumulative_output_tokens = cumulativeOutput;
-      }
+      updates.codex_usage_session_id = usageSessionId;
+      updates.codex_cumulative_input_tokens = cumulativeInput;
+      updates.codex_cumulative_cached_input_tokens = cumulativeCachedInput;
+      updates.codex_cumulative_output_tokens = cumulativeOutput;
     }
   }
 
@@ -1244,8 +1207,7 @@ async function handleRunTimeout(
   timeoutMs: number,
   runtime?: AgentRuntime,
   preParsedResult?: ClaudeRunResult,
-  completedPid?: number,
-  usageScope: UsageScope = "builder"
+  completedPid?: number
 ): Promise<void> {
   const { getTask } = await import("./store");
   const currentTask = await getTask(taskId);
@@ -1256,7 +1218,7 @@ async function handleRunTimeout(
     : { current_run_pid: undefined, current_run_mode: undefined };
   const usageUpdates =
     currentTask && preParsedResult && runtime
-      ? buildUsageAccounting(runtime, preParsedResult, currentTask, usageScope).updates
+      ? buildUsageAccounting(runtime, preParsedResult, currentTask).updates
       : {};
 
   await updateTask(taskId, {
@@ -1281,7 +1243,6 @@ async function handleRunComplete(
   runReason:
     | "initial"
     | "review"
-    | "reviewer"
     | "cleanup"
     | "manual_instruction"
     | "resume_after_kill",
@@ -1294,13 +1255,7 @@ async function handleRunComplete(
     currentTask = await getTask(taskId);
     const result: ClaudeRunResult =
       preParsedResult || (runtime === "codex" ? parseCodexResult(stdout) : JSON.parse(stdout));
-    const isReviewerRun = runReason === "reviewer";
-    const usageAccounting = buildUsageAccounting(
-      runtime,
-      result,
-      currentTask,
-      isReviewerRun ? "reviewer" : "builder"
-    );
+    const usageAccounting = buildUsageAccounting(runtime, result, currentTask);
     const didFail = exitCode !== 0 || result.is_error;
     const isBudgetExceeded = result.terminal_reason === "budget_exceeded";
     // `handleRunComplete` parses whatever payload the runtime returned before
@@ -1314,11 +1269,7 @@ async function handleRunComplete(
       last_run_at: new Date().toISOString(),
     };
     if (result.session_id) {
-      if (isReviewerRun) {
-        updates.reviewer_session_id = result.session_id;
-      } else {
-        updates.session_id = result.session_id;
-      }
+      updates.session_id = result.session_id;
     }
     if (shouldClearCompletedRunPid(currentTask, completedPid)) {
       updates.current_run_pid = undefined;
@@ -1365,9 +1316,7 @@ async function handleRunComplete(
     }
 
     // Accumulate costs and run count
-    if (isReviewerRun && !updates.reviewer_session_id && currentTask?.reviewer_session_id) {
-      updates.reviewer_session_id = currentTask.reviewer_session_id;
-    } else if (!isReviewerRun && !updates.session_id && currentTask?.session_id) {
+    if (!updates.session_id && currentTask?.session_id) {
       updates.session_id = currentTask.session_id;
     }
     if (currentTask) {
@@ -1376,48 +1325,19 @@ async function handleRunComplete(
       updates.run_count = (currentTask.run_count || 0) + 1;
 
       const followups = report?.tool_calls?.create_task;
-      // The separate reviewer agent is read-only; builder runs, including
-      // PR-feedback review runs, can request follow-up tasks.
-      if (followups?.length && shouldApplySuccessSideEffects && !isReviewerRun) {
+      if (followups?.length && shouldApplySuccessSideEffects) {
         await createFollowupTasks(currentTask, followups);
       }
     }
 
     const prUrl = updates.pr_url || currentTask?.pr_url;
-    let prHeadSha = "";
-    if (prUrl && shouldApplySuccessSideEffects) {
-      try {
-        prHeadSha = await getPRHeadSha(prUrl);
-      } catch (error) {
-        console.warn(`[agent-runner] Failed to resolve PR head SHA for ${prUrl}:`, error);
-      }
-    }
-
-    if (prUrl && shouldApplySuccessSideEffects) {
-      if (isReviewerRun) {
-        updates.reviewer_run_pending = false;
-        if (prHeadSha) {
-          updates.reviewer_last_reviewed_head_sha = prHeadSha;
-        }
-      } else if (runReason !== "cleanup") {
-        const lastReviewedHead = currentTask?.reviewer_last_reviewed_head_sha;
-        if (isReviewerAgentEnabled(currentTask || {})) {
-          if (!prHeadSha || prHeadSha !== lastReviewedHead) {
-            updates.reviewer_run_pending = true;
-          }
-        } else {
-          updates.reviewer_run_pending = false;
-        }
-      }
-    }
 
     // Capture GH state hash AFTER run so we don't re-trigger on our own changes
     // But if new submitted comments appeared mid-run, skip hash update so next poll picks them up
     if (
       prUrl &&
       shouldApplySuccessSideEffects &&
-      runReason !== "manual_instruction" &&
-      !isReviewerRun
+      runReason !== "manual_instruction"
     ) {
       const postRunCommentIds = await getSubmittedCommentIds(prUrl);
       const newComments = postRunCommentIds.filter((id) => !preRunCommentIds.includes(id));

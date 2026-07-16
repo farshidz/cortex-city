@@ -5,7 +5,6 @@ import { readConfig } from "./store";
 import { resolvePromptPath } from "./agent-files";
 
 const PROMPTS_DIR = path.join(process.cwd(), "prompts");
-const CORTEX_CITY_REVIEWER_SIGNATURE = "🤖[Cortex City Reviewer]";
 
 interface ReviewPromptOptions {
   prStatus?: string;
@@ -111,38 +110,6 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
       buildPromptContextSection("Agent Review Context", reviewContext)
     )
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
-}
-
-export function buildReviewerPrompt(task: Task): string {
-  const config = readConfig();
-  const customInstructions = config.reviewer_agent_prompt?.trim();
-  const sections = [
-    "You are the reviewer agent for this task.",
-    "",
-    `Task: ${task.title}`,
-    `Description: ${task.description || "No description provided."}`,
-    `Plan: ${task.plan || "No detailed plan provided."}`,
-    `PR: ${task.pr_url || "Unknown"}`,
-    "",
-    "Review the PR implementation against the task description and plan. Use GitHub tooling to inspect the diff and relevant code. Do not edit files, commit, or push.",
-  ];
-
-  if (customInstructions) {
-    sections.push("", "Additional reviewer instructions:", customInstructions);
-  }
-
-  sections.push(
-    "",
-    "GitHub reviewer protocol:",
-    "- Only comment on GitHub when you found something actionable for the implementation owner to change or fix.",
-    "- If there is nothing to change or fix, do not create GitHub comments and do not submit a PR review. Return the required JSON status only.",
-    "- Do not approve or request changes. Never use `--approve`, `--request-changes`, `APPROVE`, or `REQUEST_CHANGES`, even when findings are blocking.",
-    "- If there are blocking findings, describe them in the comment review body and set your final JSON `status` to `needs_review`.",
-    `- Start every GitHub comment or PR review body you create with \`${CORTEX_CITY_REVIEWER_SIGNATURE}\`. This includes top-level PR comments, inline review comments, and PR-level review bodies.`
-  );
-
-  sections.push("", "Then respond with the required JSON status.");
-  return sections.join("\n");
 }
 
 export function buildCleanupPrompt(task: Task): string {

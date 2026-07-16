@@ -4,6 +4,11 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  buildReviewRetroPrompt,
+  DEFAULT_REVIEW_RETRO_PROMPT,
+} from "./review-learnings-runner";
+
+import {
   createTempWorkspace,
   moduleUrl,
   prependBinToPath,
@@ -116,6 +121,33 @@ test("spawnReviewRetro writes rewritten learnings and stamps done", () => {
   assert.match(prompt, /Agent review status: needs_author_changes/);
   assert.match(prompt, /The cache change is mostly sound/);
   assert.match(prompt, /Existing guidance/);
+});
+
+test("review retro wording and context cover both review sources", () => {
+  assert.match(DEFAULT_REVIEW_RETRO_PROMPT, /both inbound reviews and Cortex task-owned PRs/);
+  assert.doesNotMatch(DEFAULT_REVIEW_RETRO_PROMPT, /future inbound PR reviews/);
+
+  const taskPrompt = buildReviewRetroPrompt(
+    sampleReview({
+      source: "task",
+      task_id: "task-7",
+      task_title: "Add widget cache",
+      task_description: "Reduce duplicate widget requests.",
+      task_plan: "Cache successful responses by ID.",
+    }),
+    "# Review learnings\n"
+  );
+  assert.match(taskPrompt, /Review source: task-owned Cortex PR/);
+  assert.match(taskPrompt, /Cortex task ID: task-7/);
+  assert.match(taskPrompt, /Reduce duplicate widget requests/);
+  assert.match(taskPrompt, /Cache successful responses by ID/);
+
+  const inboundPrompt = buildReviewRetroPrompt(
+    sampleReview({ source: "inbound" }),
+    "# Review learnings\n"
+  );
+  assert.match(inboundPrompt, /Review source: inbound PR/);
+  assert.doesNotMatch(inboundPrompt, /Cortex task ID/);
 });
 
 test("spawnReviewRetro leaves learnings untouched and stamps error on failure", () => {

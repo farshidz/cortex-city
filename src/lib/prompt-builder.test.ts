@@ -257,54 +257,6 @@ test("buildReviewPrompt uses sensible defaults for unknown mergeability", () => 
   assert.doesNotMatch(result, /Agent Review Context/);
 });
 
-test("buildReviewerPrompt keeps reviewer instructions separate from feedback prompts", () => {
-  const workspace = createTempWorkspace();
-  writeTestTemplates(workspace);
-  writeConfig(workspace, {
-    reviewer_agent_prompt: "Check accessibility-sensitive UI changes.",
-  });
-
-  const result = runPromptScript(
-    workspace,
-    `
-      const task = ${JSON.stringify(
-        sampleTask({
-          pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/456",
-        })
-      )};
-      console.log(JSON.stringify(prompts.buildReviewerPrompt(task)));
-    `
-  );
-
-  assert.match(result, /reviewer agent/);
-  assert.match(result, /Task: Add unit tests/);
-  assert.match(result, /Plan: Cover the lib modules/);
-  assert.match(result, /PR: https:\/\/github.com\/farshidz\/marqo-cortex-city\/pull\/456/);
-  assert.match(result, /Check accessibility-sensitive UI changes\./);
-  assert.ok(
-    result.indexOf("Additional reviewer instructions:") <
-      result.indexOf("GitHub reviewer protocol:")
-  );
-  assert.match(
-    result,
-    /If there is nothing to change or fix, do not create GitHub comments and do not submit a PR review/
-  );
-  assert.match(result, /Do not approve or request changes/);
-  assert.match(
-    result,
-    /Start every GitHub comment or PR review body you create with `🤖\[Cortex City Reviewer\]`/
-  );
-  assert.doesNotMatch(
-    result,
-    /first line and final line exactly `🤖\[Cortex City Reviewer\]`/
-  );
-  assert.doesNotMatch(result, /approve when the implementation is sound/);
-  assert.doesNotMatch(result, /create_task/);
-  assert.doesNotMatch(result, /tool_calls/);
-  assert.doesNotMatch(result, /Follow-up Task Requests/);
-  assert.doesNotMatch(result, /Available Agents/);
-});
-
 test("shared review template requires the robot prefix in GitHub replies", () => {
   const reviewTemplate = readFileSync(
     path.join(REPO_ROOT, "prompts", "templates", "review.md"),

@@ -34,6 +34,8 @@ import type {
   PermissionMode,
   TaskEffort,
   LinkedIssueSummary,
+  ReviewAgentStatus,
+  ReviewState,
 } from "@/lib/types";
 import {
   formatEffortLabel,
@@ -65,7 +67,64 @@ const ALL_STATUSES: TaskStatus[] = [
 const LARGE_PLAN_LINE_THRESHOLD = 12;
 const LARGE_PLAN_CHARACTER_THRESHOLD = 1000;
 
-type TaskDetail = Task & { linked_issue?: LinkedIssueSummary };
+type TaskDetail = Task & {
+  linked_issue?: LinkedIssueSummary;
+  automatic_review?: {
+    state: ReviewState;
+    status?: ReviewAgentStatus;
+    summary?: string;
+    generated_at?: string;
+    head_sha: string;
+    summary_head_sha?: string;
+  };
+  automatic_review_error?: string;
+  automatic_review_error_at?: string;
+};
+
+const TASK_REVIEW_STATE_LABELS: Record<ReviewState, string> = {
+  archived: "Review archived",
+  generating: "Reviewing…",
+  generation_failed: "Review failed",
+  queued: "Review queued",
+  re_reviewing: "Re-reviewing new commits…",
+  blocked: "Blocked",
+  needs_author_changes: "Changes requested",
+  needs_decision: "Needs your decision",
+  ready_to_approve: "No blocking findings",
+  approved: "No blocking findings",
+  changes_requested: "Changes requested",
+  reviewed: "Review complete",
+  needs_review: "Review complete",
+};
+
+function taskReviewStateLabel(
+  state: ReviewState,
+  automaticReviewEnabled: boolean
+): string {
+  if (state === "re_reviewing" && !automaticReviewEnabled) {
+    return "New commits since review";
+  }
+  return TASK_REVIEW_STATE_LABELS[state];
+}
+
+function taskReviewBadgeVariant(
+  state: ReviewState
+): "default" | "secondary" | "destructive" | "outline" {
+  if (state === "blocked" || state === "generation_failed") {
+    return "destructive";
+  }
+  if (state === "ready_to_approve" || state === "approved") {
+    return "default";
+  }
+  if (
+    state === "needs_author_changes" ||
+    state === "changes_requested" ||
+    state === "needs_decision"
+  ) {
+    return "secondary";
+  }
+  return "outline";
+}
 
 function isLargeTaskPlan(plan: string): boolean {
   const trimmed = plan.trim();
@@ -343,10 +402,10 @@ export default function TaskDetailPage({
                   })
                 }
               />
-              <Label>Reviewer agent</Label>
+              <Label>Automatic review</Label>
             </div>
             <div className="space-y-2">
-              <Label>Model</Label>
+              <Label>Implementation model</Label>
               <Input
                 value={(form.model as string) || ""}
                 onChange={(e) => setForm({ ...form, model: e.target.value })}
@@ -354,7 +413,7 @@ export default function TaskDetailPage({
               />
             </div>
             <div className="space-y-2">
-              <Label>Effort</Label>
+              <Label>Implementation effort</Label>
               <Select
                 value={(form.effort as string) || "__default__"}
                 onValueChange={(v) =>
@@ -498,15 +557,15 @@ export default function TaskDetailPage({
                   </Badge>
                 </span>
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Model:
+                  Implementation model:
                   <Badge variant="outline">{resolvedModel || "CLI default"}</Badge>
                 </span>
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Effort:
+                  Implementation effort:
                   <Badge variant="outline">{formatEffortLabel(resolvedEffort)}</Badge>
                 </span>
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Reviewer:
+                  Automatic review:
                   <Badge variant="outline">
                     {task.reviewer_agent_enabled === false ? "Off" : "On"}
                   </Badge>
@@ -518,6 +577,23 @@ export default function TaskDetailPage({
                   </Badge>
                 </span>
               </div>
+              {task.automatic_review_error && (
+                <div
+                  role="alert"
+                  className="rounded border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+                >
+                  <span className="font-medium">Automatic review failed:</span>{" "}
+                  {task.automatic_review_error}{" "}
+                  <Link href="/settings" className="underline underline-offset-2">
+                    Check reviewer settings
+                  </Link>
+                  {task.status === "in_review" &&
+                  !task.paused &&
+                  task.reviewer_agent_enabled !== false
+                    ? ". Cortex City will retry automatically."
+                    : ". Automatic retry is not currently scheduled for this task."}
+                </div>
+              )}
               <div>
                 <span className="text-sm text-muted-foreground">
                   Description:
@@ -573,6 +649,48 @@ export default function TaskDetailPage({
               )}
             </CardContent>
           </Card>
+
+          {task.automatic_review && (
+            <Card>
+              <CardHeader>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <CardTitle className="text-base">Automatic Review</CardTitle>
+                  <Badge
+                    variant={taskReviewBadgeVariant(task.automatic_review.state)}
+                  >
+                    {taskReviewStateLabel(
+                      task.automatic_review.state,
+                      task.reviewer_agent_enabled !== false
+                    )}
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {task.automatic_review.summary ? (
+                  <div className="prose prose-sm dark:prose-invert max-w-none">
+                    <ReactMarkdown>{task.automatic_review.summary}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    A review summary is not available yet.
+                  </p>
+                )}
+                {task.automatic_review.generated_at && (
+                  <p className="text-xs text-muted-foreground">
+                    Last reviewed{" "}
+                    {new Date(task.automatic_review.generated_at).toLocaleString()}
+                    {task.automatic_review.summary_head_sha &&
+                    task.automatic_review.summary_head_sha !==
+                      task.automatic_review.head_sha
+                      ? task.reviewer_agent_enabled === false
+                        ? " · New commits since this review"
+                        : " · New commits are awaiting review"
+                      : ""}
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           {task.linked_issue && (
             <Card>

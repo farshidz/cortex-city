@@ -15,9 +15,9 @@ export interface SpawnedRetro {
   done: Promise<void>;
 }
 
-export const DEFAULT_REVIEW_RETRO_PROMPT = `You maintain Cortex City's review learnings file for future inbound PR reviews.
+export const DEFAULT_REVIEW_RETRO_PROMPT = `You maintain Cortex City's review learnings file for future pull request reviews, including both inbound reviews and Cortex task-owned PRs.
 
-Use the gh CLI to inspect the merged pull request and compare the prior agent review with the final outcome. Focus on transferable lessons that will improve future reviews.
+Use the gh CLI to inspect the merged pull request and compare the unified review agent's prior review with the final outcome. Focus on transferable lessons that will improve future reviews regardless of review source.
 
 Inspect:
 - The final merged diff.
@@ -43,11 +43,13 @@ export function buildReviewRetroPrompt(
   const currentHeadSha = review.head_sha || "(not recorded)";
   const summary = review.summary?.trim() || "(empty)";
   const currentLearnings = learningsBefore.trim() || "(empty)";
+  const taskOwned = review.source === "task";
 
   return [
     DEFAULT_REVIEW_RETRO_PROMPT,
     "",
     "## Pull request outcome",
+    `Review source: ${taskOwned ? "task-owned Cortex PR" : "inbound PR"}`,
     `PR URL: ${review.pr_url}`,
     `Repository: ${review.repo_slug}`,
     `PR number: ${review.pr_number}`,
@@ -55,6 +57,18 @@ export function buildReviewRetroPrompt(
     `Author: ${review.author}`,
     `Reviewed head SHA: ${reviewedHeadSha}`,
     `Current recorded head SHA: ${currentHeadSha}`,
+    ...(taskOwned
+      ? [
+          `Cortex task ID: ${review.task_id || "(not recorded)"}`,
+          `Cortex task title: ${review.task_title || "(not recorded)"}`,
+          "<cortex_task_description>",
+          review.task_description?.trim() || "(not recorded)",
+          "</cortex_task_description>",
+          "<cortex_task_plan>",
+          review.task_plan?.trim() || "(not provided)",
+          "</cortex_task_plan>",
+        ]
+      : []),
     "",
     "The PR has been merged. Use `gh` to inspect the final merged state before rewriting the learnings file.",
     "",

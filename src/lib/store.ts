@@ -161,14 +161,59 @@ function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
 
 // --- Tasks ---
 
+const LEGACY_REVIEWER_TASK_FIELDS = [
+  "reviewer_session_id",
+  "reviewer_run_pending",
+  "reviewer_last_reviewed_head_sha",
+  "reviewer_codex_usage_session_id",
+  "reviewer_codex_cumulative_input_tokens",
+  "reviewer_codex_cumulative_cached_input_tokens",
+  "reviewer_codex_cumulative_output_tokens",
+] as const;
+
+function normalizeTask(task: Task): Task {
+  const normalized = { ...task } as Task & Record<string, unknown>;
+  const legacy = normalized as Record<string, unknown>;
+  const legacyReviewedHead = legacy.reviewer_last_reviewed_head_sha;
+  if (
+    !normalized.review_migration_head_sha &&
+    typeof legacyReviewedHead === "string" &&
+    legacyReviewedHead.trim()
+  ) {
+    normalized.review_migration_head_sha = legacyReviewedHead.trim();
+  }
+  for (const field of LEGACY_REVIEWER_TASK_FIELDS) {
+    delete legacy[field];
+  }
+
+  // A live reviewer process from the previous release remains visible so the
+  // worker can stop it before launching the unified reviewer. Dead or merely
+  // queued legacy reviewer state is cleared immediately so it cannot turn into
+  // an implementation-agent run.
+  if (legacy.resume_run_mode === "reviewer") {
+    delete legacy.resume_run_mode;
+    delete legacy.resume_requested;
+  }
+  if (
+    legacy.current_run_mode === "reviewer" &&
+    typeof legacy.current_run_pid !== "number"
+  ) {
+    delete legacy.current_run_mode;
+  }
+
+  return normalized as Task;
+}
+
 export function readTasks(): Task[] {
   ensureCortexDir();
   if (!existsSync(TASKS_FILE)) return [];
-  return readJsonFileWithBackup<Task[]>(TASKS_FILE, "tasks.json");
+  return readJsonFileWithBackup<Task[]>(TASKS_FILE, "tasks.json").map(
+    normalizeTask
+  );
 }
 
 function writeTasksLocked(tasks: Task[]): void {
-  writeJsonFileAtomic(TASKS_FILE, tasks, "tasks.json");
+  writeJsonFileAtomic(TASKS_FILE, tasks.map(normalizeTask), "tasks.json");
   snapshotCortex("tasks");
 }
 

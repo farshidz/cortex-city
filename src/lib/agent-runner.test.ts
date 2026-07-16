@@ -383,6 +383,9 @@ test("spawnAgentSession uses the review prompt and creates follow-up tasks from 
           status: "in_review",
           pr_url: "https://github.com/farshidz/cortex-city/pull/9",
           pr_status: "needs_approval",
+          session_id: "thread-existing-review",
+          resume_requested: true,
+          resume_run_mode: "review",
           model: "gpt-5.5-codex",
           effort: "medium",
           worktree_path: worktreePath,
@@ -427,6 +430,8 @@ test("spawnAgentSession uses the review prompt and creates follow-up tasks from 
   assert.ok(result.args.args.includes("--model"));
   assert.ok(result.args.args.includes("gpt-5.5-codex"));
   assert.ok(result.args.args.includes('model_reasoning_effort="medium"'));
+  assert.ok(result.args.args.includes("resume"));
+  assert.ok(result.args.args.includes("thread-existing-review"));
   assert.match(
     result.args.args.at(-1),
     /^REVIEW https:\/\/github.com\/farshidz\/cortex-city\/pull\/9 \| main \| Waiting on approvals, but code can merge cleanly\. \| Cortex City SWE$/

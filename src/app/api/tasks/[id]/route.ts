@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTask, updateTask, deleteTask, readTasks, readConfig } from "@/lib/store";
 import { removeWorktree } from "@/lib/agent-runner";
 import { getIssue, unlinkTask } from "@/lib/issue-store";
+import { getReviewSummary } from "@/lib/review-store";
 import type { AgentRuntime, LinkedIssueSummary } from "@/lib/types";
 import {
   getDefaultModelForRuntime,
@@ -36,7 +37,33 @@ export async function GET(
     }
   }
 
-  return NextResponse.json({ ...task, child_tasks: childTasks, linked_issue });
+  const taskReview = task.pr_url ? getReviewSummary(task.pr_url) : undefined;
+  const matchingTaskReview =
+    taskReview?.source === "task" && taskReview.task_id === task.id
+      ? taskReview
+      : undefined;
+  const automaticReviewError = matchingTaskReview?.error;
+  const automaticReview = matchingTaskReview
+    ? {
+        state: matchingTaskReview.review_state,
+        status: matchingTaskReview.agent_review_status,
+        summary: matchingTaskReview.summary?.trim() || undefined,
+        generated_at: matchingTaskReview.generated_at || undefined,
+        head_sha: matchingTaskReview.head_sha,
+        summary_head_sha: matchingTaskReview.summary_head_sha,
+      }
+    : undefined;
+
+  return NextResponse.json({
+    ...task,
+    child_tasks: childTasks,
+    linked_issue,
+    automatic_review: automaticReview,
+    automatic_review_error: automaticReviewError,
+    automatic_review_error_at: automaticReviewError
+      ? matchingTaskReview?.error_at
+      : undefined,
+  });
 }
 
 export async function PUT(

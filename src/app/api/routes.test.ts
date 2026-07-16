@@ -193,6 +193,143 @@ test("config route reads and updates Cortex config", () => {
   );
 });
 
+test("config route persists and clears reviewer model overrides safely", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const configRoute = await loadRoute("./src/app/api/config/route.ts");
+      const configPath = path.join(cortexDir, "config.json");
+
+      const customModel = await json(
+        await configRoute.PUT(
+          request("http://localhost/api/config", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ review_model: "  gpt-5.6-custom  " }),
+          })
+        )
+      );
+      assert.equal(customModel.body.review_model, "gpt-5.6-custom");
+      assert.equal(readJson(configPath).review_model, "gpt-5.6-custom");
+
+      const clearedModel = await json(
+        await configRoute.PUT(
+          request("http://localhost/api/config", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ review_model: "   " }),
+          })
+        )
+      );
+      assert.equal("review_model" in clearedModel.body, false);
+      assert.equal("review_model" in readJson(configPath), false);
+
+      await configRoute.PUT(
+        request("http://localhost/api/config", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            review_model: "gpt-5.6",
+            review_effort: "xhigh",
+          }),
+        })
+      );
+      const clearedNullModel = await json(
+        await configRoute.PUT(
+          request("http://localhost/api/config", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ review_model: null }),
+          })
+        )
+      );
+      assert.equal("review_model" in clearedNullModel.body, false);
+      assert.equal("review_model" in readJson(configPath), false);
+
+      await configRoute.PUT(
+        request("http://localhost/api/config", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ review_model: "gpt-5.6" }),
+        })
+      );
+      const changedInheritedRuntime = await json(
+        await configRoute.PUT(
+          request("http://localhost/api/config", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ default_agent_runner: "claude" }),
+          })
+        )
+      );
+      assert.equal("review_model" in changedInheritedRuntime.body, false);
+      assert.equal("review_model" in readJson(configPath), false);
+      assert.equal("review_effort" in changedInheritedRuntime.body, false);
+      assert.equal("review_effort" in readJson(configPath), false);
+
+      const changedWithExplicitModel = await json(
+        await configRoute.PUT(
+          request("http://localhost/api/config", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              review_runtime: "codex",
+              review_model: "vendor/another-model",
+            }),
+          })
+        )
+      );
+      assert.equal(
+        changedWithExplicitModel.body.review_model,
+        "vendor/another-model"
+      );
+
+      const changedReviewRuntime = await json(
+        await configRoute.PUT(
+          request("http://localhost/api/config", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ review_runtime: "claude" }),
+          })
+        )
+      );
+      assert.equal("review_model" in changedReviewRuntime.body, false);
+      assert.equal("review_model" in readJson(configPath), false);
+
+      const clearedProfile = await json(
+        await configRoute.PUT(
+          request("http://localhost/api/config", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              default_claude_model: null,
+              default_claude_effort: null,
+              default_codex_model: null,
+              default_codex_effort: null,
+              review_prompt: null,
+              reviewer_agent_prompt: null,
+              review_effort: null,
+              review_model: null,
+            }),
+          })
+        )
+      );
+      for (const key of [
+        "default_claude_model",
+        "default_claude_effort",
+        "default_codex_model",
+        "default_codex_effort",
+        "review_prompt",
+        "reviewer_agent_prompt",
+        "review_effort",
+        "review_model",
+      ]) {
+        assert.equal(key in clearedProfile.body, false, key);
+        assert.equal(key in readJson(configPath), false, key);
+      }
+    `)
+  );
+});
+
 test("review learnings route reads and writes the learnings file", () => {
   runRouteAssertions(
     withCortexState(`
@@ -541,6 +678,33 @@ test("task detail route returns missing status and child summaries", () => {
   runRouteAssertions(
     withCortexState(`
       const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
+      const taskPrUrl = "https://github.com/acme/widget/pull/77";
+      const tasksPath = path.join(cortexDir, "tasks.json");
+      const seededTasks = readJson(tasksPath);
+      seededTasks[0] = {
+        ...seededTasks[0],
+        status: "in_review",
+        pr_url: taskPrUrl,
+      };
+      writeJson(tasksPath, seededTasks);
+      writeJson(path.join(cortexDir, "reviews.json"), {
+        [taskPrUrl]: {
+          source: "task",
+          task_id: "task-1",
+          pr_url: taskPrUrl,
+          pr_number: 77,
+          repo_slug: "acme/widget",
+          title: "Open task",
+          author: "owner",
+          head_sha: "head-77",
+          created_at: "2026-05-01T00:00:00.000Z",
+          updated_at: "2026-05-01T00:10:00.000Z",
+          summary: "",
+          generated_at: "",
+          error: "Unsupported reviewer model",
+          error_at: "2026-05-01T00:11:00.000Z",
+        },
+      });
       const missingTask = await json(
         await taskRoute.GET(request("http://localhost/api/tasks/missing"), {
           params: Promise.resolve({ id: "missing" }),
@@ -561,6 +725,66 @@ test("task detail route returns missing status and child summaries", () => {
           agent: "cortex-city-swe",
         },
       ]);
+      assert.equal(
+        taskWithChildren.body.automatic_review_error,
+        "Unsupported reviewer model"
+      );
+      assert.equal(
+        taskWithChildren.body.automatic_review_error_at,
+        "2026-05-01T00:11:00.000Z"
+      );
+    `)
+  );
+});
+
+test("task detail route exposes task-owned automatic review results", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
+      const taskPrUrl = "https://github.com/acme/widget/pull/78";
+      const tasksPath = path.join(cortexDir, "tasks.json");
+      const seededTasks = readJson(tasksPath);
+      seededTasks[0] = {
+        ...seededTasks[0],
+        status: "in_review",
+        pr_url: taskPrUrl,
+      };
+      writeJson(tasksPath, seededTasks);
+      writeJson(path.join(cortexDir, "reviews.json"), {
+        [taskPrUrl]: {
+          source: "task",
+          task_id: "task-1",
+          pr_url: taskPrUrl,
+          pr_number: 78,
+          repo_slug: "acme/widget",
+          title: "Open task",
+          author: "owner",
+          head_sha: "head-78",
+          created_at: "2026-05-01T00:00:00.000Z",
+          updated_at: "2026-05-01T00:10:00.000Z",
+          summary: "  ## Summary\\nA human decision is needed.  ",
+          summary_head_sha: "head-78",
+          generated_at: "2026-05-01T00:11:00.000Z",
+          agent_review_status: "needs_human_decision",
+        },
+      });
+
+      const response = await json(
+        await taskRoute.GET(request("http://localhost/api/tasks/task-1"), {
+          params: Promise.resolve({ id: "task-1" }),
+        })
+      );
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.body.automatic_review, {
+        state: "needs_decision",
+        status: "needs_human_decision",
+        summary: "## Summary\\nA human decision is needed.",
+        generated_at: "2026-05-01T00:11:00.000Z",
+        head_sha: "head-78",
+        summary_head_sha: "head-78",
+      });
+      assert.equal(response.body.automatic_review_error, undefined);
     `)
   );
 });
@@ -1200,6 +1424,62 @@ test("reviews route lists cached reviews by merged state group then recency", ()
   );
 });
 
+test("reviews route excludes persisted and newly claimed task-owned review records", () => {
+  runRouteAssertions(
+    withReviewState(`
+      const reviewsPath = path.join(cortexDir, "reviews.json");
+      const seeded = readJson(reviewsPath);
+      const taskReviewUrl = "https://github.com/acme/widget/pull/6";
+      const newlyClaimedUrl = "https://github.com/acme/widget/pull/7";
+      seeded[taskReviewUrl] = {
+        ...seeded[needsReviewUrl],
+        source: "task",
+        task_id: "task-1",
+        pr_url: taskReviewUrl,
+        pr_number: 6,
+        title: "Task-owned review",
+      };
+      seeded[newlyClaimedUrl] = {
+        ...seeded[needsReviewUrl],
+        source: "inbound",
+        pr_url: newlyClaimedUrl,
+        pr_number: 7,
+        title: "Cached before task ownership",
+      };
+      writeJson(reviewsPath, seeded);
+      writeJson(path.join(cortexDir, "tasks.json"), [
+        {
+          id: "task-7",
+          title: "Live task owner",
+          description: "Own the previously inbound PR",
+          status: "in_review",
+          agent: "cortex-city-swe",
+          pr_url: newlyClaimedUrl,
+          created_at: "2026-05-06T00:00:00.000Z",
+          updated_at: "2026-05-06T00:01:00.000Z",
+        },
+      ]);
+
+      const reviewsRoute = await loadRoute("./src/app/api/reviews/route.ts");
+      const reviews = await json(await reviewsRoute.GET());
+      assert.equal(reviews.status, 200);
+      assert.equal(
+        reviews.body.some((review) => review.pr_url === taskReviewUrl),
+        false
+      );
+      assert.equal(
+        reviews.body.some((review) => review.pr_url === newlyClaimedUrl),
+        false
+      );
+      assert.equal(
+        reviews.body.some((review) => review.pr_url === needsReviewUrl),
+        true
+      );
+      assert.equal(reviews.body.every((review) => review.source !== "task"), true);
+    `)
+  );
+});
+
 test("review followup route reads existing followups", () => {
   runRouteAssertions(
     withReviewState(`
@@ -1348,6 +1628,94 @@ test("review submit route invokes gh for valid submissions", () => {
       assert.match(
         fs.readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf-8"),
         /pr review https:\\/\\/github.com\\/acme\\/widget\\/pull\\/1 --approve --body LGTM/
+      );
+    `)
+  );
+});
+
+test("review submit route rejects owner decisions for persisted and newly claimed task reviews", () => {
+  runRouteAssertions(
+    withReviewState(`
+      const reviewsPath = path.join(cortexDir, "reviews.json");
+      const seeded = readJson(reviewsPath);
+      const taskReviewUrl = "https://github.com/acme/widget/pull/6";
+      const newlyClaimedUrl = "https://github.com/acme/widget/pull/7";
+      seeded[taskReviewUrl] = {
+        ...seeded[prUrl],
+        source: "task",
+        task_id: "task-1",
+        pr_url: taskReviewUrl,
+        pr_number: 6,
+        title: "Task-owned review",
+      };
+      seeded[newlyClaimedUrl] = {
+        ...seeded[prUrl],
+        source: "inbound",
+        pr_url: newlyClaimedUrl,
+        pr_number: 7,
+        title: "Cached before task ownership",
+      };
+      writeJson(reviewsPath, seeded);
+      writeJson(path.join(cortexDir, "tasks.json"), [
+        {
+          id: "task-7",
+          title: "Live task owner",
+          description: "Own the previously inbound PR",
+          status: "in_review",
+          agent: "cortex-city-swe",
+          pr_url: newlyClaimedUrl,
+          created_at: "2026-05-06T00:00:00.000Z",
+          updated_at: "2026-05-06T00:01:00.000Z",
+        },
+      ]);
+      fs.writeFileSync(process.env.FAKE_GH_CALLS_FILE, "");
+
+      const submitRoute = await loadRoute("./src/app/api/reviews/submit/route.ts");
+      for (const ownedUrl of [taskReviewUrl, newlyClaimedUrl]) {
+        for (const decision of ["approve", "request-changes"]) {
+          const response = await json(
+            await submitRoute.POST(
+              request("http://localhost/api/reviews/submit", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  pr_url: ownedUrl,
+                  decision,
+                  body: decision === "approve" ? "LGTM" : "Please fix this",
+                }),
+              })
+            )
+          );
+          assert.equal(response.status, 400);
+          assert.match(response.body.error, /task-owned pull requests/i);
+        }
+      }
+
+      for (const bypassUrl of [
+        taskReviewUrl + "/",
+        taskReviewUrl + "?attempt=bypass",
+        "https://github.com/acme/widget/pull/999",
+      ]) {
+        const response = await json(
+          await submitRoute.POST(
+            request("http://localhost/api/reviews/submit", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                pr_url: bypassUrl,
+                decision: "approve",
+                body: "LGTM",
+              }),
+            })
+          )
+        );
+        assert.equal(response.status, 404);
+        assert.match(response.body.error, /not cached as an inbound review/i);
+      }
+
+      assert.equal(
+        fs.readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf-8"),
+        ""
       );
     `)
   );

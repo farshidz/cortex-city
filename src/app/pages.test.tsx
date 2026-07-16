@@ -813,6 +813,42 @@ test("app pages render loading, empty, and detail variants", () => {
   }
 });
 
+test("settings page presents one unified reviewer configuration", () => {
+  const output = runRenderScript(`
+    const reviewerConfig = {
+      ...config,
+      review_model: "gpt-5.6",
+      reviewer_agent_prompt: "Check task-specific acceptance criteria.",
+    };
+    const html = await renderPage(
+      "./src/app/settings/page.tsx",
+      {},
+      [false, reviewerConfig]
+    );
+    console.log(JSON.stringify({
+      reviewerTitleCount: (html.match(/>Reviewer<\\/div>/g) || []).length,
+      hasRuntime: html.includes("Default Reviewer Runtime"),
+      hasModel: html.includes("Default Reviewer Model"),
+      hasEffort: html.includes("Default Reviewer Effort"),
+      hasConfiguredModel: html.includes("gpt-5.6"),
+      hasAnyModelGuidance: html.includes("Enter any model supported by the selected runtime"),
+      hasTaskOwnedInstructions: html.includes("Task-owned review instructions (optional)"),
+      hasLegacyCardTitle: html.includes("Reviewer Agent"),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    reviewerTitleCount: 1,
+    hasRuntime: true,
+    hasModel: true,
+    hasEffort: true,
+    hasConfiguredModel: true,
+    hasAnyModelGuidance: true,
+    hasTaskOwnedInstructions: true,
+    hasLegacyCardTitle: false,
+  });
+});
+
 test("merged review state presentation matches expected labels and classes", () => {
   assert.deepEqual(REVIEW_STATE_LABELS, {
     blocked: "Blocked",
@@ -1211,6 +1247,161 @@ test("task detail renders linked issue summary", () => {
     hasLinkedIssueTitle: true,
     hasLinkedIssueStatus: true,
     hasLinkedIssueHref: true,
+  });
+});
+
+test("task detail surfaces automatic review failures with a Settings link", () => {
+  const output = runRenderScript(`
+    const originalData = globalThis.__SWR_DATA__;
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/tasks/task-review-error": {
+        ...task,
+        id: "task-review-error",
+        status: "in_review",
+        automatic_review_error: "Model gpt-unavailable is not supported",
+      },
+    };
+
+    const html = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-review-error" }) }
+    );
+    globalThis.__SWR_DATA__["/api/tasks/task-review-error"] = {
+      ...globalThis.__SWR_DATA__["/api/tasks/task-review-error"],
+      paused: true,
+    };
+    const pausedHtml = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-review-error" }) }
+    );
+    globalThis.__SWR_DATA__ = originalData;
+    console.log(JSON.stringify({
+      hasFailure: html.includes("Automatic review failed:"),
+      hasError: html.includes("Model gpt-unavailable is not supported"),
+      hasSettingsLink: html.includes('href="/settings"'),
+      hasRetryMessage: html.includes("will retry automatically"),
+      pausedHasNoRetryMessage: pausedHtml.includes(
+        "Automatic retry is not currently scheduled"
+      ),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    hasFailure: true,
+    hasError: true,
+    hasSettingsLink: true,
+    hasRetryMessage: true,
+    pausedHasNoRetryMessage: true,
+  });
+});
+
+test("task detail surfaces task-owned review verdicts without self-approval actions", () => {
+  const output = runRenderScript(`
+    const originalData = globalThis.__SWR_DATA__;
+    const reviewTask = {
+      ...task,
+      id: "task-review-result",
+      status: "in_review",
+      automatic_review: {
+        state: "needs_decision",
+        status: "needs_human_decision",
+        summary: "## Summary\\nA human should choose the compatibility tradeoff.",
+        generated_at: "2026-05-01T00:11:00.000Z",
+        head_sha: "head-1",
+        summary_head_sha: "head-1",
+      },
+    };
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/tasks/task-review-result": reviewTask,
+    };
+
+    const decisionHtml = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-review-result" }) }
+    );
+    globalThis.__SWR_DATA__["/api/tasks/task-review-result"] = {
+      ...reviewTask,
+      automatic_review: {
+        ...reviewTask.automatic_review,
+        state: "blocked",
+        status: "blocked",
+        summary: "## Summary\\nThe reviewer could not inspect a required dependency.",
+      },
+    };
+    const blockedHtml = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-review-result" }) }
+    );
+    globalThis.__SWR_DATA__["/api/tasks/task-review-result"] = {
+      ...reviewTask,
+      automatic_review: {
+        ...reviewTask.automatic_review,
+        state: "ready_to_approve",
+        status: "ready_for_human_approval",
+        summary: "## Summary\\nNo blocking findings were found.",
+      },
+    };
+    const cleanHtml = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-review-result" }) }
+    );
+    globalThis.__SWR_DATA__["/api/tasks/task-review-result"] = {
+      ...reviewTask,
+      reviewer_agent_enabled: false,
+      automatic_review: {
+        ...reviewTask.automatic_review,
+        state: "re_reviewing",
+        status: undefined,
+        head_sha: "head-2",
+        summary_head_sha: "head-1",
+      },
+    };
+    const optedOutStaleHtml = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-review-result" }) }
+    );
+    globalThis.__SWR_DATA__ = originalData;
+
+    console.log(JSON.stringify({
+      hasReviewHeading: decisionHtml.includes("Automatic Review"),
+      hasDecisionStatus: decisionHtml.includes("Needs your decision"),
+      hasDecisionSummary: decisionHtml.includes(
+        "A human should choose the compatibility tradeoff."
+      ),
+      hasBlockedStatus: blockedHtml.includes("Blocked"),
+      hasBlockedSummary: blockedHtml.includes(
+        "The reviewer could not inspect a required dependency."
+      ),
+      hasCleanStatus: cleanHtml.includes("No blocking findings"),
+      hasOptedOutStaleStatus: optedOutStaleHtml.includes(
+        "New commits since review"
+      ),
+      hasOptedOutStaleDetail: optedOutStaleHtml.includes(
+        "New commits since this review"
+      ),
+      falselyClaimsReReview: optedOutStaleHtml.includes(
+        "Re-reviewing new commits"
+      ),
+      hasSelfApprovalLabel:
+        decisionHtml.includes("Ready to approve") ||
+        blockedHtml.includes("Ready to approve") ||
+        cleanHtml.includes("Ready to approve"),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    hasReviewHeading: true,
+    hasDecisionStatus: true,
+    hasDecisionSummary: true,
+    hasBlockedStatus: true,
+    hasBlockedSummary: true,
+    hasCleanStatus: true,
+    hasOptedOutStaleStatus: true,
+    hasOptedOutStaleDetail: true,
+    falselyClaimsReReview: false,
+    hasSelfApprovalLabel: false,
   });
 });
 

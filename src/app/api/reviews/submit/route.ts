@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { submitPRReview } from "@/lib/github";
 import { getReviewSummary, patchReviewSummary } from "@/lib/review-store";
+import { readTasks } from "@/lib/store";
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
@@ -22,6 +23,26 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const cached = getReviewSummary(prUrl);
+  if (decision !== "comment" && !cached) {
+    return NextResponse.json(
+      { error: "PR is not cached as an inbound review" },
+      { status: 404 }
+    );
+  }
+  const ownedByLiveTask = readTasks().some(
+    (task) => task.status === "in_review" && task.pr_url === prUrl
+  );
+  if (
+    decision !== "comment" &&
+    (cached?.source === "task" || ownedByLiveTask)
+  ) {
+    return NextResponse.json(
+      { error: "Task-owned pull requests cannot be approved or rejected by their owner" },
+      { status: 400 }
+    );
+  }
+
   const result = await submitPRReview(prUrl, decision, reviewBody);
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
@@ -35,7 +56,6 @@ export async function POST(request: NextRequest) {
   // agent verdict, so the row can't keep showing e.g. "Ready to approve" after
   // the human has requested changes. The two signals are mutually exclusive.
   if (decision !== "comment") {
-    const cached = getReviewSummary(prUrl);
     if (cached?.head_sha) {
       const approving = decision === "approve";
       await patchReviewSummary(prUrl, {
