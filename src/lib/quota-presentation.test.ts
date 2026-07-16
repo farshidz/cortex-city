@@ -180,6 +180,71 @@ test("Claude scoped weekly limits receive unique keys", () => {
   );
 });
 
+test("Codex spend cap renders as a bar and escalates when reached", () => {
+  const view = presentQuota("codex", {
+    rate_limits: {
+      codex: {
+        limitName: null,
+        primary: { usedPercent: 10, windowDurationMins: 10080, resetsAt: 1_784_780_584 },
+        secondary: null,
+        individualLimit: {
+          limit: "30",
+          used: "30",
+          remainingPercent: 0,
+          resetsAt: 1_785_000_000,
+        },
+        spendControlReached: true,
+        rateLimitReachedType: "workspace_member_usage_limit_reached",
+      },
+    },
+  });
+  const bars = view.sections[0].bars;
+  const spend = bars.find((bar) => bar.label === "Spend cap");
+  assert.ok(spend);
+  assert.equal(spend?.usedPercent, 100);
+  assert.equal(spend?.severity, "critical");
+  assert.equal(spend?.note, "Workspace usage limit reached");
+  // The low weekly window is escalated to critical because the account is blocked.
+  const weekly = bars.find((bar) => bar.label === "Weekly limit");
+  assert.equal(weekly?.severity, "critical");
+  assert.equal(weekly?.note, "Workspace usage limit reached");
+});
+
+test("Codex synthesizes a bar when only spend-control fields are populated", () => {
+  const view = presentQuota("codex", {
+    rate_limits: {
+      codex: {
+        limitName: null,
+        primary: null,
+        secondary: null,
+        individualLimit: null,
+        spendControlReached: true,
+        rateLimitReachedType: "rate_limit_reached",
+      },
+    },
+  });
+  assert.equal(view.empty, false);
+  assert.equal(view.sections[0].bars.length, 1);
+  assert.equal(view.sections[0].bars[0].severity, "critical");
+  assert.equal(view.sections[0].bars[0].note, "Rate limit reached");
+});
+
+test("Claude reached severities escalate to critical below the percent thresholds", () => {
+  const view = presentQuota("claude", {
+    limits: [
+      {
+        kind: "weekly_all",
+        group: "weekly",
+        percent: 12,
+        severity: "reached",
+        resets_at: "2026-07-20T00:59:59Z",
+        is_active: true,
+      },
+    ],
+  });
+  assert.equal(view.sections[0].bars[0].severity, "critical");
+});
+
 test("Claude quota maps the limits array to session and weekly sections", () => {
   const view = presentQuota("claude", {
     limits: [

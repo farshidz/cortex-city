@@ -47,7 +47,7 @@ const SEVERITY_BAR_CLASSES: Record<QuotaSeverity, string> = {
 function UsageBar({ bar, now }: { bar: QuotaBar; now: number }) {
   const reset = formatResetTime(bar.resetsAtMs, now);
   const width = bar.usedPercent == null ? 0 : Math.min(100, Math.max(0, bar.usedPercent));
-  const detail = bar.note ?? reset;
+  const detail = [bar.note, reset].filter(Boolean).join(" · ");
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5">
       <div className="min-w-0">
@@ -57,7 +57,18 @@ function UsageBar({ bar, now }: { bar: QuotaBar; now: number }) {
             <span className="text-xs text-muted-foreground">{bar.sublabel}</span>
           ) : null}
         </div>
-        {detail ? <div className="text-xs text-muted-foreground">{detail}</div> : null}
+        {detail ? (
+          <div
+            className={cn(
+              "text-xs",
+              bar.severity === "critical"
+                ? "text-red-600 dark:text-red-400"
+                : "text-muted-foreground"
+            )}
+          >
+            {detail}
+          </div>
+        ) : null}
       </div>
       <div className="text-right text-sm tabular-nums text-muted-foreground">
         {bar.usedPercent == null ? "—" : `${bar.usedPercent}% used`}

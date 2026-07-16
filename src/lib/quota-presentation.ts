@@ -84,8 +84,22 @@ export function severityForPercent(percent: number | null): QuotaSeverity {
   return "normal";
 }
 
+// Reached/blocked states must render as critical even when percent reads low.
+const CRITICAL_SEVERITIES = new Set([
+  "critical",
+  "reached",
+  "exceeded",
+  "blocked",
+  "over_limit",
+  "depleted",
+]);
+const WARNING_SEVERITIES = new Set(["warning", "warn", "approaching", "near_limit"]);
+
 function coerceSeverity(raw: unknown, percent: number | null): QuotaSeverity {
-  if (raw === "critical" || raw === "warning" || raw === "normal") return raw;
+  const value = typeof raw === "string" ? raw.toLowerCase() : "";
+  if (CRITICAL_SEVERITIES.has(value)) return "critical";
+  if (WARNING_SEVERITIES.has(value)) return "warning";
+  if (value === "normal" || value === "ok") return "normal";
   return severityForPercent(percent);
 }
 
@@ -192,6 +206,27 @@ function normalizeCodexRateLimits(
   return rateLimits;
 }
 
+// Sort keys placing spend caps and reached markers after the time windows.
+const SPEND_CAP_SORT = Number.MAX_SAFE_INTEGER - 1;
+const REACHED_SORT = Number.MAX_SAFE_INTEGER;
+
+const CODEX_REACHED_REASONS: Record<string, string> = {
+  rate_limit_reached: "Rate limit reached",
+  workspace_owner_credits_depleted: "Workspace credits depleted",
+  workspace_member_credits_depleted: "Workspace credits depleted",
+  workspace_owner_usage_limit_reached: "Workspace usage limit reached",
+  workspace_member_usage_limit_reached: "Workspace usage limit reached",
+};
+
+function codexReachedReason(
+  reachedType: string | null,
+  spendReached: boolean
+): string | undefined {
+  if (reachedType) return CODEX_REACHED_REASONS[reachedType] ?? titleCase(reachedType);
+  if (spendReached) return "Spend limit reached";
+  return undefined;
+}
+
 function presentCodexQuota(quota: Record<string, unknown>): QuotaView {
   const rateLimits = asRecord(quota.rate_limits);
   const drafts: CodexBarDraft[] = [];
@@ -203,6 +238,15 @@ function presentCodexQuota(quota: Record<string, unknown>): QuotaView {
       if (!limit) continue;
       planLabel = planLabel ?? (asString(limit.planType) ? titleCase(String(limit.planType)) : null);
       const limitName = asString(limit.limitName);
+      // A reached spend cap or usage limit must stay visible even when the
+      // windows read low, so it never hides a blocked account.
+      const reachedNote = codexReachedReason(
+        asString(limit.rateLimitReachedType),
+        limit.spendControlReached === true
+      );
+      const reached = reachedNote != null;
+      const barsBefore = drafts.length;
+
       for (const windowKey of ["primary", "secondary"] as const) {
         const window = asRecord(limit[windowKey]);
         if (!window) continue;
@@ -218,9 +262,49 @@ function presentCodexQuota(quota: Record<string, unknown>): QuotaView {
             sublabel: limitName && windowName ? windowName : undefined,
             usedPercent,
             resetsAtMs: toEpochMs(window.resetsAt),
-            severity: severityForPercent(usedPercent),
+            severity: reached ? "critical" : severityForPercent(usedPercent),
+            note: reachedNote,
           },
-          windowMinutes: windowMinutes ?? Number.MAX_SAFE_INTEGER,
+          windowMinutes: windowMinutes ?? REACHED_SORT,
+          isNamed: Boolean(limitName),
+        });
+      }
+
+      // Spend-control cap (workspace/member budget) reported alongside windows.
+      const cap = asRecord(limit.individualLimit);
+      if (cap) {
+        const remainingPercent = asNumber(cap.remainingPercent);
+        const usedPercent =
+          remainingPercent == null
+            ? null
+            : Math.max(0, Math.min(100, 100 - remainingPercent));
+        drafts.push({
+          bar: {
+            key: `${limitId}:spend`,
+            label: limitName ? `${limitName} spend cap` : "Spend cap",
+            usedPercent,
+            resetsAtMs: toEpochMs(cap.resetsAt),
+            severity: reached ? "critical" : severityForPercent(usedPercent),
+            note: reachedNote,
+          },
+          windowMinutes: SPEND_CAP_SORT,
+          isNamed: Boolean(limitName),
+        });
+      }
+
+      // Reached with no usable window/cap data: synthesize a bar so the card
+      // shows the block instead of "No quota data to display".
+      if (reached && drafts.length === barsBefore) {
+        drafts.push({
+          bar: {
+            key: `${limitId}:reached`,
+            label: limitName ?? "Usage limit",
+            usedPercent: 100,
+            resetsAtMs: null,
+            severity: "critical",
+            note: reachedNote,
+          },
+          windowMinutes: REACHED_SORT,
           isNamed: Boolean(limitName),
         });
       }
