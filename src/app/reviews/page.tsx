@@ -37,7 +37,7 @@ export default function ReviewsPage() {
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">Reviews</h1>
         <span className="text-sm text-muted-foreground">
-          PRs requesting your review or already reviewed by you
+          Requested, previously reviewed, or labeled PRs
         </span>
       </div>
 
@@ -100,7 +100,7 @@ export default function ReviewsPage() {
                 colSpan={6}
                 className="text-center text-muted-foreground py-8"
               >
-                No review requests right now.
+                No PRs currently selected for review.
               </TableCell>
             </TableRow>
           )}

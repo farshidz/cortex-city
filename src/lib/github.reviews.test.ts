@@ -116,6 +116,8 @@ const SEARCH_KEY =
   "search prs user-review-requested:@me draft:false --archived=false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200";
 const REVIEWED_SEARCH_KEY =
   "search prs reviewed-by:me draft:false --archived=false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200";
+const LABELED_SEARCH_KEY =
+  "search prs label:cortex-city-review draft:false --archived=false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200";
 
 test("getReviewRequestedPRs unions requested and reviewed PRs, then enriches with head SHA + my_last_review_sha", () => {
   const workspace = setupWorkspace();
@@ -163,6 +165,7 @@ test("getReviewRequestedPRs unions requested and reviewed PRs, then enriches wit
   const responses: Record<string, FakeGhResponse> = {
     [SEARCH_KEY]: { stdout: JSON.stringify(searchResults) },
     [REVIEWED_SEARCH_KEY]: { stdout: JSON.stringify(reviewedResults) },
+    [LABELED_SEARCH_KEY]: { stdout: JSON.stringify([]) },
     "api user --jq .login": { stdout: "me" },
     "pr view https://github.com/acme/widget/pull/1 --json headRefOid": {
       stdout: JSON.stringify({ headRefOid: "abc123" }),
@@ -253,10 +256,59 @@ test("getReviewRequestedPRs unions requested and reviewed PRs, then enriches wit
   );
   assert.equal(calls.includes(SEARCH_KEY), true);
   assert.equal(calls.includes(REVIEWED_SEARCH_KEY), true);
+  assert.equal(calls.includes(LABELED_SEARCH_KEY), true);
   assert.equal(
     calls.includes("pr view https://github.com/acme/widget/pull/4 --json headRefOid"),
     false
   );
+});
+
+test("getReviewRequestedPRs includes a self-authored PR solely by its cortex-city-review label", () => {
+  const workspace = setupWorkspace();
+  const labeledResult = {
+    url: "https://github.com/acme/widget/pull/5",
+    number: 5,
+    title: "Review my labeled change",
+    repository: { nameWithOwner: "acme/widget" },
+    author: { login: "me" },
+    createdAt: "2026-05-05T00:00:00Z",
+    updatedAt: "2026-05-05T00:00:00Z",
+  };
+  const responses: Record<string, FakeGhResponse> = {
+    [SEARCH_KEY]: { stdout: JSON.stringify([]) },
+    [REVIEWED_SEARCH_KEY]: { stdout: JSON.stringify([]) },
+    [LABELED_SEARCH_KEY]: { stdout: JSON.stringify([labeledResult]) },
+    "api user --jq .login": { stdout: "me" },
+    "pr view https://github.com/acme/widget/pull/5 --json headRefOid": {
+      stdout: JSON.stringify({ headRefOid: "labeled-sha" }),
+    },
+    "api --paginate --slurp repos/acme/widget/pulls/5/reviews": {
+      stdout: JSON.stringify([[]]),
+    },
+  };
+
+  const { result } = runGhScript(
+    workspace,
+    `import { getReviewRequestedPRs } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    responses,
+    `
+      const prs = await getReviewRequestedPRs();
+      console.log(JSON.stringify(prs));
+    `
+  );
+
+  assert.deepEqual(result, [
+    {
+      pr_url: labeledResult.url,
+      pr_number: 5,
+      repo_slug: "acme/widget",
+      title: labeledResult.title,
+      author: "me",
+      head_sha: "labeled-sha",
+      created_at: labeledResult.createdAt,
+      updated_at: labeledResult.updatedAt,
+    },
+  ]);
 });
 
 test("getMyLastReviewSha returns undefined when login is empty or no reviews match", () => {
@@ -437,6 +489,7 @@ test("getReviewRequestedPRs drops entries missing a head SHA", () => {
   const responses: Record<string, FakeGhResponse> = {
     [SEARCH_KEY]: { stdout: JSON.stringify(searchResults) },
     [REVIEWED_SEARCH_KEY]: { stdout: JSON.stringify([]) },
+    [LABELED_SEARCH_KEY]: { stdout: JSON.stringify([]) },
     "api user --jq .login": { stdout: "me" },
     "pr view https://github.com/acme/widget/pull/1 --json headRefOid": {
       stdout: JSON.stringify({}),
@@ -463,6 +516,7 @@ test("getReviewRequestedPRs returns [] when the search response is empty", () =>
   const responses: Record<string, FakeGhResponse> = {
     [SEARCH_KEY]: { stdout: "" },
     [REVIEWED_SEARCH_KEY]: { stdout: JSON.stringify([]) },
+    [LABELED_SEARCH_KEY]: { stdout: JSON.stringify([]) },
     "api user --jq .login": { stdout: "me" },
   };
 

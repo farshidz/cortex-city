@@ -386,6 +386,8 @@ interface PRReviewItem {
   submitted_at?: string;
 }
 
+const CORTEX_CITY_REVIEW_LABEL = "cortex-city-review";
+
 async function searchOpenReviewPRs(query: string): Promise<SearchResultPR[]> {
   const results = await execJson<SearchResultPR[]>(
     `gh search prs ${query} draft:false --archived=false --state=open --json url,number,title,repository,author,createdAt,updatedAt --limit 200`
@@ -478,6 +480,9 @@ export async function getMyReviewSignals(
 export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
   let myLogin = "";
   const requestedSearch = searchOpenReviewPRs("user-review-requested:@me");
+  const labeledSearch = searchOpenReviewPRs(
+    `label:${CORTEX_CITY_REVIEW_LABEL}`
+  );
   try {
     myLogin = await getAuthenticatedUserLogin();
   } catch {
@@ -489,15 +494,20 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
 
   // GitHub clears a direct review request once the user submits a review.
   // Keep those open PRs live by also including PRs the user has reviewed.
-  const [requested, reviewed] = await Promise.all([
+  const [requested, reviewed, labeled] = await Promise.all([
     requestedSearch,
     reviewedSearch,
+    labeledSearch,
   ]);
+  const labeledUrls = new Set(
+    labeled.map((pr) => (pr.url || "").trim()).filter(Boolean)
+  );
   const resultsByUrl = new Map<string, SearchResultPR>();
-  for (const pr of [...requested, ...reviewed]) {
+  for (const pr of [...requested, ...reviewed, ...labeled]) {
     const url = (pr.url || "").trim();
     const author = pr.author?.login?.trim();
-    if (myLogin && author === myLogin) continue;
+    // The label is an explicit opt-in, including for the signed-in user's PRs.
+    if (myLogin && author === myLogin && !labeledUrls.has(url)) continue;
     if (url && !resultsByUrl.has(url)) {
       resultsByUrl.set(url, pr);
     }
