@@ -169,13 +169,36 @@ interface CodexBarDraft {
   isNamed: boolean;
 }
 
+function isRateLimitWindow(value: unknown): boolean {
+  const record = asRecord(value);
+  return (
+    record != null &&
+    (record.usedPercent !== undefined || record.windowDurationMins !== undefined)
+  );
+}
+
+/**
+ * The app-server returns rate limits keyed by limit id, but falls back to a
+ * single `RateLimitSnapshot` (windows directly under `primary`/`secondary`)
+ * when `rateLimitsByLimitId` is null. Normalize the snapshot into a one-entry
+ * map so both shapes iterate the same way.
+ */
+function normalizeCodexRateLimits(
+  rateLimits: Record<string, unknown>
+): Record<string, unknown> {
+  if (isRateLimitWindow(rateLimits.primary) || isRateLimitWindow(rateLimits.secondary)) {
+    return { [asString(rateLimits.limitId) ?? "codex"]: rateLimits };
+  }
+  return rateLimits;
+}
+
 function presentCodexQuota(quota: Record<string, unknown>): QuotaView {
   const rateLimits = asRecord(quota.rate_limits);
   const drafts: CodexBarDraft[] = [];
   let planLabel: string | null = null;
 
   if (rateLimits) {
-    for (const [limitId, rawLimit] of Object.entries(rateLimits)) {
+    for (const [limitId, rawLimit] of Object.entries(normalizeCodexRateLimits(rateLimits))) {
       const limit = asRecord(rawLimit);
       if (!limit) continue;
       planLabel = planLabel ?? (asString(limit.planType) ? titleCase(String(limit.planType)) : null);
@@ -245,7 +268,9 @@ function presentClaudeLimits(limits: unknown[]): QuotaSection[] {
     const isActive = limit.is_active === true;
     const neverUsed = !isActive && resetsAtMs == null && (percent == null || percent === 0);
     const bar: QuotaBar = {
-      key: asString(limit.kind) ?? `limit-${index}`,
+      // Multiple limits can share a kind (e.g. several weekly_scoped models),
+      // so the index keeps React row keys unique within the section.
+      key: `${asString(limit.kind) ?? "limit"}-${index}`,
       label: claudeLimitLabel(limit),
       usedPercent: neverUsed ? null : percent,
       resetsAtMs,

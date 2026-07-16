@@ -93,7 +93,8 @@ function ResetCredits({ data }: { data: QuotaResetCredits }) {
           ))}
         </ul>
       ) : (
-        <div className="text-sm text-muted-foreground">No resets available.</div>
+        // Codex may report only a count (credits: null); the badge is authoritative.
+        <div className="text-sm text-muted-foreground">Reset details unavailable.</div>
       )}
     </div>
   );

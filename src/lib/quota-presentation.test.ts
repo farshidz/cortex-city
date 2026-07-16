@@ -126,6 +126,60 @@ test("Codex quota supports a single weekly window when the 5-hour limit is absen
   assert.equal(view.sections[0].bars[0].label, "Weekly limit");
 });
 
+test("Codex quota normalizes a single-bucket rateLimits snapshot", () => {
+  const view = presentQuota("codex", {
+    rate_limits: {
+      limitId: "codex",
+      limitName: null,
+      planType: "pro",
+      primary: { usedPercent: 30, windowDurationMins: 10080, resetsAt: 1_784_780_584 },
+      secondary: null,
+    },
+  });
+  assert.equal(view.empty, false);
+  assert.equal(view.sections[0].bars.length, 1);
+  assert.equal(view.sections[0].bars[0].label, "Weekly limit");
+  assert.equal(view.sections[0].bars[0].usedPercent, 30);
+});
+
+test("Codex reset credits keep an authoritative count when details are missing", () => {
+  const view = presentQuota("codex", {
+    rate_limit_reset_credits: { availableCount: 2, credits: null },
+  });
+  assert.ok(view.resetCredits);
+  assert.equal(view.resetCredits?.availableCount, 2);
+  assert.deepEqual(view.resetCredits?.credits, []);
+});
+
+test("Claude scoped weekly limits receive unique keys", () => {
+  const view = presentQuota("claude", {
+    limits: [
+      {
+        kind: "weekly_scoped",
+        group: "weekly",
+        percent: 10,
+        resets_at: "2026-07-20T00:59:59Z",
+        scope: { model: { display_name: "Fable" } },
+        is_active: true,
+      },
+      {
+        kind: "weekly_scoped",
+        group: "weekly",
+        percent: 20,
+        resets_at: "2026-07-20T00:59:59Z",
+        scope: { model: { display_name: "Opus" } },
+        is_active: true,
+      },
+    ],
+  });
+  const keys = view.sections[0].bars.map((bar) => bar.key);
+  assert.equal(new Set(keys).size, keys.length);
+  assert.deepEqual(
+    view.sections[0].bars.map((bar) => bar.label),
+    ["Fable", "Opus"]
+  );
+});
+
 test("Claude quota maps the limits array to session and weekly sections", () => {
   const view = presentQuota("claude", {
     limits: [
