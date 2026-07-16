@@ -634,6 +634,21 @@ test("sessions route lists active tasks and validates start requests", () => {
   );
 });
 
+test("agent status route reports unavailable CLIs without failing the request", () => {
+  runRouteAssertions(`
+    process.env.PATH = "";
+    process.env.CLAUDE_CONFIG_DIR = path.join(workspace, "missing-claude-config");
+    const agentStatusRoute = await loadRoute("./src/app/api/agent-status/route.ts");
+    const response = await json(await agentStatusRoute.GET());
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.map((status) => status.runtime), ["codex", "claude"]);
+    assert.deepEqual(response.body.map((status) => status.state), [
+      "unavailable",
+      "unavailable",
+    ]);
+  `);
+});
+
 test("tasks route filters and creates tasks with normalized defaults", () => {
   runRouteAssertions(
     withCortexState(`
