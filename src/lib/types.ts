@@ -193,6 +193,13 @@ export interface ReviewRequest {
   task_title?: string;
   task_description?: string;
   task_plan?: string;
+  // True when the label was the only discovery criterion that selected this
+  // PR. Removing the label can then retire the review without treating an open
+  // PR as a failed final-state lookup.
+  label_only?: boolean;
+  // Self-authored labeled PRs are reviewable by the agent, but GitHub does not
+  // allow their owner to approve or request changes on them.
+  self_authored?: boolean;
   pr_url: string;
   pr_number: number;
   repo_slug: string;

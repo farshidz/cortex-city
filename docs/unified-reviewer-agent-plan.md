@@ -2,10 +2,11 @@
 
 ## Goal
 
-Use Cortex City's stronger review agent for both:
+Use Cortex City's stronger review agent for:
 
-- pull requests created by Cortex tasks; and
-- other people's pull requests that the user has been asked to review.
+- pull requests created by Cortex tasks;
+- other people's pull requests that the user has been asked to review; and
+- pull requests carrying the `cortex-city-review` label, including self-authored PRs that are not linked to a Cortex task.
 
 Retire the older task-specific reviewer, while preserving the implementation agent's separate responsibility for responding to review comments, CI failures, and other PR feedback.
 
@@ -15,6 +16,7 @@ Add one global reviewer model setting so the user can select GPT-5.6 or provide 
 
 - There will be one review engine, prompt policy, learning store, runtime profile, and review concurrency pool.
 - Task-owned and assigned PRs remain distinct workflow sources. They share review behavior but retain source-appropriate actions and presentation.
+- A live Cortex task takes precedence when its PR is also selected by `cortex-city-review`; the label does not bypass task pause, automatic-review opt-out, or builder-coordination rules.
 - The existing per-task reviewer on/off choice remains as an **Automatic review** opt-out. It controls whether a task PR enters the unified review queue; it does not select a different reviewer.
 - Settings defines the default reviewer runtime, model, and effort. The reviewer model is Settings-only; existing per-review runtime and effort overrides can remain. A task's runtime, model, and effort continue to configure its implementation agent only.
 - The Reviews area remains focused on PRs requiring the user's review decision and explicitly filters by review source. Task-owned results remain associated with the task workflow and GitHub feedback, where self-approval actions and inbound-review wording do not apply.
@@ -22,12 +24,12 @@ Add one global reviewer model setting so the user can select GPT-5.6 or provide 
 
 ## Target Architecture
 
-Both sources feed a shared review queue, deduplicated by PR and commit:
+All three sources feed a shared review queue, deduplicated by PR and commit:
 
 ```text
 Task-owned PRs -----------+
-                         +--> Unified reviewer --> Source-specific handoff
-Assigned/reviewed PRs ----+          ^
+Assigned/reviewed PRs ----+--> Unified reviewer --> Source-specific handoff
+Labeled PRs --------------+          ^
                                     |
                       Global reviewer settings
                       + accumulated learnings
@@ -112,4 +114,4 @@ Validation should cover these outcomes:
 - A combined inbox that mixes task-owned PRs into the assigned-PR Reviews list.
 - Replacing the implementation agent's PR-feedback and CI-remediation workflow.
 - Maintaining a complete, hard-coded catalog of models supported by external CLIs.
-- Broadening automatic review to every PR authored by the user; only Cortex task PRs and the existing assigned/reviewed PR set are in scope.
+- Broadening automatic review to every PR authored by the user; self-authored PRs still require either Cortex task ownership or the `cortex-city-review` label.

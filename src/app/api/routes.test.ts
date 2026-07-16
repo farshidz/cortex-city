@@ -1736,6 +1736,52 @@ test("review submit route rejects owner decisions for persisted and newly claime
   );
 });
 
+test("review submit route rejects owner decisions for self-authored labeled reviews", () => {
+  runRouteAssertions(
+    withReviewState(`
+      const reviewsPath = path.join(cortexDir, "reviews.json");
+      const seeded = readJson(reviewsPath);
+      const selfAuthoredUrl = "https://github.com/acme/widget/pull/8";
+      seeded[selfAuthoredUrl] = {
+        ...seeded[prUrl],
+        source: "inbound",
+        label_only: true,
+        self_authored: true,
+        pr_url: selfAuthoredUrl,
+        pr_number: 8,
+        title: "Self-authored labeled review",
+        author: "me",
+      };
+      writeJson(reviewsPath, seeded);
+      fs.writeFileSync(process.env.FAKE_GH_CALLS_FILE, "");
+
+      const submitRoute = await loadRoute("./src/app/api/reviews/submit/route.ts");
+      for (const decision of ["approve", "request-changes"]) {
+        const response = await json(
+          await submitRoute.POST(
+            request("http://localhost/api/reviews/submit", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                pr_url: selfAuthoredUrl,
+                decision,
+                body: decision === "approve" ? "LGTM" : "Please fix this",
+              }),
+            })
+          )
+        );
+        assert.equal(response.status, 400);
+        assert.match(response.body.error, /self-authored pull requests/i);
+      }
+
+      assert.equal(
+        fs.readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf-8"),
+        ""
+      );
+    `)
+  );
+});
+
 test("review submit route flips an approved PR out of the agent verdict state", () => {
   runRouteAssertions(
     withReviewState(`

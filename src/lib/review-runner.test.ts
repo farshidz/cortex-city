@@ -254,6 +254,21 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.match(inboundPrompt, /someone else's PR/);
   assert.doesNotMatch(inboundPrompt, /accessibility requirements/);
   assert.doesNotMatch(inboundPrompt, /Cortex task context/);
+
+  const selfAuthoredPrompt = buildReviewWrapperPrompt(
+    config,
+    sampleRequest({ label_only: true, self_authored: true })
+  );
+  assert.match(
+    selfAuthoredPrompt,
+    /Review source: label-selected self-authored pull request/
+  );
+  assert.match(selfAuthoredPrompt, /`cortex-city-review` label/);
+  assert.match(
+    selfAuthoredPrompt,
+    /never approve it or request changes on GitHub/i
+  );
+  assert.doesNotMatch(selfAuthoredPrompt, /someone else's PR/);
 });
 
 test("isReviewSessionCompatible requires the same source, runtime, model, and effort", () => {

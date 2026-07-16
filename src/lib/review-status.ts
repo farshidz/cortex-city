@@ -7,6 +7,7 @@ import type {
 
 export interface ReviewStatusInput {
   source?: ReviewSource;
+  self_authored?: boolean;
   summary?: string;
   summary_head_sha?: string;
   error?: string;
@@ -95,6 +96,7 @@ export function deriveReviewState(review: ReviewStateInput): ReviewState {
 
   if (
     review.source !== "task" &&
+    !review.self_authored &&
     review.my_approval_sha &&
     review.my_approval_sha === review.head_sha
   ) {
@@ -102,6 +104,7 @@ export function deriveReviewState(review: ReviewStateInput): ReviewState {
   }
   if (
     review.source !== "task" &&
+    !review.self_authored &&
     review.my_changes_requested_sha &&
     review.my_changes_requested_sha === review.head_sha
   ) {
