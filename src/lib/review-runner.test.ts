@@ -275,6 +275,49 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.doesNotMatch(selfAuthoredPrompt, /someone else's PR/);
 });
 
+test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and the revision diff", () => {
+  const config = baseConfig({
+    review_learning_enabled: false,
+    review_prompt: "Review every PR broadly and surface all findings.",
+  });
+  const cached = {
+    ...sampleRequest({ head_sha: "previous-head" }),
+    summary: "## Summary\nPreviously reviewed.",
+    summary_head_sha: "previous-head",
+    generated_at: "2026-05-01T00:10:00.000Z",
+  } satisfies ReviewSummary;
+
+  const prompt = buildReviewWrapperPrompt(
+    config,
+    sampleRequest({ head_sha: "current-head" }),
+    cached
+  );
+
+  assert.match(prompt, /follow-up scope below overrides any general instruction/i);
+  assert.match(prompt, /Do not perform another full review/i);
+  assert.match(prompt, /Verify each prior finding against the current head/i);
+  assert.match(prompt, /revision-to-revision diff/i);
+  assert.match(
+    prompt,
+    /gh api repos\/acme\/widget\/compare\/previous-head\.\.\.current-head/
+  );
+  assert.match(prompt, /only when that revision diff introduced a significant/i);
+  assert.match(prompt, /leave previously reviewed unchanged code out of scope/i);
+  assert.match(prompt, /finish with a clean status instead of searching for more/i);
+  assert.doesNotMatch(prompt, /Review the current PR fresh as well/i);
+});
+
+test("buildReviewWrapperPrompt keeps initial reviews broad", () => {
+  const prompt = buildReviewWrapperPrompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest({ head_sha: "initial-head" })
+  );
+
+  assert.match(prompt, /This is an initial review of the current PR state/);
+  assert.doesNotMatch(prompt, /Do not perform another full review/i);
+  assert.doesNotMatch(prompt, /revision-to-revision diff/i);
+});
+
 test("isReviewSessionCompatible requires the same source, runtime, model, and effort", () => {
   const request = sampleRequest({ source: "inbound" });
   const cached = {
@@ -731,7 +774,10 @@ test("summarizePR resumes cached review sessions for changed PRs", () => {
   assert.equal(result.args.args.includes("--resume"), true);
   assert.equal(result.args.args.includes("claude-session-1"), true);
   assert.match(result.args.args.join("\n"), /follow-up review/i);
-  assert.match(result.args.args.join("\n"), /prior agent-authored comments/i);
+  assert.match(
+    result.args.args.join("\n"),
+    /prior agent-authored required-change comments/i
+  );
   assert.equal(result.summary.summary_head_sha, "new-head");
   assert.equal(result.summary.session_id, "claude-session-2");
   assert.equal(result.summary.agent_review_status, "needs_author_changes");
