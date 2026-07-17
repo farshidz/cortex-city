@@ -454,27 +454,18 @@ export function buildReviewWrapperPrompt(
   if (followup) {
     sections.push(
       "",
-      "This is a follow-up review because the PR changed since your previous review.",
-      "The follow-up context below guides your GitHub comments and agent status only.",
-      "It must not change how you write the summary: the `## Summary` is still a",
-      "standalone description of the PR's current state, as instructed above.",
-      `Previously reviewed head SHA: ${reviewedHeadSha}`,
-      `Current head SHA: ${target.head_sha}`,
+      "This is a follow-up review, not a full re-review.",
+      `Previously reviewed head: ${reviewedHeadSha}`,
+      `Current head: ${target.head_sha}`,
       [
-        "Use GitHub tooling to inspect the current PR, your prior",
-        "agent-authored comments, and any relevant review threads.",
+        "Verify whether your previous findings were addressed. Then review the",
+        "changes between the previously reviewed head and the current head for",
+        "significant newly introduced issues.",
       ].join(" "),
       [
-        "If a prior required-change comment has been addressed, leave a",
-        "follow-up GitHub comment saying so.",
-      ].join(" "),
-      [
-        "If a prior required-change comment is still unresolved, do not duplicate",
-        "the same comment; reflect that in your agent status.",
-      ].join(" "),
-      [
-        "Review the current PR fresh as well, and leave new GitHub comments for",
-        "new required author changes.",
+        "Do not raise new findings about unchanged code unless the issue is critical.",
+        "If the previous findings are resolved and the new changes introduce no",
+        "significant issues, return a clean status.",
       ].join(" ")
     );
   } else {
