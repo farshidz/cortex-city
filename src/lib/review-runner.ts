@@ -454,57 +454,18 @@ export function buildReviewWrapperPrompt(
   if (followup) {
     sections.push(
       "",
-      "This is a follow-up review because the PR changed since your previous review.",
+      "This is a follow-up review, not a full re-review.",
+      `Previously reviewed head: ${reviewedHeadSha}`,
+      `Current head: ${target.head_sha}`,
       [
-        "The follow-up scope below overrides any general instruction above to",
-        "review the PR broadly or fresh.",
-      ].join(" "),
-      "The follow-up context below guides your GitHub comments and agent status only.",
-      "It must not change how you write the summary: the `## Summary` is still a",
-      "standalone description of the PR's current state, as instructed above.",
-      `Previously reviewed head SHA: ${reviewedHeadSha}`,
-      `Current head SHA: ${target.head_sha}`,
-      [
-        "Do not perform another full review of the PR. Treat the previously reviewed",
-        "head as the baseline, and do not re-audit unchanged code or hunt for",
-        "additional issues that the initial review did not raise.",
+        "Verify whether your previous findings were addressed. Then review the",
+        "changes between the previously reviewed head and the current head for",
+        "significant newly introduced issues.",
       ].join(" "),
       [
-        "First, use GitHub tooling to inspect your prior agent-authored required-change",
-        "comments and any relevant review threads. Verify each prior finding against",
-        "the current head and determine whether it is addressed or still unresolved.",
-      ].join(" "),
-      [
-        "If a prior required-change comment has been addressed, leave a",
-        "follow-up GitHub comment saying so.",
-      ].join(" "),
-      [
-        "If a prior required-change comment is still unresolved, do not duplicate",
-        "the same comment; reflect that in your agent status.",
-      ].join(" "),
-      [
-        "Then inspect only the revision-to-revision diff from the previously reviewed",
-        "head to the current head. Use GitHub's compare API or an equivalent exact",
-        "comparison; for example:",
-        `\`gh api repos/${target.repo_slug}/compare/${reviewedHeadSha}...${target.head_sha}\``,
-      ].join(" "),
-      [
-        "Raise a new required-change finding only when that revision diff introduced",
-        "a significant correctness, security, data-integrity, or production-reliability",
-        "problem. Do not raise new marginal, stylistic, speculative-hardening, or",
-        "minor test/documentation-freshness findings about code already present in",
-        "the previously reviewed head.",
-      ].join(" "),
-      [
-        "The only exception for unchanged code is a clearly critical issue with",
-        "severe security, data-loss, or correctness impact. Otherwise, leave",
-        "previously reviewed unchanged code out of scope even if you now notice",
-        "something the initial review missed.",
-      ].join(" "),
-      [
-        "If all prior required changes are addressed and the revision diff introduced",
-        "no significant problem, finish with a clean status instead of searching for",
-        "more findings.",
+        "Do not raise new findings about unchanged code unless the issue is critical.",
+        "If the previous findings are resolved and the new changes introduce no",
+        "significant issues, return a clean status.",
       ].join(" ")
     );
   } else {

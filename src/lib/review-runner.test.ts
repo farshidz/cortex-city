@@ -293,17 +293,14 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
     cached
   );
 
-  assert.match(prompt, /follow-up scope below overrides any general instruction/i);
-  assert.match(prompt, /Do not perform another full review/i);
-  assert.match(prompt, /Verify each prior finding against the current head/i);
-  assert.match(prompt, /revision-to-revision diff/i);
-  assert.match(
-    prompt,
-    /gh api repos\/acme\/widget\/compare\/previous-head\.\.\.current-head/
-  );
-  assert.match(prompt, /only when that revision diff introduced a significant/i);
-  assert.match(prompt, /leave previously reviewed unchanged code out of scope/i);
-  assert.match(prompt, /finish with a clean status instead of searching for more/i);
+  assert.match(prompt, /follow-up review, not a full re-review/i);
+  assert.match(prompt, /Previously reviewed head: previous-head/);
+  assert.match(prompt, /Current head: current-head/);
+  assert.match(prompt, /previous findings were addressed/i);
+  assert.match(prompt, /changes between the previously reviewed head/i);
+  assert.match(prompt, /significant newly introduced issues/i);
+  assert.match(prompt, /unchanged code unless the issue is critical/i);
+  assert.match(prompt, /return a clean status/i);
   assert.doesNotMatch(prompt, /Review the current PR fresh as well/i);
 });
 
@@ -314,8 +311,8 @@ test("buildReviewWrapperPrompt keeps initial reviews broad", () => {
   );
 
   assert.match(prompt, /This is an initial review of the current PR state/);
-  assert.doesNotMatch(prompt, /Do not perform another full review/i);
-  assert.doesNotMatch(prompt, /revision-to-revision diff/i);
+  assert.doesNotMatch(prompt, /not a full re-review/i);
+  assert.doesNotMatch(prompt, /previous findings were addressed/i);
 });
 
 test("isReviewSessionCompatible requires the same source, runtime, model, and effort", () => {
@@ -774,10 +771,7 @@ test("summarizePR resumes cached review sessions for changed PRs", () => {
   assert.equal(result.args.args.includes("--resume"), true);
   assert.equal(result.args.args.includes("claude-session-1"), true);
   assert.match(result.args.args.join("\n"), /follow-up review/i);
-  assert.match(
-    result.args.args.join("\n"),
-    /prior agent-authored required-change comments/i
-  );
+  assert.match(result.args.args.join("\n"), /previous findings were addressed/i);
   assert.equal(result.summary.summary_head_sha, "new-head");
   assert.equal(result.summary.session_id, "claude-session-2");
   assert.equal(result.summary.agent_review_status, "needs_author_changes");
