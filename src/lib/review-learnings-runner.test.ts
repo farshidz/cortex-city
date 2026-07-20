@@ -125,6 +125,7 @@ test("spawnReviewRetro writes rewritten learnings and stamps done", () => {
 
 test("review retro wording and context cover both review sources", () => {
   assert.match(DEFAULT_REVIEW_RETRO_PROMPT, /both inbound reviews and Cortex task-owned PRs/);
+  assert.match(DEFAULT_REVIEW_RETRO_PROMPT, /Use the gh CLI/);
   assert.doesNotMatch(DEFAULT_REVIEW_RETRO_PROMPT, /future inbound PR reviews/);
 
   const taskPrompt = buildReviewRetroPrompt(

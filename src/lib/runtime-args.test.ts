@@ -10,6 +10,7 @@ import {
   buildModelArgs,
   buildModelArgsWith,
   buildPermissionArgs,
+  buildReviewPermissionArgs,
 } from "./runtime-args";
 import type { OrchestratorConfig } from "./types";
 
@@ -74,6 +75,30 @@ test("buildPermissionArgs uses Codex bypass flag for yolo / bypassPermissions", 
 test("buildPermissionArgs falls back to --full-auto for other Codex modes", () => {
   assert.deepEqual(buildPermissionArgs("codex", "acceptEdits"), ["--full-auto"]);
   assert.deepEqual(buildPermissionArgs("codex", "default"), ["--full-auto"]);
+});
+
+test("buildReviewPermissionArgs confines Codex to its networked workspace", () => {
+  const args = buildReviewPermissionArgs("codex");
+  assert.deepEqual(args.slice(0, 2), ["--sandbox", "workspace-write"]);
+  assert.ok(args.includes('approval_policy="never"'));
+  assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
+  assert.ok(args.includes("sandbox_workspace_write.exclude_slash_tmp=true"));
+  assert.ok(
+    args.includes("sandbox_workspace_write.exclude_tmpdir_env_var=true")
+  );
+  assert.ok(args.includes("--skip-git-repo-check"));
+  assert.ok(!args.includes("--dangerously-bypass-approvals-and-sandbox"));
+});
+
+test("buildReviewPermissionArgs gives Claude non-interactive GitHub-only access", () => {
+  assert.deepEqual(buildReviewPermissionArgs("claude"), [
+    "--permission-mode",
+    "dontAsk",
+    "--allowedTools",
+    "Bash(gh *)",
+    "--disallowedTools",
+    "Write,Edit,NotebookEdit",
+  ]);
 });
 
 test("buildModelArgs prefers explicit task values over config defaults", () => {

@@ -89,6 +89,8 @@ Cortex City uses one reviewer agent for both PRs created by Cortex tasks and oth
 
 The reviewer uses one shared learning history across both kinds of PR. When reviewed PRs merge, retrospectives improve those learnings for future reviews. Configure the global reviewer runtime, effort, and model in `Settings`; the model field accepts any model identifier supported by the selected runtime and can be left blank to use its default.
 
+Each review, retrospective, and follow-up runs in a fresh disposable directory under `tmp/reviews/`; Cortex City removes it when the runtime exits, including after errors and timeouts. Set `CORTEX_REVIEW_WORKSPACE_ROOT` in the web and worker service environments to place these workspaces elsewhere. An absolute path on a separately mounted or quota-limited scratch volume provides an additional containment boundary without changing the application deployment.
+
 Initial reviews examine the full PR. When a reviewed PR receives another commit, the follow-up review instead verifies the reviewer's previous required-change findings and examines the exact diff between the previously reviewed head and the new head for significant regressions. It does not re-audit unchanged code for additional marginal findings, except when unchanged code contains a clearly critical security, data-loss, or correctness issue.
 
 ### Status

@@ -4,7 +4,17 @@ import { mkdirSync } from "fs";
 import os from "os";
 import path from "path";
 import * as lockfile from "proper-lockfile";
-import { buildEnv, buildModelArgsWith, buildPermissionArgs } from "./runtime-args";
+import {
+  buildEnv,
+  buildModelArgsWith,
+  buildReviewPermissionArgs,
+} from "./runtime-args";
+import {
+  createReviewWorkspace,
+  markReviewWorkspaceActive,
+  removeReviewWorkspace,
+  removeReviewWorkspaceBeforeStart,
+} from "./review-workspace";
 import { readReviewLearnings } from "./review-learnings-store";
 import {
   getReviewSummary,
@@ -130,6 +140,8 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
 ];
 
 export const REVIEWER_GITHUB_COMMENT_PREFIX = "**🤖[Cortex City Reviewer]**";
+const REVIEW_GITHUB_TOOL_INSTRUCTION =
+  "Use the `gh` CLI for GitHub inspection and comments; no local checkout is required.";
 
 export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request with Cortex City's unified review agent.
 
@@ -406,6 +418,7 @@ export function buildReviewWrapperPrompt(
     base,
     "",
     "Cortex City review protocol:",
+    REVIEW_GITHUB_TOOL_INSTRUCTION,
     ...buildReviewSourceContext(
       target,
       source === "task" ? config.reviewer_agent_prompt : undefined
@@ -523,7 +536,7 @@ function buildClaudeArgs(
     args.push("--resume", resumeSessionId);
   }
   args.push("-p", prompt, "--output-format", "json");
-  args.push(...buildPermissionArgs("claude", "bypassPermissions"));
+  args.push(...buildReviewPermissionArgs("claude"));
   args.push(...buildModelArgsWith("claude", opts.model, opts.effort));
   return args;
 }
@@ -534,10 +547,10 @@ function buildCodexArgs(
   resumeSessionId?: string
 ): string[] {
   const args: string[] = ["exec", "--json"];
+  args.push(...buildReviewPermissionArgs("codex"));
   if (resumeSessionId) {
     args.push("resume");
   }
-  args.push(...buildPermissionArgs("codex", "bypassPermissions"));
   args.push(...buildModelArgsWith("codex", opts.model, opts.effort));
   if (resumeSessionId) {
     args.push(resumeSessionId);
@@ -597,11 +610,31 @@ export function spawnRuntime(
       : buildClaudeArgs(prompt, opts, resumeSessionId);
 
   const startedAt = Date.now();
-  const child = spawn(command, args, {
-    cwd: process.cwd(),
-    env: buildEnv(),
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const workspace = createReviewWorkspace(runtime);
+  let child: ChildProcess | undefined;
+  try {
+    child = spawn(command, args, {
+      cwd: workspace.path,
+      env: {
+        ...buildEnv(),
+        TMPDIR: workspace.path,
+        TMP: workspace.path,
+        TEMP: workspace.path,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    markReviewWorkspaceActive(workspace, child.pid);
+  } catch (error) {
+    try {
+      child?.kill("SIGTERM");
+    } catch {}
+    removeReviewWorkspaceBeforeStart(workspace.path);
+    throw error;
+  }
+  if (!child) {
+    removeReviewWorkspaceBeforeStart(workspace.path);
+    throw new Error(`Failed to start ${command}`);
+  }
   child.stdin?.end();
 
   let stdout = "";
@@ -609,7 +642,7 @@ export function spawnRuntime(
   let codexCarry = "";
   const codexResult: CodexEvent[] = [];
 
-  const done = new Promise<RunOutput>((resolve) => {
+  const runtimeDone = new Promise<RunOutput>((resolve) => {
     let timedOut = false;
     let timeout: NodeJS.Timeout | undefined;
     if (typeof runTimeoutMs === "number" && runTimeoutMs > 0) {
@@ -731,6 +764,10 @@ export function spawnRuntime(
         });
       }
     });
+  });
+
+  const done = runtimeDone.finally(async () => {
+    await removeReviewWorkspace(workspace.path);
   });
 
   return { pid: child.pid!, child, done };
@@ -1032,6 +1069,7 @@ export async function askFollowup(
         : undefined
     ),
     "",
+    REVIEW_GITHUB_TOOL_INSTRUCTION,
     `PR URL: ${prUrl}`,
     isSummaryStale
       ? `The cached summary was generated for ${cached.summary_head_sha}, but the current head is ${cached.head_sha}. Answer against the current PR state when the latest code matters.`
@@ -1076,6 +1114,7 @@ export async function askFollowup(
     "</summary>",
     "",
     "The user is asking a follow-up question. Use the summary plus any tools you have to answer.",
+    REVIEW_GITHUB_TOOL_INSTRUCTION,
     ...buildReviewSourceContext(
       cached,
       reviewSourceOf(cached) === "task"

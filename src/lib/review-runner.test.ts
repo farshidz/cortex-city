@@ -4,6 +4,8 @@ import {
   chmodSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -239,6 +241,7 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
       task_plan: "Add focus trapping, then test escape handling.",
     })
   );
+  assert.match(taskPrompt, /Use the `gh` CLI for GitHub inspection and comments/);
   assert.match(taskPrompt, /Review source: task-owned pull request/);
   assert.match(taskPrompt, /never approve it or request changes on GitHub/i);
   assert.match(taskPrompt, /specific, actionable GitHub comments/i);
@@ -285,6 +288,8 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
     summary: "## Summary\nPreviously reviewed.",
     summary_head_sha: "previous-head",
     generated_at: "2026-05-01T00:10:00.000Z",
+    review_status: "needs_review",
+    review_state: "needs_review",
   } satisfies ReviewSummary;
 
   const prompt = buildReviewWrapperPrompt(
@@ -368,6 +373,151 @@ test("parseReviewAgentStatus reads the exact agent status marker", () => {
     "needs_author_changes"
   );
   assert.equal(parseReviewAgentStatus("No marker here"), undefined);
+});
+
+test("spawnRuntime contains and removes Claude review workspaces", () => {
+  const workspace = setupRunnerWorkspace("review-runtime-workspace-claude-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const argsFile = path.join(workspace, "agent-args.json");
+  const reviewRoot = path.join(workspace, "review-scratch");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "contained-claude-session",
+        result: "contained",
+        is_error: false,
+      }),
+    },
+  });
+
+  const result = runTsxScript(
+    workspace,
+    [`import { spawnRuntime } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`],
+    `
+      const fs = await import("node:fs");
+      const spawned = spawnRuntime(
+        "claude",
+        "review this PR",
+        { runtime: "claude" },
+        undefined,
+        1_000
+      );
+      const output = await spawned.done;
+      const invocation = JSON.parse(fs.readFileSync(${JSON.stringify(argsFile)}, "utf-8"));
+      console.log(JSON.stringify({
+        output,
+        invocation,
+        workspaceExistsAfterDone: fs.existsSync(invocation.cwd),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      CORTEX_REVIEW_WORKSPACE_ROOT: reviewRoot,
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_AGENT_ARGS_FILE: argsFile,
+    }
+  );
+
+  assert.equal(result.output.result_text, "contained");
+  assert.equal(
+    path.dirname(result.invocation.cwd),
+    realpathSync(reviewRoot)
+  );
+  assert.match(path.basename(result.invocation.cwd), /^review-run-/);
+  assert.equal(result.invocation.env.TMPDIR, result.invocation.cwd);
+  assert.equal(result.invocation.env.TMP, result.invocation.cwd);
+  assert.equal(result.invocation.env.TEMP, result.invocation.cwd);
+  assert.equal(result.workspaceExistsAfterDone, false);
+  assert.equal(result.invocation.args.includes("bypassPermissions"), false);
+  assert.equal(result.invocation.args.includes("dontAsk"), true);
+  assert.equal(result.invocation.args.includes("Bash(gh *)"), true);
+});
+
+test("spawnRuntime preserves Codex resume inside a fresh confined workspace", () => {
+  const workspace = setupRunnerWorkspace("review-runtime-workspace-codex-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const argsFile = path.join(workspace, "agent-args.json");
+  const reviewRoot = path.join(workspace, "review-scratch");
+  writeJson(scenarioFile, {
+    codex: {
+      stdout: [
+        JSON.stringify({ type: "thread.started", thread_id: "codex-thread-1" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "resumed" },
+        }),
+        "",
+      ].join("\n"),
+    },
+  });
+
+  const result = runTsxScript(
+    workspace,
+    [`import { spawnRuntime } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`],
+    `
+      const fs = await import("node:fs");
+      const spawned = spawnRuntime(
+        "codex",
+        "follow up",
+        { runtime: "codex", effort: "xhigh" },
+        "codex-thread-1",
+        1_000
+      );
+      const output = await spawned.done;
+      const invocation = JSON.parse(fs.readFileSync(${JSON.stringify(argsFile)}, "utf-8"));
+      console.log(JSON.stringify({
+        output,
+        invocation,
+        workspaceExistsAfterDone: fs.existsSync(invocation.cwd),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      CORTEX_REVIEW_WORKSPACE_ROOT: reviewRoot,
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_AGENT_ARGS_FILE: argsFile,
+    }
+  );
+
+  assert.equal(result.output.result_text, "resumed");
+  assert.equal(result.invocation.env.TMPDIR, result.invocation.cwd);
+  assert.equal(result.workspaceExistsAfterDone, false);
+  assert.ok(result.invocation.args.includes("workspace-write"));
+  assert.ok(result.invocation.args.includes("resume"));
+  assert.ok(result.invocation.args.includes("codex-thread-1"));
+  assert.ok(result.invocation.args.includes("follow up"));
+  assert.ok(
+    result.invocation.args.indexOf("workspace-write") <
+      result.invocation.args.indexOf("resume")
+  );
+});
+
+test("spawnRuntime removes its workspace when the runtime cannot start", () => {
+  const workspace = setupRunnerWorkspace("review-runtime-spawn-error-");
+  const reviewRoot = path.join(workspace, "review-scratch");
+  const result = runTsxScript(
+    workspace,
+    [`import { spawnRuntime } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`],
+    `
+      const fs = await import("node:fs");
+      process.env.PATH = ${JSON.stringify(path.join(workspace, "missing-bin"))};
+      const output = await spawnRuntime(
+        "claude",
+        "review",
+        { runtime: "claude" },
+        undefined,
+        1_000
+      ).done;
+      console.log(JSON.stringify({
+        output,
+        leftovers: fs.readdirSync(${JSON.stringify(reviewRoot)}),
+      }));
+    `,
+    { ...prependBinToPath(workspace), CORTEX_REVIEW_WORKSPACE_ROOT: reviewRoot }
+  );
+
+  assert.match(result.output.error, /ENOENT|spawn claude/);
+  assert.deepEqual(result.leftovers, []);
 });
 
 test("summarizePR persists Claude output as a ReviewSummary", () => {
@@ -967,6 +1117,7 @@ test("summarizePR applies the configured task run timeout", () => {
     task_run_timeout_ms: 25,
   });
   const scenarioFile = path.join(workspace, "scenario.json");
+  const reviewRoot = path.join(workspace, "review-scratch");
   writeJson(scenarioFile, {
     claude: {
       stdout: JSON.stringify({
@@ -998,6 +1149,7 @@ test("summarizePR applies the configured task run timeout", () => {
     `,
     {
       ...prependBinToPath(workspace),
+      CORTEX_REVIEW_WORKSPACE_ROOT: reviewRoot,
       FAKE_AGENT_SCENARIO_FILE: scenarioFile,
     }
   );
@@ -1006,6 +1158,7 @@ test("summarizePR applies the configured task run timeout", () => {
   assert.equal(result.summary.summary, "");
   assert.equal(result.summary.current_run_pid, undefined);
   assert.match(result.persisted.error, /Run timed out after 25ms/);
+  assert.deepEqual(readdirSync(reviewRoot), []);
 });
 
 test("askFollowup throws when the cached entry has no summary yet", () => {
@@ -1112,6 +1265,10 @@ test("askFollowup allows stale summaries but still throws for active refreshes",
   const promptIndex = argsPayload.args.indexOf("-p") + 1;
   assert.match(argsPayload.args[promptIndex], /Summary head SHA: old-head/);
   assert.match(argsPayload.args[promptIndex], /Current head SHA: new-head/);
+  assert.match(
+    argsPayload.args[promptIndex],
+    /Use the `gh` CLI for GitHub inspection and comments/
+  );
 });
 
 test("askFollowup throws when the PR has no cached summary", () => {
