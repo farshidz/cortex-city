@@ -69,34 +69,18 @@ export function buildPermissionArgs(
 }
 
 /**
- * Reviewer runtimes only need GitHub access and disposable scratch space. Keep
- * these permissions separate from task-agent permissions, which intentionally
- * allow agents to edit their managed repository worktrees.
+ * Reviewer runtimes run non-interactively inside application-owned workspaces.
+ * Keep the established bypass mode so their GitHub CLI commands do not depend
+ * on host sandbox support or interactive approval handling.
  */
 export function buildReviewPermissionArgs(runtime: AgentRuntime): string[] {
   if (runtime === "codex") {
     return [
-      "--sandbox",
-      "workspace-write",
-      "-c",
-      'approval_policy="never"',
-      "-c",
-      "sandbox_workspace_write.network_access=true",
-      "-c",
-      "sandbox_workspace_write.exclude_slash_tmp=true",
-      "-c",
-      "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+      ...buildPermissionArgs("codex", "bypassPermissions"),
       "--skip-git-repo-check",
     ];
   }
-  return [
-    "--permission-mode",
-    "dontAsk",
-    "--allowedTools",
-    "Bash(gh *)",
-    "--disallowedTools",
-    "Write,Edit,NotebookEdit",
-  ];
+  return buildPermissionArgs("claude", "bypassPermissions");
 }
 
 export function buildModelArgs(

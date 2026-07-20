@@ -377,7 +377,7 @@ test("parseReviewAgentStatus reads the exact agent status marker", () => {
   assert.equal(parseReviewAgentStatus("No marker here"), undefined);
 });
 
-test("spawnRuntime contains and retains Claude workspaces for active reviews", () => {
+test("spawnRuntime retains Claude workspaces while restoring bypass mode", () => {
   const workspace = setupRunnerWorkspace("review-runtime-workspace-claude-");
   const scenarioFile = path.join(workspace, "scenario.json");
   const argsFile = path.join(workspace, "agent-args.json");
@@ -432,12 +432,12 @@ test("spawnRuntime contains and retains Claude workspaces for active reviews", (
   assert.equal(result.invocation.env.TMP, result.invocation.cwd);
   assert.equal(result.invocation.env.TEMP, result.invocation.cwd);
   assert.equal(result.workspaceExistsAfterDone, true);
-  assert.equal(result.invocation.args.includes("bypassPermissions"), false);
-  assert.equal(result.invocation.args.includes("dontAsk"), true);
-  assert.equal(result.invocation.args.includes("Bash(gh *)"), true);
+  assert.equal(result.invocation.args.includes("bypassPermissions"), true);
+  assert.equal(result.invocation.args.includes("dontAsk"), false);
+  assert.equal(result.invocation.args.includes("Bash(gh *)"), false);
 });
 
-test("spawnRuntime preserves Codex resume inside the retained PR workspace", () => {
+test("spawnRuntime preserves Codex resume and bypass inside the retained PR workspace", () => {
   const workspace = setupRunnerWorkspace("review-runtime-workspace-codex-");
   const scenarioFile = path.join(workspace, "scenario.json");
   const argsFile = path.join(workspace, "agent-args.json");
@@ -488,12 +488,18 @@ test("spawnRuntime preserves Codex resume inside the retained PR workspace", () 
   assert.equal(result.output.result_text, "resumed");
   assert.equal(result.invocation.env.TMPDIR, result.invocation.cwd);
   assert.equal(result.workspaceExistsAfterDone, true);
-  assert.ok(result.invocation.args.includes("workspace-write"));
+  assert.ok(
+    result.invocation.args.includes(
+      "--dangerously-bypass-approvals-and-sandbox"
+    )
+  );
+  assert.ok(!result.invocation.args.includes("workspace-write"));
+  assert.ok(result.invocation.args.includes("--skip-git-repo-check"));
   assert.ok(result.invocation.args.includes("resume"));
   assert.ok(result.invocation.args.includes("codex-thread-1"));
   assert.ok(result.invocation.args.includes("follow up"));
   assert.ok(
-    result.invocation.args.indexOf("workspace-write") <
+    result.invocation.args.indexOf("--skip-git-repo-check") <
       result.invocation.args.indexOf("resume")
   );
 });
