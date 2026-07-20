@@ -267,7 +267,7 @@ Recommended production model:
 - `cortex-city-web.service` runs `npm run start`
 - `cortex-city-worker.service` runs `npm run worker`
 - `cortex-city-host-metrics.service` writes compact host diagnostics every 60 seconds
-- `cortex-city-disk-hygiene.timer` runs daily cleanup for old logs and service-user caches
+- `cortex-city-disk-hygiene.timer` runs hourly cleanup for old logs and service-user caches
 - all Cortex services set `TMPDIR`, `TMP`, and `TEMP` to `/opt/cortex-city/app/tmp`
   so review/build scratch files stay in a Cortex-owned temp directory instead
   of accumulating in shared `/tmp`
@@ -311,10 +311,11 @@ Production disk pressure is controlled in several layers:
   `HOST_METRICS_DETAIL_EVERY=1`.
 - `scripts/cortex-disk-hygiene.sh` prunes old `logs/host-metrics-*.log`,
   `logs/server-*.log`, task session logs, npm/pnpm caches, stale
-  Playwright/Puppeteer browser cache directories, and stale known-safe temp
-  prefixes from `/tmp` and `/opt/cortex-city/app/tmp`. It intentionally does
-  not delete `.cortex/repos/*/.worktrees`, so active task worktrees are outside
-  the maintenance script's scope.
+  Playwright/Puppeteer browser cache directories, orphaned `review-run-*`
+  workspaces, old Cortex-owned Codex rollouts, and stale known-safe temp prefixes
+  from `/tmp` and `/opt/cortex-city/app/tmp`. It intentionally does not delete
+  `.cortex/repos/*/.worktrees`, so active task worktrees remain outside the
+  maintenance script's scope.
 - Deploy and bootstrap create `/opt/cortex-city/app/tmp` with `0700` ownership
   for the `cortex` service user. Deploy also builds staged releases with
   `TMPDIR` pointed at the staging directory, which prevents `npm ci`/build
@@ -333,7 +334,7 @@ sudo -u cortex -H /opt/cortex-city/app/scripts/cortex-disk-hygiene.sh --apply --
 ```
 
 Deploy installs `cortex-city-disk-hygiene.timer`, which runs the same command
-daily around 03:30 with a randomized delay. Tune retention in
+hourly with up to ten minutes of randomized delay. Tune retention in
 `/etc/cortex-city/disk-hygiene.env`:
 
 ```bash
@@ -345,14 +346,18 @@ CORTEX_BROWSER_CACHE_RETENTION_DAYS=14
 CORTEX_TMP_RETENTION_DAYS=2
 CORTEX_TMP_DIR=/opt/cortex-city/app/tmp
 CORTEX_TMP_SCAN_DIRS=/tmp:/opt/cortex-city/app/tmp
+CORTEX_REVIEW_WORKSPACE_ROOT=/opt/cortex-city/app/tmp/reviews
+CORTEX_REVIEW_WORKSPACE_RETENTION_HOURS=6
+CORTEX_CODEX_SESSIONS_DIR=/home/cortex/.codex/sessions
+CORTEX_CODEX_SESSION_RETENTION_DAYS=30
 CORTEX_PRUNE_OWNED_TMP_ALL=1
 CORTEX_TMP_USE_LSOF=1
 CORTEX_NPM_CACHE_ACTION=clean   # clean, verify, or skip
 CORTEX_PNPM_STORE_ACTION=prune  # prune or skip
 ```
 
-If you do not use the included timer, schedule the apply command from cron or
-another host scheduler during an off-hours window and run the dry run first.
+If you do not use the included timer, schedule the apply command hourly with
+cron or another host scheduler and run the dry run first.
 The `/tmp` cleaner only considers entries owned by the service user and matching
 known Cortex/review prefixes such as `cloud_control_plane*`, `ccp-*`,
 `agentic-chat-*`, `aws-cdk-lib-review*`, `immutable_inputs*`,
@@ -361,6 +366,23 @@ contents and, when `lsof` is available, entries with open files. Operators
 should still watch shared `/tmp` after major runtime/tooling changes; add new
 safe prefixes through the script only after confirming they are disposable
 scratch data.
+
+The short-retention workspace sweep only considers direct children named
+`review-run-*` under `CORTEX_REVIEW_WORKSPACE_ROOT`, owned by the service user,
+with no recent changes or open files. One failed deletion is reported but does
+not stop later cleanup phases; the command exits non-zero after all phases if
+any failures occurred.
+
+Codex rollout pruning reads `.cortex/tasks.json` and `.cortex/reviews.json` and
+protects session IDs used by non-terminal or running records. A rollout must
+also be older than the retention period and have no open file handles. Rollouts
+referenced only by terminal records are eligible. Once a record has been
+garbage-collected, ownership is inferred conservatively from the rollout's
+`session_meta.cwd`: it must identify the app, a managed task repo, or a
+`review-run-*` workspace. Sessions with missing or unrelated metadata are left
+alone because a shared service-user Codex home cannot otherwise prove that they
+belong to Cortex City. Applying session deletion is disabled when `lsof` is not
+available.
 
 For first-time host setup, run:
 

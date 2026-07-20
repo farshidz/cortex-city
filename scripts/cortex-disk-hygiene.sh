@@ -5,9 +5,10 @@ usage() {
   cat <<'EOF'
 Usage: scripts/cortex-disk-hygiene.sh [--apply] [options]
 
-Prune Cortex City production disk usage from old app/metrics logs and common
-package/browser caches for the service user. The script is dry-run by default;
-pass --apply from cron/systemd once the dry run looks right.
+Prune Cortex City production disk usage from old app/metrics logs, runtime
+sessions, managed review workspaces, and common caches for the service user.
+The script is dry-run by default; pass --apply from cron/systemd once the dry
+run looks right.
 
 This script intentionally does not remove managed repos or task worktrees under
 .cortex/repos/*/.worktrees. Use the app's worktree cleanup path for that.
@@ -24,6 +25,10 @@ Options:
   --cache-retention-days N        Retain stale cache children for N days. Default: 14.
   --tmp-dir DIR                   Cortex-owned temp dir. Default: CORTEX_TMP_DIR or APP_DIR/tmp.
   --tmp-retention-days N          Retain temp candidates for N days. Default: 2.
+  --review-workspace-retention-hours N
+                                  Retain orphan review-run-* workspaces for N hours. Default: 6.
+  --codex-session-retention-days N
+                                  Retain inactive Cortex Codex sessions for N days. Default: 30.
   -h, --help                      Show this help.
 
 Environment:
@@ -36,6 +41,8 @@ Environment:
                                   Default: /tmp plus CORTEX_TMP_DIR.
   CORTEX_PRUNE_OWNED_TMP_ALL      Also prune any stale top-level child in CORTEX_TMP_DIR. Default: 1.
   CORTEX_TMP_USE_LSOF             Skip candidates with open files when lsof exists. Default: 1.
+  CORTEX_REVIEW_WORKSPACE_ROOT    Root containing review-run-* workspaces. Default: CORTEX_TMP_DIR/reviews.
+  CORTEX_CODEX_SESSIONS_DIR       Codex rollout root. Default: HOME/.codex/sessions.
   NPM_CONFIG_CACHE                npm cache directory. Default: HOME/.npm.
   PNPM_STORE_PATH                 pnpm store path for fallback age pruning.
 EOF
@@ -67,6 +74,8 @@ TASK_LOG_RETENTION_DAYS="${CORTEX_TASK_LOG_RETENTION_DAYS:-14}"
 CACHE_RETENTION_DAYS="${CORTEX_CACHE_RETENTION_DAYS:-14}"
 BROWSER_CACHE_RETENTION_DAYS="${CORTEX_BROWSER_CACHE_RETENTION_DAYS:-$CACHE_RETENTION_DAYS}"
 TMP_RETENTION_DAYS="${CORTEX_TMP_RETENTION_DAYS:-2}"
+REVIEW_WORKSPACE_RETENTION_HOURS="${CORTEX_REVIEW_WORKSPACE_RETENTION_HOURS:-6}"
+CODEX_SESSION_RETENTION_DAYS="${CORTEX_CODEX_SESSION_RETENTION_DAYS:-30}"
 CORTEX_TMP_SCAN_DIRS="${CORTEX_TMP_SCAN_DIRS:-}"
 CORTEX_PRUNE_OWNED_TMP_ALL="${CORTEX_PRUNE_OWNED_TMP_ALL:-1}"
 CORTEX_TMP_USE_LSOF="${CORTEX_TMP_USE_LSOF:-1}"
@@ -119,6 +128,14 @@ while [[ $# -gt 0 ]]; do
       TMP_RETENTION_DAYS="${2:-}"
       shift
       ;;
+    --review-workspace-retention-hours)
+      REVIEW_WORKSPACE_RETENTION_HOURS="${2:-}"
+      shift
+      ;;
+    --codex-session-retention-days)
+      CODEX_SESSION_RETENTION_DAYS="${2:-}"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -155,6 +172,8 @@ validate_positive_int CORTEX_TASK_LOG_RETENTION_DAYS "$TASK_LOG_RETENTION_DAYS"
 validate_positive_int CORTEX_CACHE_RETENTION_DAYS "$CACHE_RETENTION_DAYS"
 validate_positive_int CORTEX_BROWSER_CACHE_RETENTION_DAYS "$BROWSER_CACHE_RETENTION_DAYS"
 validate_positive_int CORTEX_TMP_RETENTION_DAYS "$TMP_RETENTION_DAYS"
+validate_positive_int CORTEX_REVIEW_WORKSPACE_RETENTION_HOURS "$REVIEW_WORKSPACE_RETENTION_HOURS"
+validate_positive_int CORTEX_CODEX_SESSION_RETENTION_DAYS "$CODEX_SESSION_RETENTION_DAYS"
 
 case "$NPM_CACHE_ACTION" in
   clean|verify|skip) ;;
@@ -204,15 +223,31 @@ remove_path() {
   local target="$2"
 
   if [[ "$APPLY" == "1" ]]; then
+    local removed=0
     if [[ "$kind" == "dir" ]]; then
-      rm -rf -- "$target"
+      if rm -rf -- "$target"; then
+        removed=1
+      fi
     else
-      rm -f -- "$target"
+      if rm -f -- "$target"; then
+        removed=1
+      fi
     fi
-    printf 'deleted %s\n' "$target"
+    if [[ "$removed" == "1" ]]; then
+      printf 'deleted %s\n' "$target"
+    else
+      record_failure "failed to delete $target"
+    fi
   else
     printf 'would delete %s\n' "$target"
   fi
+}
+
+FAILURE_COUNT=0
+
+record_failure() {
+  FAILURE_COUNT=$((FAILURE_COUNT + 1))
+  warn "$*"
 }
 
 run_or_report() {
@@ -222,7 +257,7 @@ run_or_report() {
   if [[ "$APPLY" == "1" ]]; then
     log "$label"
     if ! "$@"; then
-      warn "$label failed"
+      record_failure "$label failed"
     fi
     return
   fi
@@ -408,6 +443,19 @@ prune_tmp_candidates_in_dir() {
   while IFS= read -r -d '' target; do
     local name
     name="$(basename "$target")"
+    local review_root="${CORTEX_REVIEW_WORKSPACE_ROOT:-$TMP_DIR/reviews}"
+
+    # The dedicated review root has its own marker/PID-aware orphan sweep.
+    if [[ "${target%/}" == "${review_root%/}" ]]; then
+      printf 'skipping managed review workspace root %s\n' "$target"
+      continue
+    fi
+
+    # Managed review workspaces use a shorter retention and stricter lsof
+    # requirement in prune_review_workspaces.
+    if [[ "$name" == review-run-* ]]; then
+      continue
+    fi
 
     if [[ "$known_prefix_only" == "1" ]] && ! matches_known_tmp_prefix "$name"; then
       continue
@@ -467,6 +515,108 @@ prune_temp_roots() {
       prune_tmp_candidates_in_dir "$TMP_DIR" 1 "known-safe temp prefixes"
     fi
     prune_tmp_candidates_in_dir "$TMP_DIR" 0 "Cortex-owned temp children"
+  fi
+}
+
+has_recent_changes_minutes() {
+  local target="$1"
+  local minutes="$2"
+  local recent
+
+  recent="$(
+    find "$target" \
+      -mindepth 0 \
+      -mmin "-$minutes" \
+      -print \
+      -quit 2>/dev/null || true
+  )"
+  [[ -n "$recent" ]]
+}
+
+prune_review_workspaces() {
+  local root="${CORTEX_REVIEW_WORKSPACE_ROOT:-$TMP_DIR/reviews}"
+  local retention_minutes=$((REVIEW_WORKSPACE_RETENTION_HOURS * 60))
+  local found=0
+
+  refuse_dangerous_dir review-workspace "$root"
+  if [[ ! -d "$root" ]]; then
+    log "Skipping review workspaces; directory does not exist: $root"
+    return
+  fi
+  if [[ "$CORTEX_TMP_USE_LSOF" != "1" ]] || ! command -v lsof >/dev/null 2>&1; then
+    warn "Skipping review workspaces; lsof safety is unavailable"
+    return
+  fi
+
+  log "Pruning orphan review-run-* workspaces in $root older than ${REVIEW_WORKSPACE_RETENTION_HOURS} hour(s)"
+  while IFS= read -r -d '' target; do
+    found=1
+    local marker="$target/.cortex-city-review-workspace.json"
+    if [[ ! -f "$marker" ]] ||
+      ! grep -Eq '"owner"[[:space:]]*:[[:space:]]*"cortex-city"' "$marker" ||
+      ! grep -Eq '"purpose"[[:space:]]*:[[:space:]]*"review-runtime"' "$marker"; then
+      printf 'skipping unmarked review workspace %s\n' "$target"
+      continue
+    fi
+    local runtime_pid
+    runtime_pid="$(
+      sed -nE 's/.*"runtime_pid"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$marker" |
+        head -n 1
+    )"
+    if [[ -n "$runtime_pid" ]] && kill -0 "$runtime_pid" 2>/dev/null; then
+      printf 'skipping live review workspace %s pid=%s\n' "$target" "$runtime_pid"
+      continue
+    fi
+    if has_recent_changes_minutes "$target" "$retention_minutes"; then
+      printf 'skipping recent review workspace %s\n' "$target"
+      continue
+    fi
+    if has_open_files "$target"; then
+      printf 'skipping open review workspace %s\n' "$target"
+      continue
+    fi
+    remove_path dir "$target"
+  done < <(
+    find "$root" \
+      -mindepth 1 \
+      -maxdepth 1 \
+      -type d \
+      -name 'review-run-*' \
+      -user "$CURRENT_UID" \
+      -mmin "+$((retention_minutes - 1))" \
+      -print0
+  )
+
+  if [[ "$found" == "0" ]]; then
+    printf 'nothing matched\n'
+  fi
+}
+
+prune_codex_sessions() {
+  local helper="$APP_DIR/scripts/cortex-runtime-session-hygiene.mjs"
+  local review_root="${CORTEX_REVIEW_WORKSPACE_ROOT:-$TMP_DIR/reviews}"
+  local mode_arg="--dry-run"
+  if [[ "$APPLY" == "1" ]]; then
+    mode_arg="--apply"
+  fi
+
+  if [[ ! -f "$helper" ]]; then
+    record_failure "Codex session cleanup helper does not exist: $helper"
+    return
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    record_failure "node is unavailable; cannot prune Codex sessions"
+    return
+  fi
+
+  log "Pruning inactive Cortex Codex sessions older than ${CODEX_SESSION_RETENTION_DAYS} day(s)"
+  if ! node "$helper" \
+    "$mode_arg" \
+    --app-dir "$APP_DIR" \
+    --home "$HOME_DIR" \
+    --retention-days "$CODEX_SESSION_RETENTION_DAYS" \
+    --review-workspace-root "$review_root"; then
+    record_failure "Codex session cleanup failed"
   fi
 }
 
@@ -542,6 +692,8 @@ printf 'app_dir=%s\n' "$APP_DIR"
 printf 'log_dir=%s\n' "$LOG_DIR"
 printf 'home_dir=%s\n' "$HOME_DIR"
 printf 'tmp_dir=%s\n' "$TMP_DIR"
+printf 'review_workspace_root=%s\n' "${CORTEX_REVIEW_WORKSPACE_ROOT:-$TMP_DIR/reviews}"
+printf 'codex_sessions_dir=%s\n' "${CORTEX_CODEX_SESSIONS_DIR:-$HOME_DIR/.codex/sessions}"
 printf 'worktrees_scope=skipped:%s\n' "$APP_DIR/.cortex/repos/*/.worktrees"
 
 log "Size summary before cleanup"
@@ -553,6 +705,7 @@ summarize_path "$HOME_DIR/.cache/ms-playwright"
 summarize_path "$HOME_DIR/.cache/puppeteer"
 summarize_path /tmp
 summarize_path "$TMP_DIR"
+summarize_path "${CORTEX_CODEX_SESSIONS_DIR:-$HOME_DIR/.codex/sessions}"
 
 prune_old_log_files 'host-metrics-*.log' "$HOST_METRICS_RETENTION_DAYS" "host metrics logs"
 prune_old_log_files 'server-*.log' "$APP_LOG_RETENTION_DAYS" "server logs"
@@ -565,6 +718,8 @@ prune_old_cache_children "$HOME_DIR/.cache/ms-playwright" "$BROWSER_CACHE_RETENT
 prune_old_cache_children "$HOME_DIR/.cache/puppeteer" "$BROWSER_CACHE_RETENTION_DAYS" "Puppeteer browser cache"
 prune_empty_dirs "$HOME_DIR/.cache/ms-playwright" "Playwright browser cache" "$BROWSER_CACHE_RETENTION_DAYS"
 prune_empty_dirs "$HOME_DIR/.cache/puppeteer" "Puppeteer browser cache" "$BROWSER_CACHE_RETENTION_DAYS"
+prune_codex_sessions
+prune_review_workspaces
 prune_temp_roots
 
 log "Size summary after cleanup"
@@ -576,5 +731,9 @@ summarize_path "$HOME_DIR/.cache/ms-playwright"
 summarize_path "$HOME_DIR/.cache/puppeteer"
 summarize_path /tmp
 summarize_path "$TMP_DIR"
+summarize_path "${CORTEX_CODEX_SESSIONS_DIR:-$HOME_DIR/.codex/sessions}"
 
-log "Cortex disk hygiene complete"
+log "Cortex disk hygiene complete failures=$FAILURE_COUNT"
+if [[ "$FAILURE_COUNT" -gt 0 ]]; then
+  exit 1
+fi
