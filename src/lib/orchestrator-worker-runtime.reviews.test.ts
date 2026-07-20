@@ -29,6 +29,7 @@ interface HarnessOptions {
   tasks?: Task[];
   prHeadShas?: Record<string, string>;
   getReviewRequestedPRs?: () => Promise<ReviewRequest[]>;
+  reviewWorkspaceCleanupResults?: Record<string, boolean>;
 }
 
 interface Harness {
@@ -37,6 +38,7 @@ interface Harness {
   spawnCalls: ReviewRequest[];
   retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }>;
   deletedPrUrls: string[];
+  removedReviewWorkspaceUrls: string[];
   activeReviewPids: Map<string, number>;
   activeTaskPids: Map<string, number>;
   builderCalls: Array<{ task: Task; mode: string }>;
@@ -106,6 +108,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
   const spawnCalls: ReviewRequest[] = [];
   const retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }> = [];
   const deletedPrUrls: string[] = [];
+  const removedReviewWorkspaceUrls: string[] = [];
   const tasks = [...(options.tasks || [])];
   const builderCalls: Array<{ task: Task; mode: string }> = [];
   const stoppedLegacyReviewerPids: number[] = [];
@@ -141,6 +144,10 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     readReviewSummaryMap: () => ({ ...reviews }),
     readTasks: () => tasks,
     removeWorktree: async () => {},
+    removeFinalReviewWorkspace: async (prUrl) => {
+      removedReviewWorkspaceUrls.push(prUrl);
+      return options.reviewWorkspaceCleanupResults?.[prUrl] ?? true;
+    },
     spawnAgentSession: async (task, mode) => {
       builderCalls.push({ task, mode });
       return { pid: spawnPid(), child: {} as never };
@@ -233,6 +240,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     spawnCalls,
     retroCalls,
     deletedPrUrls,
+    removedReviewWorkspaceUrls,
     activeReviewPids: new Map(),
     activeTaskPids: new Map(),
     builderCalls,
@@ -1147,6 +1155,7 @@ test("pollOnce stamps final_at when a PR drops out of the live list", async () =
   // Summary is preserved during the 24h grace period.
   assert.equal(stored.summary, "old summary");
   assert.equal(h.deletedPrUrls.length, 0);
+  assert.deepEqual(h.removedReviewWorkspaceUrls, [pr.pr_url]);
 });
 
 test("pollOnce archives an open label-only review when the label is removed", async () => {
@@ -1169,6 +1178,7 @@ test("pollOnce archives an open label-only review when the label is removed", as
   assert.equal(stored.final_state_lookup_started_at, undefined);
   assert.equal(stored.final_state_lookup_error, undefined);
   assert.equal(stored.summary, "label-selected summary");
+  assert.deepEqual(h.removedReviewWorkspaceUrls, [pr.pr_url]);
 });
 
 test("final-state lookup does not overwrite a review claimed while lookup is in flight", async () => {
@@ -1275,6 +1285,7 @@ test("pollOnce marks merged reviews pending and spawns one retro", async () => {
   assert.equal(h.retroCalls.length, 1);
   assert.equal(h.retroCalls[0].review.pr_url, pr.pr_url);
   assert.equal(h.retroCalls[0].learningsBefore, "existing lessons");
+  assert.deepEqual(h.removedReviewWorkspaceUrls, []);
 });
 
 test("pollOnce preserves terminal retro status when refinalizing merged reviews", async () => {
@@ -1322,6 +1333,10 @@ test("pollOnce preserves terminal retro status when refinalizing merged reviews"
   assert.equal(h.reviews[errored.pr_url].retro_status, "error");
   assert.equal(h.reviews[errored.pr_url].retro_error, "Retro failed.");
   assert.equal(h.retroCalls.length, 0);
+  assert.deepEqual(h.removedReviewWorkspaceUrls.sort(), [
+    done.pr_url,
+    errored.pr_url,
+  ]);
 });
 
 test("pollOnce stamps closed reviews without spawning retros", async () => {
@@ -1343,6 +1358,7 @@ test("pollOnce stamps closed reviews without spawning retros", async () => {
   assert.equal(stored.retro_status, undefined);
   assert.equal(stored.retro_run_pid, undefined);
   assert.equal(h.retroCalls.length, 0);
+  assert.deepEqual(h.removedReviewWorkspaceUrls, [pr.pr_url]);
 });
 
 test("pollOnce leaves unknown final review state retryable", async () => {
@@ -1774,6 +1790,28 @@ test("pollOnce deletes review entries whose final_at is older than the prune age
 
   assert.deepEqual(h.deletedPrUrls, [pr.pr_url]);
   assert.equal(h.reviews[pr.pr_url], undefined);
+});
+
+test("review GC retains terminal records until workspace cleanup succeeds", async () => {
+  const pr = makeRequest();
+  const aged = new Date(Date.now() - (PRUNE_AGE_MS + 60_000)).toISOString();
+  const cached = makeSummary(pr, {
+    summary: "old",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    final_at: aged,
+    final_state: "closed",
+  });
+  const h = makeHarness({
+    openReviewRequests: [],
+    reviews: { [pr.pr_url]: cached },
+    reviewWorkspaceCleanupResults: { [pr.pr_url]: false },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.removedReviewWorkspaceUrls, [pr.pr_url]);
+  assert.deepEqual(h.deletedPrUrls, []);
+  assert.ok(h.reviews[pr.pr_url]);
 });
 
 test("review GC does not delete a record claimed after its snapshot", async () => {

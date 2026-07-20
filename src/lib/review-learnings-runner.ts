@@ -108,7 +108,8 @@ export async function spawnReviewRetro(
     prompt,
     opts,
     undefined,
-    runTimeoutMs
+    runTimeoutMs,
+    review.pr_url
   );
 
   await patchReviewSummary(review.pr_url, {

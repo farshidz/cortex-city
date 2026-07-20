@@ -146,6 +146,9 @@ const payload = {
     GLOBAL_ONLY: process.env.GLOBAL_ONLY,
     AGENT_ONLY: process.env.AGENT_ONLY,
     SHARED: process.env.SHARED,
+    TMPDIR: process.env.TMPDIR,
+    TMP: process.env.TMP,
+    TEMP: process.env.TEMP,
   },
 };
 

@@ -32,6 +32,7 @@ import {
 import { readReviewLearnings } from "./review-learnings-store";
 import { spawnReviewRetro } from "./review-learnings-runner";
 import { resolveReviewOpts, spawnReviewSummary } from "./review-runner";
+import { removeFinalReviewWorkspace } from "./review-workspace";
 import { unlinkTask as unlinkIssueTask } from "./issue-store";
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
 import { assertSufficientDiskSpace } from "./disk-guard";
@@ -62,6 +63,21 @@ export function shouldResetStaleFinalCleanup(task: Task, hasActivePid: boolean):
       task.final_cleanup_state === "running" &&
       (!task.current_run_pid || !task.worktree_path) &&
       !hasActivePid
+  );
+}
+
+export function shouldCleanupFinalReviewWorkspace(
+  review: ReviewSummary,
+  learningEnabled: boolean,
+  hasActivePid: boolean
+): boolean {
+  return Boolean(
+    review.final_at &&
+      !hasActivePid &&
+      review.current_run_pid == null &&
+      review.current_run_id == null &&
+      review.retro_run_pid == null &&
+      (!learningEnabled || review.retro_status !== "pending")
   );
 }
 
@@ -127,6 +143,7 @@ export interface WorkerRuntimeDeps {
   readReviewLearnings: typeof readReviewLearnings;
   readTasks: typeof readTasks;
   removeWorktree: typeof removeWorktree;
+  removeFinalReviewWorkspace: typeof removeFinalReviewWorkspace;
   spawnReviewRetro: typeof spawnReviewRetro;
   spawnAgentSession: typeof spawnAgentSession;
   spawnReviewSummary: typeof spawnReviewSummary;
@@ -162,6 +179,7 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   readReviewSummaryMap,
   readTasks,
   removeWorktree,
+  removeFinalReviewWorkspace,
   spawnAgentSession,
   spawnReviewRetro,
   spawnReviewSummary,
@@ -1407,10 +1425,35 @@ async function runReviewPhases(
     }
   }
 
+  deps.logger.log("[worker] Poll phase: cleanup final review workspaces");
+  const blockedWorkspaceCleanup = new Set<string>();
+  const reviewsForWorkspaceCleanup: ReviewSummary[] = Object.values(
+    deps.readReviewSummaryMap()
+  );
+  for (const review of reviewsForWorkspaceCleanup) {
+    if (
+      !shouldCleanupFinalReviewWorkspace(
+        review,
+        learningEnabled,
+        activeReviewPids.has(review.pr_url)
+      )
+    ) {
+      continue;
+    }
+    const removed = await deps.removeFinalReviewWorkspace(review.pr_url);
+    if (!removed) {
+      blockedWorkspaceCleanup.add(review.pr_url);
+      deps.logger.error(
+        `[worker] Could not safely remove final review workspace for ${review.pr_url}`
+      );
+    }
+  }
+
   deps.logger.log("[worker] Poll phase: prune old reviews");
   const now = Date.now();
   const reviewsForGC: ReviewSummary[] = Object.values(deps.readReviewSummaryMap());
   for (const review of reviewsForGC) {
+    if (blockedWorkspaceCleanup.has(review.pr_url)) continue;
     if (activeReviewPids.has(review.pr_url)) continue;
     if (learningEnabled && review.retro_status === "pending") continue;
     if (review.retro_run_pid != null) {
