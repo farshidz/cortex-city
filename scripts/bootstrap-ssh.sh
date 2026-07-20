@@ -185,7 +185,7 @@ upsert_env_file_var() {
 
 install_packages_apt() {
   \$SUDO apt-get update
-  \$SUDO apt-get install -y ca-certificates curl git rsync build-essential
+  \$SUDO apt-get install -y ca-certificates curl git rsync build-essential lsof
   curl -fsSL https://deb.nodesource.com/setup_\${NODE_MAJOR}.x | \$SUDO bash -
   \$SUDO apt-get install -y nodejs
   if [[ \$INSTALL_GH == 1 ]]; then
@@ -194,7 +194,7 @@ install_packages_apt() {
 }
 
 install_packages_dnf() {
-  \$SUDO dnf install -y ca-certificates curl git rsync gcc-c++ make
+  \$SUDO dnf install -y ca-certificates curl git rsync gcc-c++ make lsof
   curl -fsSL https://rpm.nodesource.com/setup_\${NODE_MAJOR}.x | \$SUDO bash -
   \$SUDO dnf install -y nodejs
   if [[ \$INSTALL_GH == 1 ]]; then
