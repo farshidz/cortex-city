@@ -174,6 +174,42 @@ test("spawnReviewRetro leaves learnings untouched and stamps error on failure", 
   assert.equal(result.persisted.retro_run_pid, undefined);
 });
 
+test("spawnReviewRetro persists a low-disk preflight failure", () => {
+  const workspace = setupRetroWorkspace("review-retro-disk-preflight-");
+  const review = sampleReview();
+  const learningsBefore = "# Review learnings\n\n- Keep this.\n";
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { spawnReviewRetro } from ${JSON.stringify(RETRO_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const review = ${JSON.stringify(review)};
+      await upsertReviewSummary(review);
+      let thrown;
+      try {
+        await spawnReviewRetro(review, ${JSON.stringify(learningsBefore)});
+      } catch (error) {
+        thrown = error instanceof Error ? error.message : String(error);
+      }
+      console.log(JSON.stringify({
+        thrown,
+        persisted: readReviewSummaryMap()[review.pr_url],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      CORTEX_REVIEW_MIN_FREE_DISK_BYTES: String(Number.MAX_SAFE_INTEGER),
+    }
+  );
+
+  assert.match(result.thrown, /Low disk space before launching claude review runtime/);
+  assert.equal(result.persisted.retro_status, "error");
+  assert.equal(result.persisted.retro_error, result.thrown);
+  assert.equal(result.persisted.retro_run_pid, undefined);
+});
+
 test("spawnReviewRetro does not overwrite learnings changed during the run", () => {
   const workspace = setupRetroWorkspace("review-retro-manual-edit-");
   const scenarioFile = path.join(workspace, "scenario.json");

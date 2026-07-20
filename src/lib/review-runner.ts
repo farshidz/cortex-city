@@ -10,6 +10,12 @@ import {
   buildReviewPermissionArgs,
 } from "./runtime-args";
 import {
+  assertSufficientReviewDiskSpace,
+  LowDiskSpaceError,
+  monitorReviewDiskSpace,
+  type ReviewDiskGuardOptions,
+} from "./disk-guard";
+import {
   createReviewWorkspace,
   markReviewWorkspaceActive,
   releaseReviewWorkspace,
@@ -164,6 +170,7 @@ export interface RunOutput {
   exit_code: number | null;
   stderr: string;
   error?: string;
+  termination_reason?: "timeout" | "low_disk";
 }
 
 export function resolveReviewOpts(
@@ -596,14 +603,38 @@ export interface SpawnResult {
   done: Promise<RunOutput>;
 }
 
+function killReviewRuntimeProcess(
+  child: ChildProcess,
+  signal: NodeJS.Signals
+): void {
+  try {
+    if (process.platform !== "win32" && child.pid) {
+      process.kill(-child.pid, signal);
+    } else {
+      child.kill(signal);
+    }
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {}
+  }
+}
+
 export function spawnRuntime(
   runtime: AgentRuntime,
   prompt: string,
   opts: SpawnOpts,
   resumeSessionId?: string,
   runTimeoutMs = DEFAULT_TASK_RUN_TIMEOUT_MS,
+  diskGuardOptions: ReviewDiskGuardOptions = {},
   reviewKey?: string
 ): SpawnResult {
+  const diskGuardContext = `${runtime} review runtime`;
+  assertSufficientReviewDiskSpace(
+    `launching ${diskGuardContext}`,
+    diskGuardOptions
+  );
+
   const command = runtime === "codex" ? "codex" : "claude";
   const args =
     runtime === "codex"
@@ -612,8 +643,17 @@ export function spawnRuntime(
 
   const startedAt = Date.now();
   const workspace = createReviewWorkspace(runtime, reviewKey);
+  const workspaceDiskGuardOptions = diskGuardOptions.targetPath
+    ? diskGuardOptions
+    : { ...diskGuardOptions, targetPath: workspace.path };
   let child: ChildProcess | undefined;
   try {
+    if (!diskGuardOptions.targetPath) {
+      assertSufficientReviewDiskSpace(
+        `launching ${diskGuardContext} workspace`,
+        workspaceDiskGuardOptions
+      );
+    }
     child = spawn(command, args, {
       cwd: workspace.path,
       env: {
@@ -623,12 +663,13 @@ export function spawnRuntime(
         TEMP: workspace.path,
       },
       stdio: ["pipe", "pipe", "pipe"],
+      // A dedicated process group lets the guard stop commands launched by the
+      // reviewer as well as the top-level CLI process.
+      detached: process.platform !== "win32",
     });
     markReviewWorkspaceActive(workspace, child.pid);
   } catch (error) {
-    try {
-      child?.kill("SIGTERM");
-    } catch {}
+    if (child) killReviewRuntimeProcess(child, "SIGTERM");
     releaseReviewWorkspaceBeforeStart(workspace);
     throw error;
   }
@@ -644,24 +685,64 @@ export function spawnRuntime(
   const codexResult: CodexEvent[] = [];
 
   const runtimeDone = new Promise<RunOutput>((resolve) => {
+    let settled = false;
     let timedOut = false;
+    let lowDiskFailure: LowDiskSpaceError | undefined;
     let timeout: NodeJS.Timeout | undefined;
+    let forceKillTimeout: NodeJS.Timeout | undefined;
+    let stopDiskMonitor = () => {};
+
+    const finish = (output: RunOutput) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (forceKillTimeout) clearTimeout(forceKillTimeout);
+      stopDiskMonitor();
+      resolve(output);
+    };
+
+    const terminate = () => {
+      killReviewRuntimeProcess(child, "SIGTERM");
+      forceKillTimeout = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          killReviewRuntimeProcess(child, "SIGKILL");
+        }
+      }, 5000);
+      forceKillTimeout.unref?.();
+    };
+
     if (typeof runTimeoutMs === "number" && runTimeoutMs > 0) {
       timeout = setTimeout(() => {
         timedOut = true;
-        try {
-          child.kill("SIGTERM");
-        } catch {}
-        setTimeout(() => {
-          if (child.exitCode === null && child.signalCode === null) {
-            try {
-              child.kill("SIGKILL");
-            } catch {}
-          }
-        }, 5000).unref?.();
+        terminate();
       }, runTimeoutMs);
       timeout.unref?.();
     }
+
+    const onLowDisk = (error: LowDiskSpaceError) => {
+      if (lowDiskFailure) return;
+      lowDiskFailure = error;
+      terminate();
+    };
+    const stopDiskMonitors = [
+      monitorReviewDiskSpace(
+        `the ${diskGuardContext}`,
+        onLowDisk,
+        diskGuardOptions
+      ),
+    ];
+    if (!diskGuardOptions.targetPath) {
+      stopDiskMonitors.push(
+        monitorReviewDiskSpace(
+          `the ${diskGuardContext} workspace`,
+          onLowDisk,
+          workspaceDiskGuardOptions
+        )
+      );
+    }
+    stopDiskMonitor = () => {
+      for (const stop of stopDiskMonitors) stop();
+    };
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
@@ -676,17 +757,16 @@ export function spawnRuntime(
       stderr += chunk.toString();
     });
     child.on("error", (err) => {
-      if (timeout) clearTimeout(timeout);
-      resolve({
+      finish({
         result_text: "",
         exit_code: null,
         stderr: stderr + (err.message || String(err)),
-        error: err.message || String(err),
+        error: lowDiskFailure?.message || err.message || String(err),
+        termination_reason: lowDiskFailure ? "low_disk" : undefined,
         duration_ms: Date.now() - startedAt,
       });
     });
     child.on("close", (code) => {
-      if (timeout) clearTimeout(timeout);
       const duration = Date.now() - startedAt;
       if (runtime === "codex") {
         codexCarry = flushCodexEvents(codexCarry, "\n", (event) => {
@@ -712,17 +792,22 @@ export function spawnRuntime(
             };
           }
         }
-        resolve({
+        finish({
           session_id: sessionId,
           result_text: resultText,
           usage,
           duration_ms: duration,
           exit_code: code,
           stderr,
-          error: timedOut
+          error: lowDiskFailure?.message || (timedOut
             ? `Run timed out after ${runTimeoutMs}ms`
             : code !== 0
               ? stderr.trim() || `codex exited with code ${code}`
+              : undefined),
+          termination_reason: lowDiskFailure
+            ? "low_disk"
+            : timedOut
+              ? "timeout"
               : undefined,
         });
         return;
@@ -731,7 +816,7 @@ export function spawnRuntime(
       // Claude — parse JSON from stdout
       try {
         const parsed = JSON.parse(stdout);
-        resolve({
+        finish({
           session_id: typeof parsed.session_id === "string" ? parsed.session_id : undefined,
           result_text: typeof parsed.result === "string" ? parsed.result : "",
           usage: parsed.usage
@@ -744,24 +829,34 @@ export function spawnRuntime(
             typeof parsed.duration_ms === "number" ? parsed.duration_ms : duration,
           exit_code: code,
           stderr,
-          error: timedOut
+          error: lowDiskFailure?.message || (timedOut
             ? `Run timed out after ${runTimeoutMs}ms`
             : code !== 0 || parsed.is_error
               ? stderr.trim() || `claude exited with code ${code}`
+              : undefined),
+          termination_reason: lowDiskFailure
+            ? "low_disk"
+            : timedOut
+              ? "timeout"
               : undefined,
         });
       } catch (err) {
-        const fallbackError = timedOut
+        const fallbackError = lowDiskFailure?.message || (timedOut
           ? `Run timed out after ${runTimeoutMs}ms`
           : code !== 0
             ? stderr.trim() || `claude exited with code ${code}`
-            : `Failed to parse claude output: ${(err as Error).message}`;
-        resolve({
+            : `Failed to parse claude output: ${(err as Error).message}`);
+        finish({
           result_text: stdout,
           exit_code: code,
           stderr,
           duration_ms: duration,
           error: fallbackError,
+          termination_reason: lowDiskFailure
+            ? "low_disk"
+            : timedOut
+              ? "timeout"
+              : undefined,
         });
       }
     });
@@ -840,6 +935,7 @@ export async function spawnReviewSummary(
       opts,
       resumeSessionId,
       runTimeoutMs,
+      {},
       target.pr_url
     );
     assertReviewRunLockHealthy(runLock);
@@ -893,10 +989,37 @@ export async function spawnReviewSummary(
       throw new Error(`Review target changed before launching ${target.pr_url}`);
     }
   } catch (error) {
-    try {
-      spawned?.child.kill("SIGTERM");
-    } catch {}
+    if (spawned) killReviewRuntimeProcess(spawned.child, "SIGTERM");
     await releaseReviewRunLock(runLock);
+    if (error instanceof LowDiskSpaceError) {
+      const failedAt = new Date().toISOString();
+      await mutateReviewSummary(target.pr_url, (current) => {
+        if (
+          current &&
+          (current.head_sha !== target.head_sha ||
+            (current.current_run_pid && isProcessRunning(current.current_run_pid)))
+        ) {
+          return undefined;
+        }
+        return {
+          ...baseEntry,
+          my_last_review_sha: current
+            ? current.my_last_review_sha
+            : target.my_last_review_sha,
+          my_approval_sha: current
+            ? current.my_approval_sha
+            : target.my_approval_sha,
+          my_changes_requested_sha: current
+            ? current.my_changes_requested_sha
+            : target.my_changes_requested_sha,
+          error: error.message,
+          error_at: failedAt,
+          current_run_pid: undefined,
+          current_run_id: undefined,
+          ...retroFields(current || cachedBefore),
+        };
+      });
+    }
     throw error;
   }
   const { pid, child, done } = spawned;
@@ -904,7 +1027,11 @@ export async function spawnReviewSummary(
   const completion = done.then(async (output) => {
     let finalOutput = output;
     let resumedSessionFailed = false;
-    if (output.error && resumeSessionId) {
+    if (
+      output.error &&
+      resumeSessionId &&
+      output.termination_reason !== "low_disk"
+    ) {
       resumedSessionFailed = true;
       const fallbackPrompt = [
         "The previous review session could not be resumed.",
@@ -915,20 +1042,35 @@ export async function spawnReviewSummary(
         "",
         prompt,
       ].join("\n");
-      const fallback = spawnRuntime(
-        opts.runtime,
-        fallbackPrompt,
-        opts,
-        undefined,
-        runTimeoutMs,
-        target.pr_url
-      );
-      assertReviewRunLockHealthy(runLock);
-      await patchReviewSummary(target.pr_url, {
-        current_run_pid: fallback.pid,
-        current_run_id: runLock.data.token,
-      });
-      finalOutput = await fallback.done;
+      let fallback: SpawnResult | undefined;
+      try {
+        fallback = spawnRuntime(
+          opts.runtime,
+          fallbackPrompt,
+          opts,
+          undefined,
+          runTimeoutMs,
+          {},
+          target.pr_url
+        );
+      } catch (error) {
+        if (!(error instanceof LowDiskSpaceError)) throw error;
+        finalOutput = {
+          result_text: "",
+          exit_code: null,
+          stderr: "",
+          error: error.message,
+          termination_reason: "low_disk",
+        };
+      }
+      if (fallback) {
+        assertReviewRunLockHealthy(runLock);
+        await patchReviewSummary(target.pr_url, {
+          current_run_pid: fallback.pid,
+          current_run_id: runLock.data.token,
+        });
+        finalOutput = await fallback.done;
+      }
     }
 
     const generatedAt = new Date().toISOString();
@@ -1062,6 +1204,18 @@ export async function askFollowup(
   const canResume = isReviewSessionCompatible(cached, cached, opts);
 
   const askedAt = new Date().toISOString();
+  const failedFollowup = (
+    error: string,
+    resumed: boolean
+  ): ReviewFollowup => ({
+    asked_at: askedAt,
+    question,
+    answered_at: new Date().toISOString(),
+    answer: "",
+    session_profile: profile,
+    resumed,
+    error,
+  });
   const isSummaryStale =
     Boolean(cached.summary_head_sha) && cached.summary_head_sha !== cached.head_sha;
   const followupPrompt = [
@@ -1083,14 +1237,23 @@ export async function askFollowup(
     .join("\n");
 
   if (canResume && cached.session_id) {
-    const resumed = spawnRuntime(
-      opts.runtime,
-      followupPrompt,
-      opts,
-      cached.session_id,
-      runTimeoutMs,
-      prUrl
-    );
+    let resumed: SpawnResult;
+    try {
+      resumed = spawnRuntime(
+        opts.runtime,
+        followupPrompt,
+        opts,
+        cached.session_id,
+        runTimeoutMs,
+        {},
+        prUrl
+      );
+    } catch (error) {
+      if (error instanceof LowDiskSpaceError) {
+        return failedFollowup(error.message, true);
+      }
+      throw error;
+    }
     const result = await resumed.done;
     if (!result.error && result.result_text.trim()) {
       return {
@@ -1102,6 +1265,9 @@ export async function askFollowup(
         session_profile: profile,
         resumed: true,
       };
+    }
+    if (result.termination_reason === "low_disk") {
+      return failedFollowup(result.error || "Review stopped due to low disk space.", true);
     }
   }
 
@@ -1131,14 +1297,23 @@ export async function askFollowup(
     .filter(Boolean)
     .join("\n");
 
-  const fresh = spawnRuntime(
-    opts.runtime,
-    seededPrompt,
-    opts,
-    undefined,
-    runTimeoutMs,
-    prUrl
-  );
+  let fresh: SpawnResult;
+  try {
+    fresh = spawnRuntime(
+      opts.runtime,
+      seededPrompt,
+      opts,
+      undefined,
+      runTimeoutMs,
+      {},
+      prUrl
+    );
+  } catch (error) {
+    if (error instanceof LowDiskSpaceError) {
+      return failedFollowup(error.message, false);
+    }
+    throw error;
+  }
   const result = await fresh.done;
   return {
     asked_at: askedAt,

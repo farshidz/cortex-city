@@ -295,8 +295,15 @@ account. Override `REMOTE_STAGING_BASE` to place staged releases somewhere else.
 
 ### Production disk hygiene
 
-Production disk pressure is controlled in two layers:
+Production disk pressure is controlled in several layers:
 
+- Reviewer launches reserve 15 GiB by default. The worker checks before every
+  review, follow-up, and retrospective, then checks every five seconds while
+  the runtime is active and terminates it if free space crosses the reserve.
+  Set `CORTEX_REVIEW_MIN_FREE_DISK_BYTES` in `/etc/cortex-city/worker.env`
+  and `/etc/cortex-city/web.env` to tune the reserve in bytes for automatic
+  and manually launched reviews. Optionally set
+  `CORTEX_REVIEW_DISK_CHECK_INTERVAL_MS` to tune the polling interval.
 - Host metrics are compact by default: `HOST_METRICS_INTERVAL_SECONDS=60`,
   `HOST_METRICS_RETENTION_DAYS=3`, and `HOST_METRICS_MODE=compact`. Override
   these in `/etc/cortex-city/host-metrics.env` if you need a temporary incident

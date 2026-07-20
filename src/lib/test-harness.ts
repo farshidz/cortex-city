@@ -330,7 +330,13 @@ export function runTsxScript(
     {
       cwd: workspace,
       encoding: "utf-8",
-      env,
+      env: {
+        ...env,
+        // Synthetic workspaces should not depend on the host runner's disk
+        // size. Disk-guard tests opt back in with an explicit threshold.
+        CORTEX_REVIEW_MIN_FREE_DISK_BYTES:
+          env.CORTEX_REVIEW_MIN_FREE_DISK_BYTES ?? "0",
+      },
     }
   );
 

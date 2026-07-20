@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -17,6 +18,7 @@ import {
   parseReviewAgentStatus,
   resolveReviewOpts,
   resolveReviewPrompt,
+  spawnRuntime,
 } from "./review-runner";
 import {
   createTempWorkspace,
@@ -401,6 +403,7 @@ test("spawnRuntime contains and retains Claude workspaces for active reviews", (
         { runtime: "claude" },
         undefined,
         1_000,
+        {},
         "https://github.com/acme/widget/pull/41"
       );
       const output = await spawned.done;
@@ -463,6 +466,7 @@ test("spawnRuntime preserves Codex resume inside the retained PR workspace", () 
         { runtime: "codex", effort: "xhigh" },
         "codex-thread-1",
         1_000,
+        {},
         "https://github.com/acme/widget/pull/42"
       );
       const output = await spawned.done;
@@ -1163,6 +1167,93 @@ test("summarizePR applies the configured task run timeout", () => {
   assert.equal(readdirSync(reviewRoot).length, 1);
 });
 
+test("summarizePR persists a review-specific low-disk preflight failure", () => {
+  const workspace = setupRunnerWorkspace("review-runner-disk-preflight-");
+  const request = sampleRequest({
+    pr_url: "https://github.com/acme/widget/pull/301",
+    pr_number: 301,
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      let thrown;
+      try {
+        await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      } catch (error) {
+        thrown = error instanceof Error ? error.message : String(error);
+      }
+      console.log(JSON.stringify({
+        thrown,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      CORTEX_REVIEW_MIN_FREE_DISK_BYTES: String(Number.MAX_SAFE_INTEGER),
+    }
+  );
+
+  assert.match(result.thrown, /Low disk space before launching claude review runtime/);
+  assert.equal(result.persisted.error, result.thrown);
+  assert.equal(typeof result.persisted.error_at, "string");
+  assert.equal(result.persisted.summary, "");
+  assert.equal(result.persisted.current_run_pid, undefined);
+});
+
+test("spawnRuntime terminates a running reviewer when it crosses the reserve", async () => {
+  const workspace = setupRunnerWorkspace("review-runner-disk-monitor-");
+  const descendantMarker = path.join(workspace, "descendant-survived");
+  const descendantScript = `setTimeout(() => require("fs").writeFileSync(${JSON.stringify(descendantMarker)}, "alive"), 400)`;
+  const fakeClaude = path.join(workspace, "bin", "claude");
+  writeFileSync(
+    fakeClaude,
+    `#!/usr/bin/env node
+const { spawn } = require("child_process");
+spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], { stdio: "ignore" });
+setInterval(() => {}, 1000);
+`
+  );
+  chmodSync(fakeClaude, 0o755);
+
+  const previousPath = process.env.PATH;
+  process.env.PATH = prependBinToPath(workspace).PATH;
+  try {
+    let checks = 0;
+    const spawned = spawnRuntime(
+      "claude",
+      "review this PR",
+      { runtime: "claude" },
+      undefined,
+      5_000,
+      {
+        targetPath: workspace,
+        minFreeBytes: 15 * 1024 ** 3,
+        checkIntervalMs: 100,
+        readStatus: (targetPath, minFreeBytes) => ({
+          path: targetPath,
+          freeBytes: ++checks === 1 ? 20 * 1024 ** 3 : 10 * 1024 ** 3,
+          minFreeBytes,
+          ok: checks === 1,
+        }),
+      }
+    );
+    const output = await spawned.done;
+
+    assert.equal(output.termination_reason, "low_disk");
+    assert.match(output.error || "", /Low disk space during the claude review runtime/);
+    assert.equal(output.exit_code, null);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(existsSync(descendantMarker), false);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+});
+
 test("askFollowup throws when the cached entry has no summary yet", () => {
   const workspace = setupRunnerWorkspace("review-runner-followup-empty-");
   const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
@@ -1201,6 +1292,52 @@ test("askFollowup throws when the cached entry has no summary yet", () => {
   );
 
   assert.equal(result.error, "Summary is not yet available for this PR.");
+});
+
+test("askFollowup returns a storable low-disk failure without launching", () => {
+  const workspace = setupRunnerWorkspace("review-runner-followup-disk-");
+  const request = sampleRequest({
+    pr_url: "https://github.com/acme/widget/pull/302",
+    pr_number: 302,
+  });
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify({
+      [request.pr_url]: {
+        ...request,
+        summary: "Prior review",
+        summary_head_sha: request.head_sha,
+        generated_at: "2026-05-01T00:00:00.000Z",
+        runtime: "claude",
+      },
+    })
+  );
+
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { appendFollowup, askFollowup } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const followup = await askFollowup(${JSON.stringify(request.pr_url)}, "what changed?");
+      await appendFollowup(${JSON.stringify(request.pr_url)}, followup);
+      console.log(JSON.stringify({
+        followup,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      CORTEX_REVIEW_MIN_FREE_DISK_BYTES: String(Number.MAX_SAFE_INTEGER),
+    }
+  );
+
+  assert.match(result.followup.error, /Low disk space before launching claude review runtime/);
+  assert.equal(result.followup.answer, "");
+  assert.equal(result.persisted.followups.at(-1).error, result.followup.error);
 });
 
 test("askFollowup allows stale summaries but still throws for active refreshes", () => {
