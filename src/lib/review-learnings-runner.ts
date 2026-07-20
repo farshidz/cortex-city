@@ -1,4 +1,5 @@
 import type { ChildProcess } from "child_process";
+import { LowDiskSpaceError } from "./disk-guard";
 import { patchReviewSummary } from "./review-store";
 import { compareAndWriteReviewLearnings } from "./review-learnings-store";
 import {
@@ -103,13 +104,26 @@ export async function spawnReviewRetro(
   const opts = resolveReviewOpts(config);
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);
   const prompt = buildReviewRetroPrompt(review, learningsBefore);
-  const { pid, child, done } = spawnRuntime(
-    opts.runtime,
-    prompt,
-    opts,
-    undefined,
-    runTimeoutMs
-  );
+  let spawned;
+  try {
+    spawned = spawnRuntime(
+      opts.runtime,
+      prompt,
+      opts,
+      undefined,
+      runTimeoutMs
+    );
+  } catch (error) {
+    if (error instanceof LowDiskSpaceError) {
+      await patchReviewSummary(review.pr_url, {
+        retro_status: "error",
+        retro_error: error.message,
+        retro_run_pid: undefined,
+      });
+    }
+    throw error;
+  }
+  const { pid, child, done } = spawned;
 
   await patchReviewSummary(review.pr_url, {
     retro_status: "pending",

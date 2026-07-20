@@ -106,6 +106,18 @@ function hasActiveReviewRetroPid(
   return typeof review.retro_run_pid === "number";
 }
 
+function killReviewProcess(pid: number, signal: NodeJS.Signals): void {
+  try {
+    if (process.platform !== "win32") {
+      process.kill(-pid, signal);
+    } else {
+      process.kill(pid, signal);
+    }
+  } catch {
+    process.kill(pid, signal);
+  }
+}
+
 function reviewSessionTitle(review: ReviewSummary): string {
   return review.title
     ? `${review.repo_slug}#${review.pr_number} — ${review.title}`
@@ -247,10 +259,10 @@ export function getOrchestrator() {
               review?.current_run_id
             );
       try {
-        process.kill(pid, "SIGTERM");
+        killReviewProcess(pid, "SIGTERM");
         setTimeout(() => {
           try {
-            process.kill(pid, "SIGKILL");
+            killReviewProcess(pid, "SIGKILL");
           } catch {}
         }, 5000);
         void clearRun();
