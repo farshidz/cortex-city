@@ -111,7 +111,9 @@ export async function spawnReviewRetro(
       prompt,
       opts,
       undefined,
-      runTimeoutMs
+      runTimeoutMs,
+      {},
+      review.pr_url
     );
   } catch (error) {
     if (error instanceof LowDiskSpaceError) {

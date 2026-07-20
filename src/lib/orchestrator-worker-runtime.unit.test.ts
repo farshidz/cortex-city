@@ -166,6 +166,7 @@ test("completion callbacks leave newer active pids in place", async () => {
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
     removeWorktree: async () => {},
+    removeFinalReviewWorkspace: async () => true,
     spawnAgentSession: async (_task, _mode, onComplete) => {
       completions.push(onComplete);
       return { pid: nextPid++, child: {} as never };
@@ -235,6 +236,7 @@ test("pollOnce gives dead owned pids a grace window before resuming", async () =
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
     removeWorktree: async () => {},
+    removeFinalReviewWorkspace: async () => true,
     spawnAgentSession: async () => ({ pid: 202, child: {} as never }),
     spawnReviewRetro: async () => ({
       pid: 0,
@@ -324,6 +326,7 @@ test("pollOnce clears missing final worktree paths without launching cleanup and
     removeWorktree: async () => {
       worktreeRemovals++;
     },
+    removeFinalReviewWorkspace: async () => true,
     spawnAgentSession: async () => {
       cleanupLaunches++;
       return { pid: 202, child: {} as never };
@@ -398,6 +401,7 @@ test("pollOnce rechecks latest review hash before launching review run", async (
     readReviewSummaryMap: () => ({}),
     readTasks: () => [staleTask],
     removeWorktree: async () => {},
+    removeFinalReviewWorkspace: async () => true,
     spawnAgentSession: async (task) => {
       spawnedTasks.push(task);
       return { pid: 202, child: {} as never };
@@ -454,6 +458,7 @@ test("pollOnce skips paused open tasks", async () => {
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
     removeWorktree: async () => {},
+    removeFinalReviewWorkspace: async () => true,
     spawnAgentSession: async (_task, mode) => {
       launchedModes.push(mode);
       return { pid: 202, child: {} as never };
@@ -521,6 +526,7 @@ test("pollOnce skips paused in_review tasks entirely", async () => {
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
     removeWorktree: async () => {},
+    removeFinalReviewWorkspace: async () => true,
     spawnAgentSession: async (_task, mode) => {
       launchedModes.push(mode);
       return { pid: 202, child: {} as never };
@@ -590,6 +596,7 @@ test("pollOnce skips automatic reviews when automatic review is disabled", async
     readReviewSummaryMap: () => ({}),
     readTasks: () => tasks,
     removeWorktree: async () => {},
+    removeFinalReviewWorkspace: async () => true,
     spawnAgentSession: async (_task, mode) => {
       launchedModes.push(mode);
       return { pid: 202, child: {} as never };
