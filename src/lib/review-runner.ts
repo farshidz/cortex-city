@@ -12,8 +12,8 @@ import {
 import {
   createReviewWorkspace,
   markReviewWorkspaceActive,
-  removeReviewWorkspace,
-  removeReviewWorkspaceBeforeStart,
+  releaseReviewWorkspace,
+  releaseReviewWorkspaceBeforeStart,
 } from "./review-workspace";
 import { readReviewLearnings } from "./review-learnings-store";
 import {
@@ -141,7 +141,7 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
 
 export const REVIEWER_GITHUB_COMMENT_PREFIX = "**🤖[Cortex City Reviewer]**";
 const REVIEW_GITHUB_TOOL_INSTRUCTION =
-  "Use the `gh` CLI for GitHub inspection and comments; no local checkout is required.";
+  "Use the `gh` CLI for GitHub inspection and comments. The working directory persists for this PR, so reuse any existing checkout or artifacts.";
 
 export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request with Cortex City's unified review agent.
 
@@ -601,7 +601,8 @@ export function spawnRuntime(
   prompt: string,
   opts: SpawnOpts,
   resumeSessionId?: string,
-  runTimeoutMs = DEFAULT_TASK_RUN_TIMEOUT_MS
+  runTimeoutMs = DEFAULT_TASK_RUN_TIMEOUT_MS,
+  reviewKey?: string
 ): SpawnResult {
   const command = runtime === "codex" ? "codex" : "claude";
   const args =
@@ -610,7 +611,7 @@ export function spawnRuntime(
       : buildClaudeArgs(prompt, opts, resumeSessionId);
 
   const startedAt = Date.now();
-  const workspace = createReviewWorkspace(runtime);
+  const workspace = createReviewWorkspace(runtime, reviewKey);
   let child: ChildProcess | undefined;
   try {
     child = spawn(command, args, {
@@ -628,11 +629,11 @@ export function spawnRuntime(
     try {
       child?.kill("SIGTERM");
     } catch {}
-    removeReviewWorkspaceBeforeStart(workspace.path);
+    releaseReviewWorkspaceBeforeStart(workspace);
     throw error;
   }
   if (!child) {
-    removeReviewWorkspaceBeforeStart(workspace.path);
+    releaseReviewWorkspaceBeforeStart(workspace);
     throw new Error(`Failed to start ${command}`);
   }
   child.stdin?.end();
@@ -767,7 +768,7 @@ export function spawnRuntime(
   });
 
   const done = runtimeDone.finally(async () => {
-    await removeReviewWorkspace(workspace.path);
+    await releaseReviewWorkspace(workspace, child.pid);
   });
 
   return { pid: child.pid!, child, done };
@@ -838,7 +839,8 @@ export async function spawnReviewSummary(
       prompt,
       opts,
       resumeSessionId,
-      runTimeoutMs
+      runTimeoutMs,
+      target.pr_url
     );
     assertReviewRunLockHealthy(runLock);
     const claimed = await mutateReviewSummary(target.pr_url, (current) => {
@@ -918,7 +920,8 @@ export async function spawnReviewSummary(
         fallbackPrompt,
         opts,
         undefined,
-        runTimeoutMs
+        runTimeoutMs,
+        target.pr_url
       );
       assertReviewRunLockHealthy(runLock);
       await patchReviewSummary(target.pr_url, {
@@ -1085,7 +1088,8 @@ export async function askFollowup(
       followupPrompt,
       opts,
       cached.session_id,
-      runTimeoutMs
+      runTimeoutMs,
+      prUrl
     );
     const result = await resumed.done;
     if (!result.error && result.result_text.trim()) {
@@ -1132,7 +1136,8 @@ export async function askFollowup(
     seededPrompt,
     opts,
     undefined,
-    runTimeoutMs
+    runTimeoutMs,
+    prUrl
   );
   const result = await fresh.done;
   return {

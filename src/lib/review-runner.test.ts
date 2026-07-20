@@ -375,7 +375,7 @@ test("parseReviewAgentStatus reads the exact agent status marker", () => {
   assert.equal(parseReviewAgentStatus("No marker here"), undefined);
 });
 
-test("spawnRuntime contains and removes Claude review workspaces", () => {
+test("spawnRuntime contains and retains Claude workspaces for active reviews", () => {
   const workspace = setupRunnerWorkspace("review-runtime-workspace-claude-");
   const scenarioFile = path.join(workspace, "scenario.json");
   const argsFile = path.join(workspace, "agent-args.json");
@@ -400,7 +400,8 @@ test("spawnRuntime contains and removes Claude review workspaces", () => {
         "review this PR",
         { runtime: "claude" },
         undefined,
-        1_000
+        1_000,
+        "https://github.com/acme/widget/pull/41"
       );
       const output = await spawned.done;
       const invocation = JSON.parse(fs.readFileSync(${JSON.stringify(argsFile)}, "utf-8"));
@@ -423,17 +424,17 @@ test("spawnRuntime contains and removes Claude review workspaces", () => {
     path.dirname(result.invocation.cwd),
     realpathSync(reviewRoot)
   );
-  assert.match(path.basename(result.invocation.cwd), /^review-run-/);
+  assert.match(path.basename(result.invocation.cwd), /^review-[a-f0-9]{64}$/);
   assert.equal(result.invocation.env.TMPDIR, result.invocation.cwd);
   assert.equal(result.invocation.env.TMP, result.invocation.cwd);
   assert.equal(result.invocation.env.TEMP, result.invocation.cwd);
-  assert.equal(result.workspaceExistsAfterDone, false);
+  assert.equal(result.workspaceExistsAfterDone, true);
   assert.equal(result.invocation.args.includes("bypassPermissions"), false);
   assert.equal(result.invocation.args.includes("dontAsk"), true);
   assert.equal(result.invocation.args.includes("Bash(gh *)"), true);
 });
 
-test("spawnRuntime preserves Codex resume inside a fresh confined workspace", () => {
+test("spawnRuntime preserves Codex resume inside the retained PR workspace", () => {
   const workspace = setupRunnerWorkspace("review-runtime-workspace-codex-");
   const scenarioFile = path.join(workspace, "scenario.json");
   const argsFile = path.join(workspace, "agent-args.json");
@@ -461,7 +462,8 @@ test("spawnRuntime preserves Codex resume inside a fresh confined workspace", ()
         "follow up",
         { runtime: "codex", effort: "xhigh" },
         "codex-thread-1",
-        1_000
+        1_000,
+        "https://github.com/acme/widget/pull/42"
       );
       const output = await spawned.done;
       const invocation = JSON.parse(fs.readFileSync(${JSON.stringify(argsFile)}, "utf-8"));
@@ -481,7 +483,7 @@ test("spawnRuntime preserves Codex resume inside a fresh confined workspace", ()
 
   assert.equal(result.output.result_text, "resumed");
   assert.equal(result.invocation.env.TMPDIR, result.invocation.cwd);
-  assert.equal(result.workspaceExistsAfterDone, false);
+  assert.equal(result.workspaceExistsAfterDone, true);
   assert.ok(result.invocation.args.includes("workspace-write"));
   assert.ok(result.invocation.args.includes("resume"));
   assert.ok(result.invocation.args.includes("codex-thread-1"));
@@ -1158,7 +1160,7 @@ test("summarizePR applies the configured task run timeout", () => {
   assert.equal(result.summary.summary, "");
   assert.equal(result.summary.current_run_pid, undefined);
   assert.match(result.persisted.error, /Run timed out after 25ms/);
-  assert.deepEqual(readdirSync(reviewRoot), []);
+  assert.equal(readdirSync(reviewRoot).length, 1);
 });
 
 test("askFollowup throws when the cached entry has no summary yet", () => {
