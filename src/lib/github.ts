@@ -1,5 +1,9 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
+import {
+  REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
+  reviewerHumanDecisionCommentMarker,
+} from "./review-comments";
 import { getReviewSummary } from "./review-store";
 import type { PRStatus, ReviewRequest } from "./types";
 
@@ -33,12 +37,39 @@ interface ReviewItem {
 
 interface IssueCommentItem {
   id: number;
+  body?: string | null;
 }
 
-function reviewerHumanDecisionCommentIds(prUrl: string): Set<number> {
-  return new Set(
-    getReviewSummary(prUrl)?.reviewer_human_decision_comment_ids || []
+function isReviewerHumanDecisionCommentForMarker(
+  comment: IssueCommentItem,
+  marker: string
+): boolean {
+  const body = comment.body || "";
+  return (
+    body.startsWith(`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX} `) &&
+    body.trimEnd().endsWith(marker)
   );
+}
+
+function reviewerHumanDecisionCommentIds(
+  prUrl: string,
+  issueComments: IssueCommentItem[]
+): Set<number> {
+  const review = getReviewSummary(prUrl);
+  const ignoredIds = new Set(
+    review?.reviewer_human_decision_comment_ids || []
+  );
+  const pendingToken = review?.pending_reviewer_human_decision_comment_token;
+  if (!pendingToken) return ignoredIds;
+
+  const marker = reviewerHumanDecisionCommentMarker(pendingToken);
+  const pendingComment = issueComments
+    .filter((comment) =>
+      isReviewerHumanDecisionCommentForMarker(comment, marker)
+    )
+    .sort((a, b) => a.id - b.id)[0];
+  if (pendingComment) ignoredIds.add(pendingComment.id);
+  return ignoredIds;
 }
 
 function parsePRUrl(url: string): PRInfo | null {
@@ -274,7 +305,6 @@ export async function getPRHeadSha(prUrl: string): Promise<string> {
 export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return [];
-  const ignoredIssueCommentIds = reviewerHumanDecisionCommentIds(prUrl);
 
   const [reviews, comments, issueComments] = await Promise.all([
     execPaginatedArray<{ id: number; state?: string }>(
@@ -301,6 +331,10 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
     .filter((comment) => isCommentFromSubmittedReview(comment, submittedIds))
     .map((comment) => comment.id);
 
+  const ignoredIssueCommentIds = reviewerHumanDecisionCommentIds(
+    prUrl,
+    issueComments
+  );
   const issueCommentIds = issueComments
     .filter((comment) => !ignoredIssueCommentIds.has(comment.id))
     .map((comment) => comment.id);
@@ -311,7 +345,6 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
 export async function getPRStateHash(prUrl: string): Promise<string> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return "";
-  const ignoredIssueCommentIds = reviewerHumanDecisionCommentIds(prUrl);
 
   const [prData, reviews, comments, issueComments, checksResult] = await Promise.all([
     execJsonStrict<{
@@ -368,6 +401,10 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
       .filter((comment) => isCommentFromSubmittedReview(comment, submittedIds))
       .map((comment) => comment.id)
       .sort()
+  );
+  const ignoredIssueCommentIds = reviewerHumanDecisionCommentIds(
+    prUrl,
+    issueComments
   );
   const issueCommentIds = JSON.stringify(
     issueComments
@@ -668,6 +705,59 @@ function execFileResult(
       }
     );
   });
+}
+
+export async function reconcileReviewerHumanDecisionComment(
+  prUrl: string,
+  token: string,
+  decisionBody?: string
+): Promise<number | undefined> {
+  const pr = parsePRUrl(prUrl);
+  if (
+    !pr ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      token
+    )
+  ) {
+    throw new Error("Invalid reviewer human-decision comment target or token.");
+  }
+
+  const endpoint =
+    `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`;
+  const existing = await execPaginatedArrayStrict<IssueCommentItem>(endpoint);
+  if (!existing) {
+    throw new Error("Failed to inspect existing PR conversation comments.");
+  }
+  const marker = reviewerHumanDecisionCommentMarker(token);
+  const matched = existing
+    .filter((comment) =>
+      isReviewerHumanDecisionCommentForMarker(comment, marker)
+    )
+    .sort((a, b) => a.id - b.id)[0];
+  if (matched) return matched.id;
+
+  const trimmedBody = decisionBody?.trim();
+  if (!trimmedBody) return undefined;
+  const body =
+    `${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX} ${trimmedBody}\n\n${marker}`;
+  const result = await execFileResult("gh", [
+    "api",
+    "--method",
+    "POST",
+    endpoint,
+    "--raw-field",
+    `body=${body}`,
+    "--jq",
+    ".id",
+  ]);
+  const id = Number(result.stdout.trim());
+  if (!result.ok || !Number.isSafeInteger(id) || id <= 0) {
+    const detail = (result.stderr || result.stdout).trim();
+    throw new Error(
+      `Failed to post the reviewer human-decision comment${detail ? `: ${detail}` : "."}`
+    );
+  }
+  return id;
 }
 
 export const __testUtils = {

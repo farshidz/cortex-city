@@ -69,7 +69,7 @@ function runWorkerScript(
       `import { pollOnce } from ${JSON.stringify(WORKER_RUNTIME_MODULE_URL)};`,
       `import { createTask, readTasks } from ${JSON.stringify(STORE_MODULE_URL)};`,
       `import { getPRStateHash } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
-      `import { upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
     ],
     body,
     env
@@ -529,6 +529,7 @@ test("reviewer decision prompts wait for a human response before waking the task
     workspace,
     `
       const activePids = new Map();
+      const pendingToken = "11111111-1111-4111-8111-111111111111";
       const baselineHash = await getPRStateHash(${JSON.stringify(prUrl)});
       await createTask({
         ...${JSON.stringify(sampleTask({
@@ -554,7 +555,7 @@ test("reviewer decision prompts wait for a human response before waking the task
         updated_at: "2026-05-01T00:00:00.000Z",
         summary: "A human decision is required.",
         generated_at: "2026-05-01T00:10:00.000Z",
-        reviewer_human_decision_comment_ids: [400],
+        pending_reviewer_human_decision_comment_token: pendingToken,
       });
 
       const fs = require("node:fs");
@@ -562,12 +563,13 @@ test("reviewer decision prompts wait for a human response before waking the task
       const pr = state.prs["farshidz/marqo-cortex-city#40"];
       pr.issueComments = [{
         id: 400,
-        body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.",
+        body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.\\n\\n<!-- cortex-city-review-decision:" + pendingToken + " -->",
       }];
       fs.writeFileSync(${JSON.stringify(ghStateFile)}, JSON.stringify(state));
 
       await pollOnce(activePids);
       const afterReviewerPrompt = readTasks()[0];
+      const reviewAfterReviewerPrompt = readReviewSummaryMap()[${JSON.stringify(prUrl)}];
       const callsAfterReviewerPrompt = fs.existsSync(${JSON.stringify(callsFile)})
         ? fs.readFileSync(${JSON.stringify(callsFile)}, "utf-8").trim().split(/\\r?\\n/).filter(Boolean).length
         : 0;
@@ -584,6 +586,7 @@ test("reviewer decision prompts wait for a human response before waking the task
         : [];
       console.log(JSON.stringify({
         afterReviewerPrompt,
+        reviewAfterReviewerPrompt,
         callsAfterReviewerPrompt,
         finalTask: readTasks()[0],
         callCount: calls.length,
@@ -599,6 +602,14 @@ test("reviewer decision prompts wait for a human response before waking the task
 
   assert.equal(result.afterReviewerPrompt.last_run_result, undefined);
   assert.equal(result.callsAfterReviewerPrompt, 0);
+  assert.deepEqual(
+    result.reviewAfterReviewerPrompt.reviewer_human_decision_comment_ids,
+    [400]
+  );
+  assert.equal(
+    result.reviewAfterReviewerPrompt.pending_reviewer_human_decision_comment_token,
+    undefined
+  );
   assert.equal(result.finalTask.last_run_result, "success");
   assert.equal(result.callCount, 1);
 });

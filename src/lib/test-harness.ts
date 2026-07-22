@@ -182,7 +182,7 @@ export function writeFakeGhBinary(workspace: string): string {
   writeFileSync(
     binaryPath,
     `#!/usr/bin/env node
-const { appendFileSync, existsSync, readFileSync } = require("fs");
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("fs");
 
 function loadState() {
   const file = process.env.FAKE_GH_STATE_FILE;
@@ -224,6 +224,30 @@ const state = loadState();
 logCall(args);
 
 if (args[0] === "api") {
+  if (args[1] === "--method" && args[2] === "POST") {
+    const endpoint = args[3];
+    const match = endpoint.match(/^repos\\/([^/]+)\\/([^/]+)\\/issues\\/(\\d+)\\/comments$/);
+    if (!match) process.exit(0);
+    const [, owner, repo, number] = match;
+    const pr = getPr(state, owner, repo, number);
+    const bodyArgIndex = args.indexOf("--raw-field");
+    const bodyArg = bodyArgIndex >= 0 ? args[bodyArgIndex + 1] || "" : "";
+    const body = bodyArg.startsWith("body=") ? bodyArg.slice(5) : "";
+    const comments = pr.issueComments || [];
+    const id = pr.nextIssueCommentId ||
+      comments.reduce((max, comment) => Math.max(max, comment.id || 0), 0) + 1;
+    const comment = { id, body };
+    comments.push(comment);
+    pr.issueComments = comments;
+    pr.nextIssueCommentId = id + 1;
+    if (process.env.FAKE_GH_STATE_FILE) {
+      writeFileSync(process.env.FAKE_GH_STATE_FILE, JSON.stringify(state));
+    }
+    const jqIndex = args.indexOf("--jq");
+    output(jqIndex >= 0 && args[jqIndex + 1] === ".id" ? String(id) : comment);
+    process.exit(0);
+  }
+
   if (args[1] === "--paginate" && args[2] === "--slurp") {
     const endpoint = args[3];
     const match = endpoint.match(/^repos\\/([^/]+)\\/([^/]+)\\/(pulls|issues)\\/(\\d+)\\/(reviews|comments)$/);

@@ -287,6 +287,10 @@ export interface ReviewSummary extends ReviewRequest {
   // Tracking IDs avoids trusting a public body prefix when task feedback is
   // filtered and remains valid across later review heads.
   reviewer_human_decision_comment_ids?: number[];
+  // Persisted before any application-owned comment action and never exposed to
+  // the model. If the process dies after posting but before saving the receipt,
+  // this token identifies the one comment that must be reconciled on retry.
+  pending_reviewer_human_decision_comment_token?: string;
   followups?: ReviewFollowup[];
   final_at?: string;
   final_state?: "merged" | "closed";

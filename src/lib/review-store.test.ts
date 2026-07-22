@@ -125,6 +125,8 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   const entry = {
     ...sampleReviewLiteral("https://github.com/acme/widget/pull/1"),
     reviewer_human_decision_comment_ids: [400, 400, 0, -1, 401.5, 402],
+    pending_reviewer_human_decision_comment_token:
+      "11111111-1111-4111-8111-111111111111",
   };
   const result = runStoreScript(
     workspace,
@@ -144,6 +146,10 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   assert.equal(result.saved.review_status, "pending_summary");
   assert.equal(result.saved.review_state, "queued");
   assert.deepEqual(result.saved.reviewer_human_decision_comment_ids, [400, 402]);
+  assert.equal(
+    result.saved.pending_reviewer_human_decision_comment_token,
+    "11111111-1111-4111-8111-111111111111"
+  );
   assert.deepEqual(result.all, [result.saved]);
   assert.deepEqual(result.fetched, result.saved);
 

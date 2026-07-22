@@ -16,7 +16,7 @@ import {
   DEFAULT_REVIEW_PROMPT,
   isReviewSessionCompatible,
   parseReviewAgentStatus,
-  parseReviewerHumanDecisionCommentId,
+  parseReviewerHumanDecisionBody,
   resolveReviewOpts,
   resolveReviewPrompt,
   spawnRuntime,
@@ -27,6 +27,7 @@ import {
   prependBinToPath,
   runTsxScript,
   writeFakeAgentBinary,
+  writeFakeGhBinary,
   writeJson,
   writeTestConfig,
 } from "./test-harness";
@@ -84,6 +85,7 @@ function setupRunnerWorkspace(
   });
   writeFakeAgentBinary(workspace, "claude");
   writeFakeAgentBinary(workspace, "codex");
+  writeFakeGhBinary(workspace);
   return workspace;
 }
 
@@ -269,13 +271,10 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   );
   assert.match(taskPrompt, /final status is `needs_human_decision`/i);
   assert.match(taskPrompt, /including task-owned and other self-authored PRs/i);
-  assert.match(
-    taskPrompt,
-    /repos\/acme\/widget\/issues\/1\/comments.*--jq \.id/i
-  );
-  assert.match(taskPrompt, /Do not use `gh pr comment`/i);
-  assert.match(taskPrompt, /`gh pr review --comment`/i);
-  assert.match(taskPrompt, /Human decision comment ID: <id>/i);
+  assert.match(taskPrompt, /add a `## Human Decision` section/i);
+  assert.match(taskPrompt, /Do not post this comment yourself/i);
+  assert.match(taskPrompt, /do not invent or report a comment ID/i);
+  assert.match(taskPrompt, /Cortex City will create exactly one top-level/i);
 
   const inboundPrompt = buildReviewWrapperPrompt(config, sampleRequest());
   assert.match(inboundPrompt, /Review source: inbound pull request/);
@@ -292,7 +291,7 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.match(inboundPrompt, /latest submitted decisive review/i);
   assert.match(inboundPrompt, /do not approve or overwrite it/i);
   assert.match(inboundPrompt, /final status is `needs_human_decision`/i);
-  assert.match(inboundPrompt, /post exactly one top-level PR conversation comment/i);
+  assert.match(inboundPrompt, /Cortex City will create exactly one top-level/i);
   assert.match(inboundPrompt, /Do not submit a change-request review decision/i);
 
   const selfAuthoredPrompt = buildReviewWrapperPrompt(
@@ -426,25 +425,19 @@ test("parseReviewAgentStatus reads the exact agent status marker", () => {
   assert.equal(parseReviewAgentStatus("No marker here"), undefined);
 });
 
-test("parseReviewerHumanDecisionCommentId requires an exact positive numeric ID line", () => {
+test("parseReviewerHumanDecisionBody reads only the dedicated section", () => {
   assert.equal(
-    parseReviewerHumanDecisionCommentId(
-      "## Agent Status\nAgent status: `needs_human_decision`\nHuman decision comment ID: `8123`"
+    parseReviewerHumanDecisionBody(
+      "## Agent Status\nAgent status: `needs_human_decision`\n\n## Human Decision\nChoose A or B.\n\n## Details\nInternal context."
     ),
-    8123
+    "Choose A or B."
   );
   assert.equal(
-    parseReviewerHumanDecisionCommentId("Human decision comment ID: 0"),
+    parseReviewerHumanDecisionBody("Human Decision: Choose A or B."),
     undefined
   );
   assert.equal(
-    parseReviewerHumanDecisionCommentId(
-      "Posted Human decision comment ID: 8123 successfully"
-    ),
-    undefined
-  );
-  assert.equal(
-    parseReviewerHumanDecisionCommentId("No decision comment was posted."),
+    parseReviewerHumanDecisionBody("## Human Decision\n\n## Details\nEmpty."),
     undefined
   );
 });
@@ -652,9 +645,18 @@ test("summarizePR persists Claude output as a ReviewSummary", () => {
   assert.equal(result.persisted.session_id, "claude-session-1");
 });
 
-test("summarizePR persists the emitted human-decision comment ID", () => {
+test("summarizePR posts and persists an application-owned human-decision comment", () => {
   const workspace = setupRunnerWorkspace("review-runner-decision-comment-");
   const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        issueComments: [],
+        nextIssueCommentId: 8123,
+      },
+    },
+  });
   writeJson(scenarioFile, {
     claude: {
       stdout: JSON.stringify({
@@ -664,7 +666,9 @@ test("summarizePR persists the emitted human-decision comment ID", () => {
           "A human choice remains.",
           "## Agent Status",
           "Agent status: `needs_human_decision`",
-          "Human decision comment ID: 8123",
+          "Human decision comment ID: 999",
+          "## Human Decision",
+          "Choose A or B before merging.",
         ].join("\n"),
         is_error: false,
       }),
@@ -694,6 +698,7 @@ test("summarizePR persists the emitted human-decision comment ID", () => {
     {
       ...prependBinToPath(workspace),
       FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
     }
   );
 
@@ -706,6 +711,95 @@ test("summarizePR persists the emitted human-decision comment ID", () => {
     7000,
     8123,
   ]);
+  assert.equal(
+    result.persisted.pending_reviewer_human_decision_comment_token,
+    undefined
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
+  assert.match(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    /^\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Human decision needed:\*\* Choose A or B before merging\./
+  );
+  assert.match(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    /<!-- cortex-city-review-decision:[0-9a-f-]{36} -->$/
+  );
+});
+
+test("summarizePR reconciles a decision comment posted before a prior save crashed", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-reconcile-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        issueComments: [
+          {
+            id: 8122,
+            body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n<!-- cortex-city-review-decision:${pendingToken} -->`,
+          },
+        ],
+        nextIssueCommentId: 9000,
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-reconcile-session",
+        result: [
+          "## Summary",
+          "A human choice remains.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose A or B before merging.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "A previous run did not save its receipt.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        reviewer_human_decision_comment_ids: [7000],
+        pending_reviewer_human_decision_comment_token: ${JSON.stringify(pendingToken)},
+      });
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(result.persisted.reviewer_human_decision_comment_ids, [
+    7000,
+    8122,
+  ]);
+  assert.equal(
+    result.persisted.pending_reviewer_human_decision_comment_token,
+    undefined
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
 });
 
 test("spawnReviewSummary preserves retro state during summary refreshes", () => {

@@ -21,6 +21,7 @@ import {
   releaseReviewWorkspace,
   releaseReviewWorkspaceBeforeStart,
 } from "./review-workspace";
+import { reconcileReviewerHumanDecisionComment } from "./github";
 import {
   REVIEWER_GITHUB_COMMENT_PREFIX,
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
@@ -501,18 +502,14 @@ export function buildReviewWrapperPrompt(
           "and GitHub does not allow an author to approve their own PR.",
         ].join(" "),
     [
-      "- If your final status is `needs_human_decision`, post exactly one top-level",
-      "PR conversation comment that clearly presents the uncertain or advisory",
+      "- If your final status is `needs_human_decision`, add a `## Human Decision`",
+      "section after `## Agent Status`. Clearly present the uncertain or advisory",
       "points and the decision the human needs to make. Do this for every review",
-      "source, including task-owned and other self-authored PRs.",
-      `Start this specific comment with \`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\``,
-      "and create it with this exact issue-comment API surface:",
-      `\`gh api --method POST repos/${target.repo_slug}/issues/${target.pr_number}/comments`,
-      "--raw-field body='<signed comment body>' --jq .id`.",
-      "Capture the returned numeric ID. Do not use `gh pr comment`,",
-      "`gh pr review --comment`, an inline comment, or a pending review for this action.",
-      "After `Agent status: needs_human_decision`, include one exact line",
-      "`Human decision comment ID: <id>` with the captured numeric ID.",
+      "source, including task-owned and other self-authored PRs. Do not post this",
+      "comment yourself and do not invent or report a comment ID. Cortex City will",
+      "create exactly one top-level PR conversation comment from that section, prefix",
+      `it with \`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\`, and durably record`,
+      "the GitHub receipt.",
     ].join(" "),
     [
       "- Include uncertain or advisory points in the generated review as well as",
@@ -520,11 +517,11 @@ export function buildReviewWrapperPrompt(
     ].join(" "),
     [
       "- Do not submit a change-request review decision. Do not approve for any",
-      "status other than `ready_for_human_approval`, and do not post the human-decision",
-      "comment for any status other than `needs_human_decision`.",
+      "status other than `ready_for_human_approval`, and do not include a Human",
+      "Decision section for any status other than `needs_human_decision`.",
     ].join(" "),
     [
-      "- Complete the required GitHub action before emitting your final response.",
+      "- Complete any GitHub action assigned to you before emitting your final response.",
       "If the action fails and you cannot verify that it succeeded, use `blocked`",
       "and explain the failure in the generated review.",
     ].join(" "),
@@ -592,15 +589,16 @@ export function parseReviewAgentStatus(
   return undefined;
 }
 
-export function parseReviewerHumanDecisionCommentId(
+export function parseReviewerHumanDecisionBody(
   text: string
-): number | undefined {
-  const match = text.match(
-    /^\s*Human decision comment ID:\s*`?(\d+)`?\s*$/im
-  );
-  if (!match) return undefined;
-  const id = Number(match[1]);
-  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+): string | undefined {
+  const heading = /^## Human Decision\s*$/im.exec(text);
+  if (!heading) return undefined;
+  const remainder = text.slice(heading.index + heading[0].length);
+  const nextHeading = remainder.search(/^##\s+/m);
+  const body = (nextHeading >= 0 ? remainder.slice(0, nextHeading) : remainder)
+    .trim();
+  return body || undefined;
 }
 
 function buildClaudeArgs(
@@ -973,6 +971,8 @@ export async function spawnReviewSummary(
     followupReview && compatibleCachedSessionId
       ? compatibleCachedSessionId
       : undefined;
+  const reviewerHumanDecisionCommentToken =
+    cachedBefore?.pending_reviewer_human_decision_comment_token || randomUUID();
   const baseEntry = {
     ...target,
     summary: cachedBefore?.summary ?? "",
@@ -991,6 +991,8 @@ export async function spawnReviewSummary(
       : cachedBefore?.agent_review_status,
     reviewer_human_decision_comment_ids:
       cachedBefore?.reviewer_human_decision_comment_ids,
+    pending_reviewer_human_decision_comment_token:
+      cachedBefore?.pending_reviewer_human_decision_comment_token,
     followups: cachedBefore?.followups,
     final_at: cachedBefore?.final_at,
     error: cachedBefore?.error,
@@ -1086,6 +1088,8 @@ export async function spawnReviewSummary(
             : target.my_changes_requested_sha,
           error: error.message,
           error_at: failedAt,
+          pending_reviewer_human_decision_comment_token:
+            cachedBefore?.pending_reviewer_human_decision_comment_token,
           current_run_pid: undefined,
           current_run_id: undefined,
           ...retroFields(current || cachedBefore),
@@ -1146,10 +1150,89 @@ export async function spawnReviewSummary(
     }
 
     const generatedAt = new Date().toISOString();
-    const successful = !finalOutput.error;
-    const reviewerHumanDecisionCommentId =
-      parseReviewerHumanDecisionCommentId(finalOutput.result_text);
+    const runtimeSuccessful = !finalOutput.error;
+    const agentReviewStatus = runtimeSuccessful
+      ? parseReviewAgentStatus(finalOutput.result_text)
+      : undefined;
+    const reviewerHumanDecisionBody = parseReviewerHumanDecisionBody(
+      finalOutput.result_text
+    );
+    let reviewerHumanDecisionCommentId: number | undefined;
+    let reviewActionError: string | undefined;
     assertReviewRunLockHealthy(runLock);
+    let beforeReviewAction = getReviewSummary(target.pr_url);
+    if (beforeReviewAction?.current_run_id === runLock.data.token) {
+      const actionTarget = effectiveReviewRequest(
+        reviewRequestSnapshot(beforeReviewAction),
+        beforeReviewAction
+      );
+      const actionTargetChanged =
+        actionTarget.head_sha !== target.head_sha ||
+        reviewSourceOf(actionTarget) !== reviewSourceOf(target) ||
+        actionTarget.task_id !== target.task_id ||
+        actionTarget.task_title !== target.task_title ||
+        actionTarget.task_description !== target.task_description ||
+        actionTarget.task_plan !== target.task_plan;
+      const shouldCreateHumanDecisionComment =
+        runtimeSuccessful &&
+        !actionTargetChanged &&
+        agentReviewStatus === "needs_human_decision";
+      if (
+        cachedBefore?.pending_reviewer_human_decision_comment_token ||
+        shouldCreateHumanDecisionComment
+      ) {
+        if (!beforeReviewAction.pending_reviewer_human_decision_comment_token) {
+          beforeReviewAction = await mutateReviewSummary(
+            target.pr_url,
+            (current) => {
+              if (
+                current?.current_run_id !== runLock.data.token ||
+                current.pending_reviewer_human_decision_comment_token
+              ) {
+                return undefined;
+              }
+              return {
+                ...current,
+                pending_reviewer_human_decision_comment_token:
+                  reviewerHumanDecisionCommentToken,
+              };
+            }
+          );
+        }
+        if (
+          beforeReviewAction?.pending_reviewer_human_decision_comment_token !==
+          reviewerHumanDecisionCommentToken
+        ) {
+          throw new Error(
+            `Review action ownership was lost before saving ${target.pr_url}`
+          );
+        }
+        try {
+          reviewerHumanDecisionCommentId =
+            await reconcileReviewerHumanDecisionComment(
+              target.pr_url,
+              reviewerHumanDecisionCommentToken,
+              shouldCreateHumanDecisionComment
+                ? reviewerHumanDecisionBody
+                : undefined
+            );
+          if (
+            shouldCreateHumanDecisionComment &&
+            !reviewerHumanDecisionCommentId
+          ) {
+            reviewActionError = reviewerHumanDecisionBody
+              ? "GitHub did not return a human-decision comment receipt."
+              : "The reviewer returned needs_human_decision without a Human Decision section.";
+          }
+        } catch (error) {
+          reviewActionError =
+            error instanceof Error
+              ? error.message
+              : "Unknown GitHub comment error.";
+        }
+      }
+    }
+    const successful = runtimeSuccessful && !reviewActionError;
     const saved = await mutateReviewSummary(target.pr_url, (latestBeforeSave) => {
       if (latestBeforeSave?.current_run_id !== runLock.data.token) {
         return undefined;
@@ -1211,21 +1294,26 @@ export async function spawnReviewSummary(
         duration_ms: finalOutput.duration_ms,
         input_tokens: finalOutput.usage?.input_tokens,
         output_tokens: finalOutput.usage?.output_tokens,
-        error: reviewContextChangedDuringRun ? undefined : finalOutput.error,
+        error: reviewContextChangedDuringRun
+          ? undefined
+          : finalOutput.error || reviewActionError,
         error_at:
           reviewContextChangedDuringRun || successful ? undefined : generatedAt,
         agent_review_status: successful
           ? headMovedDuringRun || reviewContextChangedDuringRun
             ? undefined
-            : parseReviewAgentStatus(finalOutput.result_text)
+            : agentReviewStatus
           : latestBeforeSave.agent_review_status,
         reviewer_human_decision_comment_ids:
           reviewerHumanDecisionCommentIds.length > 0
             ? reviewerHumanDecisionCommentIds
             : undefined,
+        pending_reviewer_human_decision_comment_token: reviewActionError
+          ? reviewerHumanDecisionCommentToken
+          : undefined,
         followups: reviewContextChangedDuringRun
           ? []
-          : followupReview || finalOutput.error
+          : followupReview || finalOutput.error || reviewActionError
             ? latestBeforeSave.followups || []
             : [],
         // Review signals are owned by the worker poll and the submit route,

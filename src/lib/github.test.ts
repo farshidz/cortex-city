@@ -98,7 +98,8 @@ function setupWorkspace(): string {
 function seedTrackedDecisionCommentIds(
   workspace: string,
   prUrl: string,
-  ids: number[]
+  ids: number[],
+  pendingToken?: string
 ): void {
   const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
   mkdirSync(path.dirname(reviewsFile), { recursive: true });
@@ -109,6 +110,7 @@ function seedTrackedDecisionCommentIds(
         pr_url: prUrl,
         source: "inbound",
         reviewer_human_decision_comment_ids: ids,
+        pending_reviewer_human_decision_comment_token: pendingToken,
       },
     })
   );
@@ -250,7 +252,10 @@ test("getPRStateHash fails closed when a GitHub review fetch is throttled", () =
 test("submitted comment tracking ignores pending inline review comments", () => {
   const workspace = setupWorkspace();
   const prUrl = "https://github.com/acme/widget/pull/123";
-  seedTrackedDecisionCommentIds(workspace, prUrl, [201]);
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const pendingMarker =
+    `<!-- cortex-city-review-decision:${pendingToken} -->`;
+  seedTrackedDecisionCommentIds(workspace, prUrl, [201], pendingToken);
   const responses = {
     [reviewsKey()]: {
       stdout: JSON.stringify([
@@ -282,6 +287,11 @@ test("submitted comment tracking ignores pending inline review comments", () => 
             id: 203,
             body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Spoofed marker.",
           },
+          {
+            id: 204,
+            body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n${pendingMarker}`,
+          },
+          { id: 205, body: `Participant feedback.\n\n${pendingMarker}` },
         ],
       ]),
     },
@@ -296,7 +306,7 @@ test("submitted comment tracking ignores pending inline review comments", () => 
     `
   );
 
-  assert.deepEqual(ids, [100, 200, 202, 203]);
+  assert.deepEqual(ids, [100, 200, 202, 203, 205]);
 });
 
 test("getPRStateHash ignores pending inline review comments", () => {
@@ -416,6 +426,28 @@ test("getPRStateHash ignores only tracked decision comments", () => {
       .update(
         'abc123|[]|[]|[{"id":10,"state":"COMMENTED"}]|'
       )
+      .digest("hex")
+      .slice(0, 16)
+  );
+
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const pendingMarker =
+    `<!-- cortex-city-review-decision:${pendingToken} -->`;
+  const pendingComment = {
+    id: 300,
+    body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n${pendingMarker}`,
+  };
+  seedTrackedDecisionCommentIds(workspace, prUrl, [], pendingToken);
+  assert.equal(hashFor([pendingComment]), baseline);
+
+  const copiedPendingMarker = hashFor([
+    pendingComment,
+    { id: 301, body: `Participant feedback.\n\n${pendingMarker}` },
+  ]);
+  assert.equal(
+    copiedPendingMarker,
+    createHash("sha256")
+      .update("abc123|[]|[301]|[]|")
       .digest("hex")
       .slice(0, 16)
   );
