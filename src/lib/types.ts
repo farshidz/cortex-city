@@ -283,6 +283,10 @@ export interface ReviewSummary extends ReviewRequest {
   error?: string;
   error_at?: string;
   agent_review_status?: ReviewAgentStatus;
+  // Exact top-level PR conversation comments emitted for needs_human_decision.
+  // Tracking IDs avoids trusting a public body prefix when task feedback is
+  // filtered and remains valid across later review heads.
+  reviewer_human_decision_comment_ids?: number[];
   followups?: ReviewFollowup[];
   final_at?: string;
   final_state?: "merged" | "closed";

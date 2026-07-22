@@ -1,6 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
-import { isReviewerHumanDecisionComment } from "./review-comments";
+import { getReviewSummary } from "./review-store";
 import type { PRStatus, ReviewRequest } from "./types";
 
 interface PRInfo {
@@ -33,7 +33,12 @@ interface ReviewItem {
 
 interface IssueCommentItem {
   id: number;
-  body?: string | null;
+}
+
+function reviewerHumanDecisionCommentIds(prUrl: string): Set<number> {
+  return new Set(
+    getReviewSummary(prUrl)?.reviewer_human_decision_comment_ids || []
+  );
 }
 
 function parsePRUrl(url: string): PRInfo | null {
@@ -269,6 +274,7 @@ export async function getPRHeadSha(prUrl: string): Promise<string> {
 export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return [];
+  const ignoredIssueCommentIds = reviewerHumanDecisionCommentIds(prUrl);
 
   const [reviews, comments, issueComments] = await Promise.all([
     execPaginatedArray<{ id: number; state?: string }>(
@@ -296,7 +302,7 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
     .map((comment) => comment.id);
 
   const issueCommentIds = issueComments
-    .filter((comment) => !isReviewerHumanDecisionComment(comment.body))
+    .filter((comment) => !ignoredIssueCommentIds.has(comment.id))
     .map((comment) => comment.id);
 
   return [...reviewCommentIds, ...issueCommentIds].sort();
@@ -305,6 +311,7 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
 export async function getPRStateHash(prUrl: string): Promise<string> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return "";
+  const ignoredIssueCommentIds = reviewerHumanDecisionCommentIds(prUrl);
 
   const [prData, reviews, comments, issueComments, checksResult] = await Promise.all([
     execJsonStrict<{
@@ -364,7 +371,7 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
   );
   const issueCommentIds = JSON.stringify(
     issueComments
-      .filter((comment) => !isReviewerHumanDecisionComment(comment.body))
+      .filter((comment) => !ignoredIssueCommentIds.has(comment.id))
       .map((comment) => comment.id)
       .sort()
   );

@@ -501,13 +501,18 @@ export function buildReviewWrapperPrompt(
           "and GitHub does not allow an author to approve their own PR.",
         ].join(" "),
     [
-      "- If your final status is `needs_human_decision`, post one GitHub PR",
-      "comment that clearly presents the uncertain or advisory points and the",
-      "decision the human needs to make. Do this for every review source, including",
-      "task-owned and other self-authored PRs. Use the explicit PR URL because",
-      "the review workspace is not necessarily a checkout of the target repository.",
+      "- If your final status is `needs_human_decision`, post exactly one top-level",
+      "PR conversation comment that clearly presents the uncertain or advisory",
+      "points and the decision the human needs to make. Do this for every review",
+      "source, including task-owned and other self-authored PRs.",
       `Start this specific comment with \`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\``,
-      "so Cortex City can distinguish it from implementation feedback.",
+      "and create it with this exact issue-comment API surface:",
+      `\`gh api --method POST repos/${target.repo_slug}/issues/${target.pr_number}/comments`,
+      "--raw-field body='<signed comment body>' --jq .id`.",
+      "Capture the returned numeric ID. Do not use `gh pr comment`,",
+      "`gh pr review --comment`, an inline comment, or a pending review for this action.",
+      "After `Agent status: needs_human_decision`, include one exact line",
+      "`Human decision comment ID: <id>` with the captured numeric ID.",
     ].join(" "),
     [
       "- Include uncertain or advisory points in the generated review as well as",
@@ -585,6 +590,17 @@ export function parseReviewAgentStatus(
     if (exact) return exact;
   }
   return undefined;
+}
+
+export function parseReviewerHumanDecisionCommentId(
+  text: string
+): number | undefined {
+  const match = text.match(
+    /^\s*Human decision comment ID:\s*`?(\d+)`?\s*$/im
+  );
+  if (!match) return undefined;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
 }
 
 function buildClaudeArgs(
@@ -973,6 +989,8 @@ export async function spawnReviewSummary(
     agent_review_status: followupReview
       ? undefined
       : cachedBefore?.agent_review_status,
+    reviewer_human_decision_comment_ids:
+      cachedBefore?.reviewer_human_decision_comment_ids,
     followups: cachedBefore?.followups,
     final_at: cachedBefore?.final_at,
     error: cachedBefore?.error,
@@ -1129,6 +1147,8 @@ export async function spawnReviewSummary(
 
     const generatedAt = new Date().toISOString();
     const successful = !finalOutput.error;
+    const reviewerHumanDecisionCommentId =
+      parseReviewerHumanDecisionCommentId(finalOutput.result_text);
     assertReviewRunLockHealthy(runLock);
     const saved = await mutateReviewSummary(target.pr_url, (latestBeforeSave) => {
       if (latestBeforeSave?.current_run_id !== runLock.data.token) {
@@ -1145,6 +1165,16 @@ export async function spawnReviewSummary(
         latestTarget.task_title !== target.task_title ||
         latestTarget.task_description !== target.task_description ||
         latestTarget.task_plan !== target.task_plan;
+      const existingReviewerHumanDecisionCommentIds =
+        latestBeforeSave.reviewer_human_decision_comment_ids || [];
+      const reviewerHumanDecisionCommentIds = reviewerHumanDecisionCommentId
+        ? [
+            ...new Set([
+              ...existingReviewerHumanDecisionCommentIds,
+              reviewerHumanDecisionCommentId,
+            ]),
+          ]
+        : existingReviewerHumanDecisionCommentIds;
       return {
         // Reconciliation may discover a new HEAD or change review context while
         // the agent is running. Keep the latest identity; a changed context is
@@ -1189,6 +1219,10 @@ export async function spawnReviewSummary(
             ? undefined
             : parseReviewAgentStatus(finalOutput.result_text)
           : latestBeforeSave.agent_review_status,
+        reviewer_human_decision_comment_ids:
+          reviewerHumanDecisionCommentIds.length > 0
+            ? reviewerHumanDecisionCommentIds
+            : undefined,
         followups: reviewContextChangedDuringRun
           ? []
           : followupReview || finalOutput.error

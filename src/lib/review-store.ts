@@ -88,6 +88,19 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
     ...review,
     source: review.source === "task" ? "task" : "inbound",
   };
+  const decisionCommentIds = Array.isArray(
+    normalized.reviewer_human_decision_comment_ids
+  )
+    ? [
+        ...new Set(
+          normalized.reviewer_human_decision_comment_ids.filter(
+            (id) => Number.isSafeInteger(id) && id > 0
+          )
+        ),
+      ]
+    : [];
+  normalized.reviewer_human_decision_comment_ids =
+    decisionCommentIds.length > 0 ? decisionCommentIds : undefined;
   if (normalized.source === "task") {
     // Human approval/change-request signals belong to inbound reviews. They
     // must never make a task owner's own PR look approved or changes-requested.

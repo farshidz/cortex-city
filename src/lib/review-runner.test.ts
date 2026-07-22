@@ -16,6 +16,7 @@ import {
   DEFAULT_REVIEW_PROMPT,
   isReviewSessionCompatible,
   parseReviewAgentStatus,
+  parseReviewerHumanDecisionCommentId,
   resolveReviewOpts,
   resolveReviewPrompt,
   spawnRuntime,
@@ -268,6 +269,13 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   );
   assert.match(taskPrompt, /final status is `needs_human_decision`/i);
   assert.match(taskPrompt, /including task-owned and other self-authored PRs/i);
+  assert.match(
+    taskPrompt,
+    /repos\/acme\/widget\/issues\/1\/comments.*--jq \.id/i
+  );
+  assert.match(taskPrompt, /Do not use `gh pr comment`/i);
+  assert.match(taskPrompt, /`gh pr review --comment`/i);
+  assert.match(taskPrompt, /Human decision comment ID: <id>/i);
 
   const inboundPrompt = buildReviewWrapperPrompt(config, sampleRequest());
   assert.match(inboundPrompt, /Review source: inbound pull request/);
@@ -284,7 +292,7 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.match(inboundPrompt, /latest submitted decisive review/i);
   assert.match(inboundPrompt, /do not approve or overwrite it/i);
   assert.match(inboundPrompt, /final status is `needs_human_decision`/i);
-  assert.match(inboundPrompt, /post one GitHub PR comment/i);
+  assert.match(inboundPrompt, /post exactly one top-level PR conversation comment/i);
   assert.match(inboundPrompt, /Do not submit a change-request review decision/i);
 
   const selfAuthoredPrompt = buildReviewWrapperPrompt(
@@ -416,6 +424,29 @@ test("parseReviewAgentStatus reads the exact agent status marker", () => {
     "needs_author_changes"
   );
   assert.equal(parseReviewAgentStatus("No marker here"), undefined);
+});
+
+test("parseReviewerHumanDecisionCommentId requires an exact positive numeric ID line", () => {
+  assert.equal(
+    parseReviewerHumanDecisionCommentId(
+      "## Agent Status\nAgent status: `needs_human_decision`\nHuman decision comment ID: `8123`"
+    ),
+    8123
+  );
+  assert.equal(
+    parseReviewerHumanDecisionCommentId("Human decision comment ID: 0"),
+    undefined
+  );
+  assert.equal(
+    parseReviewerHumanDecisionCommentId(
+      "Posted Human decision comment ID: 8123 successfully"
+    ),
+    undefined
+  );
+  assert.equal(
+    parseReviewerHumanDecisionCommentId("No decision comment was posted."),
+    undefined
+  );
 });
 
 test("spawnRuntime retains Claude workspaces while restoring bypass mode", () => {
@@ -619,6 +650,62 @@ test("summarizePR persists Claude output as a ReviewSummary", () => {
   assert.equal(result.persisted.summary, "## Summary\nLooks fine.");
   assert.equal(result.persisted.summary_head_sha, request.head_sha);
   assert.equal(result.persisted.session_id, "claude-session-1");
+});
+
+test("summarizePR persists the emitted human-decision comment ID", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-comment-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-decision-session",
+        result: [
+          "## Summary",
+          "A human choice remains.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "Human decision comment ID: 8123",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest();
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "Previously reviewed.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        reviewer_human_decision_comment_ids: [7000],
+      });
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  assert.equal(result.summary.agent_review_status, "needs_human_decision");
+  assert.deepEqual(result.summary.reviewer_human_decision_comment_ids, [
+    7000,
+    8123,
+  ]);
+  assert.deepEqual(result.persisted.reviewer_human_decision_comment_ids, [
+    7000,
+    8123,
+  ]);
 });
 
 test("spawnReviewSummary preserves retro state during summary refreshes", () => {

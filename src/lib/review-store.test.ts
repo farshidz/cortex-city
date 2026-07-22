@@ -122,7 +122,10 @@ test("readReviewSummaries returns an empty array when no file exists", () => {
 
 test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   const workspace = createTempWorkspace();
-  const entry = sampleReviewLiteral("https://github.com/acme/widget/pull/1");
+  const entry = {
+    ...sampleReviewLiteral("https://github.com/acme/widget/pull/1"),
+    reviewer_human_decision_comment_ids: [400, 400, 0, -1, 401.5, 402],
+  };
   const result = runStoreScript(
     workspace,
     `
@@ -140,6 +143,7 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   assert.equal(result.saved.source, "inbound");
   assert.equal(result.saved.review_status, "pending_summary");
   assert.equal(result.saved.review_state, "queued");
+  assert.deepEqual(result.saved.reviewer_human_decision_comment_ids, [400, 402]);
   assert.deepEqual(result.all, [result.saved]);
   assert.deepEqual(result.fetched, result.saved);
 

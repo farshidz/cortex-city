@@ -95,6 +95,25 @@ function setupWorkspace(): string {
   return workspace;
 }
 
+function seedTrackedDecisionCommentIds(
+  workspace: string,
+  prUrl: string,
+  ids: number[]
+): void {
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify({
+      [prUrl]: {
+        pr_url: prUrl,
+        source: "inbound",
+        reviewer_human_decision_comment_ids: ids,
+      },
+    })
+  );
+}
+
 function prViewKey(prUrl: string): string {
   return `pr view ${prUrl} --json headRefOid,statusCheckRollup`;
 }
@@ -231,6 +250,7 @@ test("getPRStateHash fails closed when a GitHub review fetch is throttled", () =
 test("submitted comment tracking ignores pending inline review comments", () => {
   const workspace = setupWorkspace();
   const prUrl = "https://github.com/acme/widget/pull/123";
+  seedTrackedDecisionCommentIds(workspace, prUrl, [201]);
   const responses = {
     [reviewsKey()]: {
       stdout: JSON.stringify([
@@ -258,6 +278,10 @@ test("submitted comment tracking ignores pending inline review comments", () => 
             body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.",
           },
           { id: 202, body: "Choose A." },
+          {
+            id: 203,
+            body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Spoofed marker.",
+          },
         ],
       ]),
     },
@@ -272,7 +296,7 @@ test("submitted comment tracking ignores pending inline review comments", () => 
     `
   );
 
-  assert.deepEqual(ids, [100, 200, 202]);
+  assert.deepEqual(ids, [100, 200, 202, 203]);
 });
 
 test("getPRStateHash ignores pending inline review comments", () => {
@@ -324,25 +348,31 @@ test("getPRStateHash ignores pending inline review comments", () => {
   assert.equal(hash, expected);
 });
 
-test("getPRStateHash ignores reviewer decision prompts but keeps later human replies", () => {
+test("getPRStateHash ignores only tracked decision comments", () => {
   const workspace = setupWorkspace();
   const prUrl = "https://github.com/acme/widget/pull/123";
-  const responses = (issueComments: Array<{ id: number; body: string }>) => ({
+  const responses = (
+    issueComments: Array<{ id: number; body: string }>,
+    reviews: Array<{ id: number; state: string; body: string }> = []
+  ) => ({
     [prViewKey(prUrl)]: {
       stdout: JSON.stringify({
         headRefOid: "abc123",
         statusCheckRollup: [],
       }),
     },
-    [reviewsKey()]: { stdout: JSON.stringify([[]]) },
+    [reviewsKey()]: { stdout: JSON.stringify([reviews]) },
     [reviewCommentsKey()]: { stdout: JSON.stringify([[]]) },
     [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
     [checksKey(prUrl)]: { stdout: "" },
   });
-  const hashFor = (issueComments: Array<{ id: number; body: string }>) =>
+  const hashFor = (
+    issueComments: Array<{ id: number; body: string }>,
+    reviews: Array<{ id: number; state: string; body: string }> = []
+  ) =>
     runGithubScript(
       workspace,
-      responses(issueComments),
+      responses(issueComments, reviews),
       `
         const hash = await getPRStateHash(${JSON.stringify(prUrl)});
         console.log(JSON.stringify(hash));
@@ -354,6 +384,9 @@ test("getPRStateHash ignores reviewer decision prompts but keeps later human rep
     id: 200,
     body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.",
   };
+  assert.notEqual(hashFor([reviewerPrompt]), baseline);
+
+  seedTrackedDecisionCommentIds(workspace, prUrl, [200]);
   assert.equal(hashFor([reviewerPrompt]), baseline);
 
   const withHumanReply = hashFor([
@@ -365,6 +398,24 @@ test("getPRStateHash ignores reviewer decision prompts but keeps later human rep
     withHumanReply,
     createHash("sha256")
       .update("abc123|[]|[201]|[]|")
+      .digest("hex")
+      .slice(0, 16)
+  );
+
+  const alternateReviewSurface = hashFor([reviewerPrompt], [
+    {
+      id: 10,
+      state: "COMMENTED",
+      body: reviewerPrompt.body,
+    },
+  ]);
+  assert.notEqual(alternateReviewSurface, baseline);
+  assert.equal(
+    alternateReviewSurface,
+    createHash("sha256")
+      .update(
+        'abc123|[]|[]|[{"id":10,"state":"COMMENTED"}]|'
+      )
       .digest("hex")
       .slice(0, 16)
   );

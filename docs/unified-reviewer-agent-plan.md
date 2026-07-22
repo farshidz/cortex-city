@@ -19,7 +19,7 @@ Add one global reviewer model setting so the user can select GPT-5.6 or provide 
 - A live Cortex task takes precedence when its PR is also selected by `cortex-city-review`; the label does not bypass task pause, automatic-review opt-out, or builder-coordination rules.
 - The existing per-task reviewer on/off choice remains as an **Automatic review** opt-out. It controls whether a task PR enters the unified review queue; it does not select a different reviewer.
 - Settings defines the default reviewer runtime, model, and effort. The reviewer model is Settings-only; existing per-review runtime and effort overrides can remain. A task's runtime, model, and effort continue to configure its implementation agent only.
-- The Reviews area remains focused on PRs requiring the user's review decision and explicitly filters by review source. Task-owned results remain associated with the task workflow and GitHub feedback, where self-approval actions and inbound-review wording do not apply.
+- The Reviews area explicitly filters by review source. Clean inbound PRs from other authors are approved automatically at the reviewed SHA, while human-decision cases remain visible and receive a top-level PR conversation prompt. Task-owned results remain associated with the task workflow and GitHub feedback, where self-approval actions and inbound-review wording do not apply.
 - Required changes found on a task-owned PR are left as GitHub comments. The implementation agent continues to detect and address that feedback through its existing PR-feedback workflow.
 
 ## Target Architecture

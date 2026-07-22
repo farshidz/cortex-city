@@ -22,6 +22,7 @@ import {
 const WORKER_RUNTIME_MODULE_URL = moduleUrl("src/lib/orchestrator-worker-runtime.ts");
 const STORE_MODULE_URL = moduleUrl("src/lib/store.ts");
 const GITHUB_MODULE_URL = moduleUrl("src/lib/github.ts");
+const REVIEW_STORE_MODULE_URL = moduleUrl("src/lib/review-store.ts");
 
 function sampleTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -68,6 +69,7 @@ function runWorkerScript(
       `import { pollOnce } from ${JSON.stringify(WORKER_RUNTIME_MODULE_URL)};`,
       `import { createTask, readTasks } from ${JSON.stringify(STORE_MODULE_URL)};`,
       `import { getPRStateHash } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      `import { upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
     ],
     body,
     env
@@ -538,6 +540,21 @@ test("reviewer decision prompts wait for a human response before waking the task
           worktree_path: workspace,
         }))},
         last_review_gh_state: baselineHash,
+      });
+      await upsertReviewSummary({
+        source: "task",
+        task_id: "human-decision-task",
+        pr_url: ${JSON.stringify(prUrl)},
+        pr_number: 40,
+        repo_slug: "farshidz/marqo-cortex-city",
+        title: "Choose an implementation",
+        author: "farshidz",
+        head_sha: "decision-head",
+        created_at: "2026-05-01T00:00:00.000Z",
+        updated_at: "2026-05-01T00:00:00.000Z",
+        summary: "A human decision is required.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        reviewer_human_decision_comment_ids: [400],
       });
 
       const fs = require("node:fs");
