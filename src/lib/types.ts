@@ -213,9 +213,9 @@ export interface ReviewRequest {
   my_last_review_sha?: string;
   // SHA at which the signed-in user's current decision review is an APPROVAL.
   // Undefined unless the user's latest non-comment review is an approval. The
-  // reviewer agent never approves, so this is an agent-free signal: an approval
-  // at the current head means the human has handled the review. Compared against
-  // head_sha so a stale approval (from before new commits) does not count.
+  // reviewer agent may set this when it confidently approves an inbound PR;
+  // the human may also approve directly. Compared against head_sha so a stale
+  // approval (from before new commits) does not count.
   my_approval_sha?: string;
   // Symmetric to my_approval_sha: SHA at which the signed-in user's current
   // decision review is a CHANGES_REQUESTED. Lets a human change request
@@ -259,7 +259,7 @@ export type ReviewState =
   | "needs_author_changes" // verdict: agent found required changes
   | "needs_decision" // verdict: agent flagged advisory/uncertain points for you
   | "ready_to_approve" // verdict: agent found nothing blocking
-  | "approved" // you approved this HEAD on GitHub (overrides the agent verdict)
+  | "approved" // the reviewer or user approved this HEAD (overrides the verdict)
   | "changes_requested" // you requested changes on this HEAD (overrides the verdict)
   | "reviewed" // no verdict, summary current, you've reviewed this HEAD
   | "needs_review"; // no verdict, summary current, you haven't reviewed (fallback)

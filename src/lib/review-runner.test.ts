@@ -257,12 +257,27 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.match(taskPrompt, /Add focus trapping/);
   assert.match(taskPrompt, /Check the task's accessibility requirements/);
   assert.match(taskPrompt, /never authorizes self-approval/i);
+  assert.match(taskPrompt, /Do not approve this PR on GitHub/i);
+  assert.match(
+    taskPrompt,
+    /GitHub does not allow an author to approve their own PR/i
+  );
+  assert.match(taskPrompt, /final status is `needs_human_decision`/i);
+  assert.match(taskPrompt, /including task-owned and other self-authored PRs/i);
 
   const inboundPrompt = buildReviewWrapperPrompt(config, sampleRequest());
   assert.match(inboundPrompt, /Review source: inbound pull request/);
   assert.match(inboundPrompt, /someone else's PR/);
   assert.doesNotMatch(inboundPrompt, /accessibility requirements/);
   assert.doesNotMatch(inboundPrompt, /Cortex task context/);
+  assert.match(
+    inboundPrompt,
+    /final status is `ready_for_human_approval`.*approve the current PR head on GitHub/is
+  );
+  assert.match(inboundPrompt, /`gh pr review <PR URL> --approve`/);
+  assert.match(inboundPrompt, /final status is `needs_human_decision`/i);
+  assert.match(inboundPrompt, /post one GitHub PR comment/i);
+  assert.match(inboundPrompt, /Do not submit a change-request review decision/i);
 
   const selfAuthoredPrompt = buildReviewWrapperPrompt(
     config,
@@ -276,6 +291,12 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.match(
     selfAuthoredPrompt,
     /never approve it or request changes on GitHub/i
+  );
+  assert.match(selfAuthoredPrompt, /Do not approve this PR on GitHub/i);
+  assert.match(selfAuthoredPrompt, /final status is `needs_human_decision`/i);
+  assert.doesNotMatch(
+    selfAuthoredPrompt,
+    /`gh pr review <PR URL> --approve`/
   );
   assert.doesNotMatch(selfAuthoredPrompt, /someone else's PR/);
 });

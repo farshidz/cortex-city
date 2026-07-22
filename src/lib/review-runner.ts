@@ -153,7 +153,7 @@ export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull req
 
 Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused review as **GitHub-flavored Markdown**. Keep the existing review standard: surface the findings you would normally surface, but leave GitHub comments yourself when a finding requires the PR author to make a change. If you are unsure whether something should be posted as a PR comment, keep it in the generated review instead.
 
-Do not approve or request changes on GitHub.`;
+Follow the source-aware GitHub action rules in the Cortex City review protocol appended below.`;
 export const DEFAULT_REVIEW_PROMPT = DEFAULT_REVIEW_SUMMARY_PROMPT;
 
 export interface SpawnOpts {
@@ -465,10 +465,40 @@ export function buildReviewWrapperPrompt(
       "as the first characters of the comment body.",
     ].join(" "),
     [
-      "- Put uncertain or advisory points in the generated review instead of",
-      "posting them to GitHub.",
+      "- The source-aware GitHub action rules below are authoritative and",
+      "override any conflicting GitHub-action instruction earlier in the prompt.",
     ].join(" "),
-    "- Do not approve, request changes, or submit a GitHub PR review decision.",
+    source === "inbound" && !target.self_authored
+      ? [
+          "- If and only if your final status is `ready_for_human_approval`,",
+          "approve the current PR head on GitHub with `gh pr review <PR URL> --approve`",
+          "before finishing. This PR belongs to someone else, so approval is allowed.",
+        ].join(" ")
+      : [
+          "- Do not approve this PR on GitHub. It is owned by the signed-in user,",
+          "and GitHub does not allow an author to approve their own PR.",
+        ].join(" "),
+    [
+      "- If your final status is `needs_human_decision`, post one GitHub PR",
+      "comment that clearly presents the uncertain or advisory points and the",
+      "decision the human needs to make. Do this for every review source, including",
+      "task-owned and other self-authored PRs. Use the explicit PR URL because",
+      "the review workspace is not necessarily a checkout of the target repository.",
+    ].join(" "),
+    [
+      "- Include uncertain or advisory points in the generated review as well as",
+      "in the required `needs_human_decision` GitHub comment.",
+    ].join(" "),
+    [
+      "- Do not submit a change-request review decision. Do not approve for any",
+      "status other than `ready_for_human_approval`, and do not post the human-decision",
+      "comment for any status other than `needs_human_decision`.",
+    ].join(" "),
+    [
+      "- Complete the required GitHub action before emitting your final response.",
+      "If the action fails and you cannot verify that it succeeded, use `blocked`",
+      "and explain the failure in the generated review.",
+    ].join(" "),
   ];
 
   if (followup) {
