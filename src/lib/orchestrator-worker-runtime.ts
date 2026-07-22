@@ -914,10 +914,19 @@ async function runReviewPhases(
                     commentId,
                   ]),
                 ],
-                pending_reviewer_human_decision_comment_token: undefined,
-                agent_review_status: "needs_human_decision",
-                error: undefined,
-                error_at: undefined,
+                // Recovering the GitHub side effect does not recover the lost
+                // summary. Keep the action pending and force a retry; the next
+                // successful run reuses this token, finds the same comment,
+                // and clears the pending state without posting a duplicate.
+                pending_reviewer_human_decision_comment_token:
+                  review.pending_reviewer_human_decision_comment_token,
+                agent_review_status: undefined,
+                error: REVIEW_DECISION_ACTION_INTERRUPTED_ERROR,
+                error_at:
+                  current.error === REVIEW_DECISION_ACTION_INTERRUPTED_ERROR &&
+                  current.error_at
+                    ? current.error_at
+                    : new Date().toISOString(),
               };
             });
           } else {
