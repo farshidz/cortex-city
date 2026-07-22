@@ -657,7 +657,7 @@ test("pollOnce rebuilds a crashed human-decision review without duplicating its 
         issueComments: [
           {
             id: 410,
-            body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.\n\n<!-- cortex-city-review-decision:${pendingToken} -->`,
+            body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose the legacy path.\n\n<!-- cortex-city-review-decision:${pendingToken} -->`,
           },
         ],
         nextIssueCommentId: 500,
@@ -753,6 +753,10 @@ test("pollOnce rebuilds a crashed human-decision review without duplicating its 
   assert.equal(
     result.ghState.prs["farshidz/marqo-cortex-city#41"].issueComments.length,
     1
+  );
+  assert.equal(
+    result.ghState.prs["farshidz/marqo-cortex-city#41"].issueComments[0].body,
+    `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B before merging.\n\n<!-- cortex-city-review-decision:${pendingToken} -->`
   );
 });
 

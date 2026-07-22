@@ -710,7 +710,7 @@ function execFileResult(
 export async function reconcileReviewerHumanDecisionComment(
   prUrl: string,
   token: string,
-  decisionBody?: string
+  decisionBody?: string | null
 ): Promise<number | undefined> {
   const pr = parsePRUrl(prUrl);
   if (
@@ -734,9 +734,51 @@ export async function reconcileReviewerHumanDecisionComment(
       isReviewerHumanDecisionCommentForMarker(comment, marker)
     )
     .sort((a, b) => a.id - b.id)[0];
-  if (matched) return matched.id;
 
   const trimmedBody = decisionBody?.trim();
+  if (matched) {
+    const commentEndpoint =
+      `repos/${pr.owner}/${pr.repo}/issues/comments/${matched.id}`;
+    if (decisionBody === null) {
+      const result = await execFileResult("gh", [
+        "api",
+        "--method",
+        "DELETE",
+        commentEndpoint,
+      ]);
+      if (!result.ok) {
+        const detail = (result.stderr || result.stdout).trim();
+        throw new Error(
+          `Failed to remove the obsolete reviewer human-decision comment${detail ? `: ${detail}` : "."}`
+        );
+      }
+      return matched.id;
+    }
+    if (!trimmedBody) return matched.id;
+
+    const body =
+      `${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX} ${trimmedBody}\n\n${marker}`;
+    if (matched.body === body) return matched.id;
+    const result = await execFileResult("gh", [
+      "api",
+      "--method",
+      "PATCH",
+      commentEndpoint,
+      "--raw-field",
+      `body=${body}`,
+      "--jq",
+      ".id",
+    ]);
+    const id = Number(result.stdout.trim());
+    if (!result.ok || id !== matched.id) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw new Error(
+        `Failed to update the reviewer human-decision comment${detail ? `: ${detail}` : "."}`
+      );
+    }
+    return id;
+  }
+
   if (!trimmedBody) return undefined;
   const body =
     `${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX} ${trimmedBody}\n\n${marker}`;

@@ -1159,6 +1159,7 @@ export async function spawnReviewSummary(
     );
     let reviewerHumanDecisionCommentId: number | undefined;
     let reviewActionError: string | undefined;
+    let preservePendingReviewAction = false;
     assertReviewRunLockHealthy(runLock);
     let beforeReviewAction = getReviewSummary(target.pr_url);
     if (beforeReviewAction?.current_run_id === runLock.data.token) {
@@ -1177,8 +1178,20 @@ export async function spawnReviewSummary(
         runtimeSuccessful &&
         !actionTargetChanged &&
         agentReviewStatus === "needs_human_decision";
+      const hasPendingHumanDecisionComment = Boolean(
+        cachedBefore?.pending_reviewer_human_decision_comment_token
+      );
+      const shouldRemoveHumanDecisionComment =
+        hasPendingHumanDecisionComment &&
+        runtimeSuccessful &&
+        !actionTargetChanged &&
+        agentReviewStatus !== undefined &&
+        agentReviewStatus !== "needs_human_decision";
+      preservePendingReviewAction =
+        hasPendingHumanDecisionComment &&
+        (!runtimeSuccessful || actionTargetChanged || !agentReviewStatus);
       if (
-        cachedBefore?.pending_reviewer_human_decision_comment_token ||
+        hasPendingHumanDecisionComment ||
         shouldCreateHumanDecisionComment
       ) {
         if (!beforeReviewAction.pending_reviewer_human_decision_comment_token) {
@@ -1208,21 +1221,35 @@ export async function spawnReviewSummary(
           );
         }
         try {
-          reviewerHumanDecisionCommentId =
-            await reconcileReviewerHumanDecisionComment(
-              target.pr_url,
-              reviewerHumanDecisionCommentToken,
-              shouldCreateHumanDecisionComment
-                ? reviewerHumanDecisionBody
-                : undefined
-            );
-          if (
-            shouldCreateHumanDecisionComment &&
-            !reviewerHumanDecisionCommentId
+          if (shouldCreateHumanDecisionComment && !reviewerHumanDecisionBody) {
+            reviewActionError =
+              "The reviewer returned needs_human_decision without a Human Decision section.";
+          } else if (
+            hasPendingHumanDecisionComment &&
+            runtimeSuccessful &&
+            !actionTargetChanged &&
+            !agentReviewStatus
           ) {
-            reviewActionError = reviewerHumanDecisionBody
-              ? "GitHub did not return a human-decision comment receipt."
-              : "The reviewer returned needs_human_decision without a Human Decision section.";
+            reviewActionError =
+              "The rebuilt review did not return a valid Agent Status, so the pending human-decision comment was left unchanged.";
+          } else {
+            reviewerHumanDecisionCommentId =
+              await reconcileReviewerHumanDecisionComment(
+                target.pr_url,
+                reviewerHumanDecisionCommentToken,
+                shouldCreateHumanDecisionComment
+                  ? reviewerHumanDecisionBody
+                  : shouldRemoveHumanDecisionComment
+                    ? null
+                    : undefined
+              );
+            if (
+              shouldCreateHumanDecisionComment &&
+              !reviewerHumanDecisionCommentId
+            ) {
+              reviewActionError =
+                "GitHub did not return a human-decision comment receipt.";
+            }
           }
         } catch (error) {
           reviewActionError =
@@ -1308,9 +1335,10 @@ export async function spawnReviewSummary(
           reviewerHumanDecisionCommentIds.length > 0
             ? reviewerHumanDecisionCommentIds
             : undefined,
-        pending_reviewer_human_decision_comment_token: reviewActionError
-          ? reviewerHumanDecisionCommentToken
-          : undefined,
+        pending_reviewer_human_decision_comment_token:
+          reviewActionError || preservePendingReviewAction
+            ? reviewerHumanDecisionCommentToken
+            : undefined,
         followups: reviewContextChangedDuringRun
           ? []
           : followupReview || finalOutput.error || reviewActionError
