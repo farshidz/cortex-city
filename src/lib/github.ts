@@ -759,9 +759,10 @@ export async function reconcileReviewerHumanDecisionComment(
       return expectedCommentId;
     }
     if (trimmedBody) {
-      throw new Error(
-        "The verified reviewer human-decision comment no longer exists."
-      );
+      // The caller must persist a fresh token before recreating the prompt.
+      // Returning no receipt prevents this old token from adopting any public
+      // marker copy while allowing the pending action to advance safely.
+      return undefined;
     }
     return undefined;
   }

@@ -957,6 +957,112 @@ test("summarizePR never mutates or suppresses a copied marker when the verified 
   ]);
 });
 
+test("summarizePR replaces a deleted receipt with a fresh prompt for a new decision", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-replace-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const priorToken = "11111111-1111-4111-8111-111111111111";
+  const copiedBody = `**🤖[Cortex City Reviewer]** **Human decision needed:** Copied old prompt.\n\n<!-- cortex-city-review-decision:${priorToken} -->`;
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "new-head",
+        issueComments: [{ id: 8123, body: copiedBody }],
+        nextIssueCommentId: 9000,
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-replacement-session",
+        result: [
+          "## Summary",
+          "The new head needs a different human decision.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose the new implementation path.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({
+    source: "task",
+    task_id: "task-1",
+    head_sha: "new-head",
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        head_sha: "old-head",
+        summary: "The old head was clean.",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        reviewer_human_decision_comment_ids: [8122],
+        pending_reviewer_human_decision_comment_token: ${JSON.stringify(priorToken)},
+        pending_reviewer_human_decision_comment_id: 8122,
+      });
+      const submittedBefore = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      const submittedAfter = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      console.log(JSON.stringify({
+        summary,
+        submittedBefore,
+        submittedAfter,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(result.submittedBefore, [8123]);
+  assert.deepEqual(result.submittedAfter, [8123]);
+  assert.equal(result.persisted.summary_head_sha, "new-head");
+  assert.equal(result.persisted.agent_review_status, "needs_human_decision");
+  assert.equal(
+    result.persisted.pending_reviewer_human_decision_comment_token,
+    undefined
+  );
+  assert.equal(
+    result.persisted.pending_reviewer_human_decision_comment_id,
+    undefined
+  );
+  assert.deepEqual(result.persisted.reviewer_human_decision_comment_ids, [
+    8122,
+    9000,
+  ]);
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  const comments = ghState.prs["acme/widget#1"].issueComments;
+  assert.deepEqual(comments[0], { id: 8123, body: copiedBody });
+  assert.equal(comments.length, 2);
+  assert.match(
+    comments[1].body,
+    /^\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Human decision needed:\*\* Choose the new implementation path\./
+  );
+  assert.doesNotMatch(comments[1].body, new RegExp(priorToken));
+  assert.match(
+    comments[1].body,
+    /<!-- cortex-city-review-decision:[0-9a-f-]{36} -->$/
+  );
+});
+
 test("spawnReviewSummary preserves retro state during summary refreshes", () => {
   const workspace = setupRunnerWorkspace("review-runner-retro-preserve-");
   const scenarioFile = path.join(workspace, "scenario.json");

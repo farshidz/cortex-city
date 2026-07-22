@@ -971,7 +971,7 @@ export async function spawnReviewSummary(
     followupReview && compatibleCachedSessionId
       ? compatibleCachedSessionId
       : undefined;
-  const reviewerHumanDecisionCommentToken =
+  let reviewerHumanDecisionCommentToken =
     cachedBefore?.pending_reviewer_human_decision_comment_token || randomUUID();
   const baseEntry = {
     ...target,
@@ -1294,6 +1294,53 @@ export async function spawnReviewSummary(
                     : undefined,
                 expectedCommentId
               );
+            if (
+              shouldCreateHumanDecisionComment &&
+              expectedCommentId &&
+              !reviewerHumanDecisionCommentId
+            ) {
+              const priorToken = reviewerHumanDecisionCommentToken;
+              const replacementToken = randomUUID();
+              beforeReviewAction = await mutateReviewSummary(
+                target.pr_url,
+                (current) => {
+                  if (
+                    current?.current_run_id !== runLock.data.token ||
+                    current.pending_reviewer_human_decision_comment_token !==
+                      priorToken ||
+                    current.pending_reviewer_human_decision_comment_id !==
+                      expectedCommentId
+                  ) {
+                    return undefined;
+                  }
+                  return {
+                    ...current,
+                    pending_reviewer_human_decision_comment_token:
+                      replacementToken,
+                    pending_reviewer_human_decision_comment_id: undefined,
+                  };
+                }
+              );
+              if (
+                beforeReviewAction
+                  ?.pending_reviewer_human_decision_comment_token !==
+                  replacementToken ||
+                beforeReviewAction
+                  ?.pending_reviewer_human_decision_comment_id !== undefined
+              ) {
+                throw new Error(
+                  `Review comment replacement ownership was lost before saving ${target.pr_url}`
+                );
+              }
+              reviewerHumanDecisionCommentToken = replacementToken;
+              expectedCommentId = undefined;
+              reviewerHumanDecisionCommentId =
+                await reconcileReviewerHumanDecisionComment(
+                  target.pr_url,
+                  reviewerHumanDecisionCommentToken,
+                  reviewerHumanDecisionBody
+                );
+            }
             if (
               shouldCreateHumanDecisionComment &&
               !reviewerHumanDecisionCommentId
