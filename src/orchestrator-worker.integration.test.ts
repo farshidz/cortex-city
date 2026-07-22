@@ -610,6 +610,10 @@ test("reviewer decision prompts wait for a human response before waking the task
     result.reviewAfterReviewerPrompt.pending_reviewer_human_decision_comment_token,
     "11111111-1111-4111-8111-111111111111"
   );
+  assert.equal(
+    result.reviewAfterReviewerPrompt.pending_reviewer_human_decision_comment_id,
+    400
+  );
   assert.equal(result.finalTask.last_run_result, "success");
   assert.equal(result.callCount, 1);
 });

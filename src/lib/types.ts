@@ -291,6 +291,9 @@ export interface ReviewSummary extends ReviewRequest {
   // the model. If the process dies after posting but before saving the receipt,
   // this token identifies the one comment that must be reconciled on retry.
   pending_reviewer_human_decision_comment_token?: string;
+  // Exact receipt pinned to the pending token before any later edit or delete.
+  // Destructive reconciliation must never fall back to a marker-only match.
+  pending_reviewer_human_decision_comment_id?: number;
   followups?: ReviewFollowup[];
   final_at?: string;
   final_state?: "merged" | "closed";

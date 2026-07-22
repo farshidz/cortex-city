@@ -893,7 +893,9 @@ async function runReviewPhases(
           const commentId =
             await deps.reconcileReviewerHumanDecisionComment(
               review.pr_url,
-              review.pending_reviewer_human_decision_comment_token
+              review.pending_reviewer_human_decision_comment_token,
+              undefined,
+              review.pending_reviewer_human_decision_comment_id
             );
           if (commentId) {
             await mutateStoredReview(deps, review.pr_url, (current) => {
@@ -920,6 +922,12 @@ async function runReviewPhases(
                 // and clears the pending state without posting a duplicate.
                 pending_reviewer_human_decision_comment_token:
                   review.pending_reviewer_human_decision_comment_token,
+                // Pin the recovered receipt before the retry can edit or
+                // delete anything. Future reconciliation must use this exact
+                // ID rather than selecting another public marker match.
+                pending_reviewer_human_decision_comment_id:
+                  review.pending_reviewer_human_decision_comment_id ||
+                  commentId,
                 agent_review_status: undefined,
                 error: REVIEW_DECISION_ACTION_INTERRUPTED_ERROR,
                 error_at:

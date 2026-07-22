@@ -109,6 +109,14 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
     )
       ? normalized.pending_reviewer_human_decision_comment_token
       : undefined;
+  normalized.pending_reviewer_human_decision_comment_id =
+    normalized.pending_reviewer_human_decision_comment_token &&
+    Number.isSafeInteger(
+      normalized.pending_reviewer_human_decision_comment_id
+    ) &&
+    (normalized.pending_reviewer_human_decision_comment_id ?? 0) > 0
+      ? normalized.pending_reviewer_human_decision_comment_id
+      : undefined;
   if (normalized.source === "task") {
     // Human approval/change-request signals belong to inbound reviews. They
     // must never make a task owner's own PR look approved or changes-requested.

@@ -993,6 +993,8 @@ export async function spawnReviewSummary(
       cachedBefore?.reviewer_human_decision_comment_ids,
     pending_reviewer_human_decision_comment_token:
       cachedBefore?.pending_reviewer_human_decision_comment_token,
+    pending_reviewer_human_decision_comment_id:
+      cachedBefore?.pending_reviewer_human_decision_comment_id,
     followups: cachedBefore?.followups,
     final_at: cachedBefore?.final_at,
     error: cachedBefore?.error,
@@ -1090,6 +1092,8 @@ export async function spawnReviewSummary(
           error_at: failedAt,
           pending_reviewer_human_decision_comment_token:
             cachedBefore?.pending_reviewer_human_decision_comment_token,
+          pending_reviewer_human_decision_comment_id:
+            cachedBefore?.pending_reviewer_human_decision_comment_id,
           current_run_pid: undefined,
           current_run_id: undefined,
           ...retroFields(current || cachedBefore),
@@ -1221,6 +1225,52 @@ export async function spawnReviewSummary(
           );
         }
         try {
+          let expectedCommentId =
+            beforeReviewAction.pending_reviewer_human_decision_comment_id;
+          if (hasPendingHumanDecisionComment && !expectedCommentId) {
+            const recoveredCommentId =
+              await reconcileReviewerHumanDecisionComment(
+                target.pr_url,
+                reviewerHumanDecisionCommentToken
+              );
+            if (recoveredCommentId) {
+              beforeReviewAction = await mutateReviewSummary(
+                target.pr_url,
+                (current) => {
+                  if (
+                    current?.current_run_id !== runLock.data.token ||
+                    current.pending_reviewer_human_decision_comment_token !==
+                      reviewerHumanDecisionCommentToken ||
+                    current.pending_reviewer_human_decision_comment_id
+                  ) {
+                    return undefined;
+                  }
+                  return {
+                    ...current,
+                    reviewer_human_decision_comment_ids: [
+                      ...new Set([
+                        ...(current.reviewer_human_decision_comment_ids || []),
+                        recoveredCommentId,
+                      ]),
+                    ],
+                    pending_reviewer_human_decision_comment_id:
+                      recoveredCommentId,
+                  };
+                }
+              );
+              if (
+                beforeReviewAction
+                  ?.pending_reviewer_human_decision_comment_id !==
+                recoveredCommentId
+              ) {
+                throw new Error(
+                  `Review comment receipt ownership was lost before saving ${target.pr_url}`
+                );
+              }
+              expectedCommentId = recoveredCommentId;
+            }
+          }
+          reviewerHumanDecisionCommentId = expectedCommentId;
           if (shouldCreateHumanDecisionComment && !reviewerHumanDecisionBody) {
             reviewActionError =
               "The reviewer returned needs_human_decision without a Human Decision section.";
@@ -1241,7 +1291,8 @@ export async function spawnReviewSummary(
                   ? reviewerHumanDecisionBody
                   : shouldRemoveHumanDecisionComment
                     ? null
-                    : undefined
+                    : undefined,
+                expectedCommentId
               );
             if (
               shouldCreateHumanDecisionComment &&
@@ -1338,6 +1389,11 @@ export async function spawnReviewSummary(
         pending_reviewer_human_decision_comment_token:
           reviewActionError || preservePendingReviewAction
             ? reviewerHumanDecisionCommentToken
+            : undefined,
+        pending_reviewer_human_decision_comment_id:
+          reviewActionError || preservePendingReviewAction
+            ? reviewerHumanDecisionCommentId ||
+              latestBeforeSave.pending_reviewer_human_decision_comment_id
             : undefined,
         followups: reviewContextChangedDuringRun
           ? []

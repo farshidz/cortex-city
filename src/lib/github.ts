@@ -61,6 +61,12 @@ function reviewerHumanDecisionCommentIds(
   );
   const pendingToken = review?.pending_reviewer_human_decision_comment_token;
   if (!pendingToken) return ignoredIds;
+  const pendingCommentId =
+    review?.pending_reviewer_human_decision_comment_id;
+  if (pendingCommentId) {
+    ignoredIds.add(pendingCommentId);
+    return ignoredIds;
+  }
 
   const marker = reviewerHumanDecisionCommentMarker(pendingToken);
   const pendingComment = issueComments
@@ -710,7 +716,8 @@ function execFileResult(
 export async function reconcileReviewerHumanDecisionComment(
   prUrl: string,
   token: string,
-  decisionBody?: string | null
+  decisionBody?: string | null,
+  expectedCommentId?: number
 ): Promise<number | undefined> {
   const pr = parsePRUrl(prUrl);
   if (
@@ -721,6 +728,12 @@ export async function reconcileReviewerHumanDecisionComment(
   ) {
     throw new Error("Invalid reviewer human-decision comment target or token.");
   }
+  if (
+    expectedCommentId !== undefined &&
+    (!Number.isSafeInteger(expectedCommentId) || expectedCommentId <= 0)
+  ) {
+    throw new Error("Invalid reviewer human-decision comment receipt.");
+  }
 
   const endpoint =
     `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`;
@@ -729,13 +742,37 @@ export async function reconcileReviewerHumanDecisionComment(
     throw new Error("Failed to inspect existing PR conversation comments.");
   }
   const marker = reviewerHumanDecisionCommentMarker(token);
-  const matched = existing
+  const markerMatched = existing
     .filter((comment) =>
       isReviewerHumanDecisionCommentForMarker(comment, marker)
     )
     .sort((a, b) => a.id - b.id)[0];
+  const receiptMatched = expectedCommentId
+    ? existing.find((comment) => comment.id === expectedCommentId)
+    : undefined;
 
   const trimmedBody = decisionBody?.trim();
+  if (expectedCommentId && !receiptMatched) {
+    if (decisionBody === null) {
+      // The exact app-owned comment was already removed. Never fall back to a
+      // public marker match, which may belong to another PR participant.
+      return expectedCommentId;
+    }
+    if (trimmedBody) {
+      throw new Error(
+        "The verified reviewer human-decision comment no longer exists."
+      );
+    }
+    return undefined;
+  }
+
+  if (!expectedCommentId && markerMatched) {
+    // A marker-only match is sufficient to recover and persist a receipt, but
+    // it must be pinned by the caller before any later PATCH or DELETE.
+    return markerMatched.id;
+  }
+
+  const matched = receiptMatched;
   if (matched) {
     const commentEndpoint =
       `repos/${pr.owner}/${pr.repo}/issues/comments/${matched.id}`;

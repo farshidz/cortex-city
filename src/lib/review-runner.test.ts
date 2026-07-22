@@ -39,6 +39,7 @@ import type {
 
 const REVIEW_RUNNER_MODULE_URL = moduleUrl("src/lib/review-runner.ts");
 const REVIEW_STORE_MODULE_URL = moduleUrl("src/lib/review-store.ts");
+const GITHUB_MODULE_URL = moduleUrl("src/lib/github.ts");
 
 function baseConfig(
   overrides: Partial<OrchestratorConfig> = {}
@@ -872,6 +873,88 @@ test("summarizePR removes a recovered decision comment when the rebuilt review i
   );
   const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
   assert.deepEqual(ghState.prs["acme/widget#1"].issueComments, []);
+});
+
+test("summarizePR never mutates or suppresses a copied marker when the verified receipt is gone", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-copy-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const copiedBody = `**🤖[Cortex City Reviewer]** **Human decision needed:** Copied participant prompt.\n\n<!-- cortex-city-review-decision:${pendingToken} -->`;
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [{ id: 8123, body: copiedBody }],
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-clean-copy-session",
+        result: [
+          "## Summary",
+          "The rebuilt review is clean.",
+          "## Agent Status",
+          "Agent status: `ready_for_human_approval`",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "A previous run did not save its clean rebuild.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        reviewer_human_decision_comment_ids: [8122],
+        pending_reviewer_human_decision_comment_token: ${JSON.stringify(pendingToken)},
+        pending_reviewer_human_decision_comment_id: 8122,
+      });
+      const submittedBefore = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      const submittedAfter = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      console.log(JSON.stringify({
+        summary,
+        submittedBefore,
+        submittedAfter,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(result.submittedBefore, [8123]);
+  assert.deepEqual(result.submittedAfter, [8123]);
+  assert.equal(
+    result.persisted.pending_reviewer_human_decision_comment_token,
+    undefined
+  );
+  assert.equal(
+    result.persisted.pending_reviewer_human_decision_comment_id,
+    undefined
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.deepEqual(ghState.prs["acme/widget#1"].issueComments, [
+    { id: 8123, body: copiedBody },
+  ]);
 });
 
 test("spawnReviewSummary preserves retro state during summary refreshes", () => {
