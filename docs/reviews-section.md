@@ -1,5 +1,13 @@
 # Plan: Reviews Section for Cortex City
 
+> Historical implementation plan. The caching, lifecycle, and UI architecture
+> below remains useful context, but its human-only decision handoff has been
+> superseded. The unified reviewer now approves a reviewed SHA automatically
+> when a non-self-authored inbound review is clean. A review that needs human
+> judgment posts a signed, machine-distinguishable PR comment; the manual review
+> actions remain available as fallbacks. Self-authored and task-owned PRs are
+> never auto-approved.
+
 ## Context
 
 Cortex City currently manages tasks, agents, and sessions for outgoing PR work, but offers nothing for the *inbound* side of the workflow: PRs where the user is being asked to review someone else's code. Today, the user has to leave Cortex City and triage these on GitHub.

@@ -251,6 +251,10 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
     taskPrompt,
     /Start every GitHub comment you post with `\*\*🤖\[Cortex City Reviewer\]\*\*`/
   );
+  assert.match(
+    taskPrompt,
+    /\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Human decision needed:\*\*/
+  );
   assert.match(taskPrompt, /Task ID: task-42/);
   assert.match(taskPrompt, /Improve keyboard navigation/);
   assert.match(taskPrompt, /Make every dialog keyboard accessible/);
@@ -272,9 +276,13 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.doesNotMatch(inboundPrompt, /Cortex task context/);
   assert.match(
     inboundPrompt,
-    /final status is `ready_for_human_approval`.*approve the current PR head on GitHub/is
+    /final status is `ready_for_human_approval`.*approve the reviewed commit on GitHub/is
   );
-  assert.match(inboundPrompt, /`gh pr review <PR URL> --approve`/);
+  assert.match(inboundPrompt, /--raw-field commit_id=<reviewed SHA>/);
+  assert.match(inboundPrompt, /Never use `gh pr review --approve`/);
+  assert.match(inboundPrompt, /Immediately before the API call/i);
+  assert.match(inboundPrompt, /latest submitted decisive review/i);
+  assert.match(inboundPrompt, /do not approve or overwrite it/i);
   assert.match(inboundPrompt, /final status is `needs_human_decision`/i);
   assert.match(inboundPrompt, /post one GitHub PR comment/i);
   assert.match(inboundPrompt, /Do not submit a change-request review decision/i);
@@ -296,9 +304,21 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.match(selfAuthoredPrompt, /final status is `needs_human_decision`/i);
   assert.doesNotMatch(
     selfAuthoredPrompt,
-    /`gh pr review <PR URL> --approve`/
+    /--raw-field commit_id=<reviewed SHA>/
   );
   assert.doesNotMatch(selfAuthoredPrompt, /someone else's PR/);
+
+  const changeRequestedPrompt = buildReviewWrapperPrompt(
+    config,
+    sampleRequest({ my_changes_requested_sha: "abc123" })
+  );
+  assert.match(changeRequestedPrompt, /already has a current `CHANGES_REQUESTED`/);
+  assert.match(changeRequestedPrompt, /Do not overwrite that decision/i);
+  assert.match(changeRequestedPrompt, /use `needs_human_decision`/i);
+  assert.doesNotMatch(
+    changeRequestedPrompt,
+    /--raw-field commit_id=<reviewed SHA>/
+  );
 });
 
 test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and the revision diff", () => {

@@ -21,6 +21,10 @@ import {
   releaseReviewWorkspace,
   releaseReviewWorkspaceBeforeStart,
 } from "./review-workspace";
+import {
+  REVIEWER_GITHUB_COMMENT_PREFIX,
+  REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
+} from "./review-comments";
 import { readReviewLearnings } from "./review-learnings-store";
 import {
   getReviewSummary,
@@ -43,6 +47,8 @@ import type {
   ReviewSummary,
   TaskEffort,
 } from "./types";
+
+export { REVIEWER_GITHUB_COMMENT_PREFIX } from "./review-comments";
 
 interface ReviewRunLockData {
   token: string;
@@ -145,7 +151,6 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
   "blocked",
 ];
 
-export const REVIEWER_GITHUB_COMMENT_PREFIX = "**🤖[Cortex City Reviewer]**";
 const REVIEW_GITHUB_TOOL_INSTRUCTION =
   "Use the `gh` CLI for GitHub inspection and comments. The working directory persists for this PR, so reuse any existing checkout or artifacts.";
 
@@ -418,6 +423,9 @@ export function buildReviewWrapperPrompt(
 ): string {
   const target = effectiveReviewRequest(request, cached);
   const source = reviewSourceOf(target);
+  const hasCurrentChangeRequest =
+    source === "inbound" &&
+    target.my_changes_requested_sha === target.head_sha;
   const base = resolveReviewPrompt(config);
   const reviewedHeadSha = summaryHeadShaFor(cached);
   const followup = isFollowupReview(target, cached);
@@ -468,12 +476,26 @@ export function buildReviewWrapperPrompt(
       "- The source-aware GitHub action rules below are authoritative and",
       "override any conflicting GitHub-action instruction earlier in the prompt.",
     ].join(" "),
-    source === "inbound" && !target.self_authored
+    source === "inbound" && !target.self_authored && !hasCurrentChangeRequest
       ? [
           "- If and only if your final status is `ready_for_human_approval`,",
-          "approve the current PR head on GitHub with `gh pr review <PR URL> --approve`",
-          "before finishing. This PR belongs to someone else, so approval is allowed.",
+          "approve the reviewed commit on GitHub before finishing. Use the commit-bound",
+          "reviews API with the explicit repository, PR number, and reviewed SHA:",
+          "`gh api --method POST repos/<owner>/<repo>/pulls/<number>/reviews",
+          "--raw-field event=APPROVE --raw-field commit_id=<reviewed SHA>`.",
+          "Never use `gh pr review --approve`, which can approve a newer, unreviewed HEAD.",
+          "Immediately before the API call, inspect the signed-in user's latest",
+          "submitted decisive review for the reviewed SHA. If it is",
+          "`CHANGES_REQUESTED`, do not approve or overwrite it; switch to",
+          "`needs_human_decision` and explain the existing human decision.",
         ].join(" ")
+      : hasCurrentChangeRequest
+        ? [
+            "- Do not approve this PR on GitHub. The signed-in user already has a",
+            "current `CHANGES_REQUESTED` decision on the reviewed SHA. Do not",
+            "overwrite that decision; if your code assessment would otherwise be",
+            "clean, use `needs_human_decision` and ask the human to reconcile it.",
+          ].join(" ")
       : [
           "- Do not approve this PR on GitHub. It is owned by the signed-in user,",
           "and GitHub does not allow an author to approve their own PR.",
@@ -484,6 +506,8 @@ export function buildReviewWrapperPrompt(
       "decision the human needs to make. Do this for every review source, including",
       "task-owned and other self-authored PRs. Use the explicit PR URL because",
       "the review workspace is not necessarily a checkout of the target repository.",
+      `Start this specific comment with \`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\``,
+      "so Cortex City can distinguish it from implementation feedback.",
     ].join(" "),
     [
       "- Include uncertain or advisory points in the generated review as well as",

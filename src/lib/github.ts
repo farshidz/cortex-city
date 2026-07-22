@@ -1,5 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
+import { isReviewerHumanDecisionComment } from "./review-comments";
 import type { PRStatus, ReviewRequest } from "./types";
 
 interface PRInfo {
@@ -27,6 +28,11 @@ interface ReviewCommentItem {
 interface ReviewItem {
   id: number;
   state?: string;
+  body?: string | null;
+}
+
+interface IssueCommentItem {
+  id: number;
   body?: string | null;
 }
 
@@ -271,7 +277,7 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
     execPaginatedArray<ReviewCommentItem>(
       `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
     ),
-    execPaginatedArray<{ id: number }>(
+    execPaginatedArray<IssueCommentItem>(
       `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
     ),
   ]);
@@ -289,7 +295,11 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
     .filter((comment) => isCommentFromSubmittedReview(comment, submittedIds))
     .map((comment) => comment.id);
 
-  return [...reviewCommentIds, ...issueComments.map((comment) => comment.id)].sort();
+  const issueCommentIds = issueComments
+    .filter((comment) => !isReviewerHumanDecisionComment(comment.body))
+    .map((comment) => comment.id);
+
+  return [...reviewCommentIds, ...issueCommentIds].sort();
 }
 
 export async function getPRStateHash(prUrl: string): Promise<string> {
@@ -309,7 +319,7 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
     execPaginatedArrayStrict<ReviewCommentItem>(
       `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
     ),
-    execPaginatedArrayStrict<{ id: number }>(
+    execPaginatedArrayStrict<IssueCommentItem>(
       `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
     ),
     execResult(
@@ -353,7 +363,10 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
       .sort()
   );
   const issueCommentIds = JSON.stringify(
-    issueComments.map((comment) => comment.id).sort()
+    issueComments
+      .filter((comment) => !isReviewerHumanDecisionComment(comment.body))
+      .map((comment) => comment.id)
+      .sort()
   );
   const reviewIds = JSON.stringify(
     reviews

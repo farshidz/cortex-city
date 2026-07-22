@@ -58,6 +58,9 @@ The unified reviewer owns review execution, summaries, verdicts, follow-ups, err
 - Use the review concurrency pool and global reviewer configuration for both PR sources.
 - Coordinate the reviewer and implementation agent on the same PR: do not run them against the same head concurrently, and do not start duplicate automatic reviews for one head. Deliberate regeneration and recovery after failure remain possible.
 - After a task review finishes, allow its actionable GitHub comments to wake the existing implementation feedback loop. A clean review should settle without causing a builder/reviewer loop.
+- Keep reviewer-authored human-decision prompts distinct from implementation
+  feedback. Posting that prompt must leave a task waiting for the human, while a
+  later human PR response still wakes the implementation feedback loop.
 - Keep review scheduling independent of task execution capacity so reviews are not starved when implementation session slots are full.
 
 ### 3. Extend learning and lifecycle handling to task PRs
@@ -90,7 +93,11 @@ The unified reviewer owns review execution, summaries, verdicts, follow-ups, err
 
 - Rename task controls and labels to make the boundary clear: task model settings configure the implementation agent, while Automatic review uses the global reviewer profile.
 - Ensure any task-owned review activity shown in existing task/session views uses labels appropriate for a PR author rather than actions such as approving their own PR.
-- Keep the assigned-PR Reviews experience and its human approval/request-changes actions unchanged.
+- For assigned PRs, automatically approve the exact reviewed SHA when the
+  reviewer returns a clean verdict, unless the signed-in user already has a
+  current change request. When judgment is needed, post a signed PR comment and
+  keep the manual approval/request-changes actions available as fallbacks.
+- Never auto-approve self-authored or task-owned PRs.
 - Update product documentation to describe one reviewer, its two sources, its learning loop, and the global runtime/model/effort settings.
 
 ## Validation and Rollout
@@ -102,7 +109,9 @@ Validation should cover these outcomes:
 - An eligible task PR and an assigned PR are both governed by the same base review policy, reviewer configuration, and learning context, with source-aware prompt context and actions.
 - Automatic scheduling reviews each PR head at most once, including when task and GitHub state change during a run, while still allowing deliberate regeneration and safe retries.
 - Task-owned findings wake the implementation feedback loop; clean reviews do not create repeated runs.
-- Assigned-PR review behavior, follow-ups, human decisions, and status presentation do not regress.
+- Assigned-PR follow-ups, manual decision fallbacks, and status presentation do
+  not regress as clean reviews gain automatic approval and advisory reviews gain
+  a PR-level human-decision prompt.
 - Merged task PRs participate in the learning retrospective before review data is retired.
 - The global model value persists, can be cleared, accepts GPT-5.6 and arbitrary future identifiers, and is used by compatible new review sessions while existing sessions preserve their saved profile.
 - Switching reviewer runtime cannot accidentally reuse an incompatible model selection.
