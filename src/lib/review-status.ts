@@ -66,20 +66,20 @@ export function deriveReviewStatus(review: ReviewStatusInput): ReviewStatus {
 
 // Merge the pipeline/freshness axis and the agent verdict axis into one state.
 // Precedence (top wins): archived > generating > generation_failed > queued >
-// re_reviewing > human decision (approved / changes_requested) > verdict >
+// re_reviewing > submitted decision (approved / changes_requested) > verdict >
 // reviewed/needs_review.
 //
-// "A human decision at the current head wins over the verdict": an approval or a
-// change request from the signed-in user is the strongest "handled" signal.
+// "A submitted decision at the current head wins over the verdict": an approval
+// or a change request from the signed-in user is the strongest "handled" signal.
 // Unlike `my_last_review_sha` (signature-blind, so the agent's own COMMENTED
-// reviews flip it), these are agent-free because the reviewer agent never
-// submits an approve/request-changes decision — so they are safe to beat the
-// verdict. They are gated on the current head, so a decision from before new
-// commits does not count (HEAD moving also clears the verdict and triggers
-// re_reviewing). The two are mutually exclusive: a reviewer's latest decision is
-// either an approval or a change request, never both.
+// reviews flip it), these record decisive review states and are safe to beat the
+// verdict. The reviewer agent may now supply the approval; change requests remain
+// human-authored. They are gated on the current head, so a decision from before
+// new commits does not count (HEAD moving also clears the verdict and triggers
+// re_reviewing). The two are mutually exclusive: a reviewer's latest decision
+// is either an approval or a change request, never both.
 //
-// Below the human decision, "verdict wins" still holds: a current agent verdict
+// Below the submitted decision, "verdict wins" still holds: a current agent verdict
 // beats the (unreliable) "you've reviewed" signal, which only surfaces as
 // `reviewed` when no verdict is present.
 export function deriveReviewState(review: ReviewStateInput): ReviewState {

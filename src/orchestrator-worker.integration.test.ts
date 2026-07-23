@@ -457,6 +457,135 @@ test("pollOnce scans in-review tasks for merged, closed, pending, conflicts, unc
   assert.equal(taskById["review-unchanged"].last_run_result, undefined);
 });
 
+test("reviewer decision prompts wait for a human response before waking the task builder", () => {
+  const workspace = setupWorkspace({
+    configOverrides: {
+      max_parallel_sessions: 1,
+    },
+  });
+  const scenarioFile = path.join(workspace, "decision-response-scenario.json");
+  const callsFile = path.join(workspace, "decision-response-calls.jsonl");
+  const ghStateFile = path.join(workspace, "decision-response-gh-state.json");
+  const prUrl = "https://github.com/farshidz/marqo-cortex-city/pull/40";
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        type: "result",
+        subtype: "print",
+        is_error: false,
+        duration_ms: 10,
+        result: JSON.stringify({
+          status: "needs_review",
+          summary: "human response handled",
+          pr_url: prUrl,
+          branch_name: "agent/human-response",
+          files_changed: [],
+          assumptions: [],
+          blockers: [],
+          next_steps: [],
+        }),
+        session_id: "claude-human-response-session",
+        terminal_reason: "completed",
+        total_cost_usd: 0,
+        num_turns: 1,
+        structured_output: {
+          status: "needs_review",
+          summary: "human response handled",
+          pr_url: prUrl,
+          branch_name: "agent/human-response",
+          files_changed: [],
+          assumptions: [],
+          blockers: [],
+          next_steps: [],
+        },
+        usage: {
+          input_tokens: 3,
+          output_tokens: 1,
+          cache_read_input_tokens: 0,
+        },
+      }),
+      sleepMs: 10,
+    },
+  });
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#40": {
+        state: "open",
+        merged: false,
+        mergeable_state: "clean",
+        mergeable: true,
+        headRefOid: "decision-head",
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        checks: [{ name: "ci", state: "SUCCESS" }],
+      },
+    },
+  });
+
+  const result = runWorkerScript(
+    workspace,
+    `
+      const activePids = new Map();
+      const baselineHash = await getPRStateHash(${JSON.stringify(prUrl)});
+      await createTask({
+        ...${JSON.stringify(sampleTask({
+          id: "human-decision-task",
+          status: "in_review",
+          agent_runner: "claude",
+          reviewer_agent_enabled: false,
+          pr_url: prUrl,
+          worktree_path: workspace,
+        }))},
+        last_review_gh_state: baselineHash,
+      });
+
+      const fs = require("node:fs");
+      const state = JSON.parse(fs.readFileSync(${JSON.stringify(ghStateFile)}, "utf-8"));
+      const pr = state.prs["farshidz/marqo-cortex-city#40"];
+      pr.issueComments = [{
+        id: 400,
+        body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.",
+      }];
+      fs.writeFileSync(${JSON.stringify(ghStateFile)}, JSON.stringify(state));
+
+      await pollOnce(activePids);
+      const afterReviewerPrompt = readTasks()[0];
+      const callsAfterReviewerPrompt = fs.existsSync(${JSON.stringify(callsFile)})
+        ? fs.readFileSync(${JSON.stringify(callsFile)}, "utf-8").trim().split(/\\r?\\n/).filter(Boolean).length
+        : 0;
+
+      pr.issueComments.push({ id: 401, body: "Choose A." });
+      fs.writeFileSync(${JSON.stringify(ghStateFile)}, JSON.stringify(state));
+      await pollOnce(activePids);
+      for (let i = 0; i < 20; i++) {
+        if (readTasks()[0]?.last_run_result) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      const calls = fs.existsSync(${JSON.stringify(callsFile)})
+        ? fs.readFileSync(${JSON.stringify(callsFile)}, "utf-8").trim().split(/\\r?\\n/).filter(Boolean)
+        : [];
+      console.log(JSON.stringify({
+        afterReviewerPrompt,
+        callsAfterReviewerPrompt,
+        finalTask: readTasks()[0],
+        callCount: calls.length,
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_CALLS_FILE: callsFile,
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.afterReviewerPrompt.last_run_result, undefined);
+  assert.equal(result.callsAfterReviewerPrompt, 0);
+  assert.equal(result.finalTask.last_run_result, "success");
+  assert.equal(result.callCount, 1);
+});
+
 test("pollOnce runs final cleanup, removes worktrees, and prunes old task logs", () => {
   const workspaceRoot = createTempWorkspace("worker-cleanup-");
   const { repoPath } = initGitTestRepo(workspaceRoot);
