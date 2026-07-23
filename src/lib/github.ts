@@ -1,11 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
-import {
-  REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
-  REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
-  reviewerHumanDecisionCommentMarker,
-} from "./review-comments";
-import { getReviewSummary } from "./review-store";
+import { isReviewerTimelineComment } from "./review-comments";
 import type { PRStatus, ReviewRequest } from "./types";
 
 interface PRInfo {
@@ -39,47 +34,6 @@ interface ReviewItem {
 interface IssueCommentItem {
   id: number;
   body?: string | null;
-}
-
-function isReviewerOwnedCommentForMarker(
-  comment: IssueCommentItem,
-  marker: string
-): boolean {
-  const body = comment.body || "";
-  return (
-    [
-      REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
-      REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
-    ].some((prefix) => body.startsWith(`${prefix} `)) &&
-    body.trimEnd().endsWith(marker)
-  );
-}
-
-function reviewerHumanDecisionCommentIds(
-  prUrl: string,
-  issueComments: IssueCommentItem[]
-): Set<number> {
-  const review = getReviewSummary(prUrl);
-  const ignoredIds = new Set(
-    review?.reviewer_human_decision_comment_ids || []
-  );
-  const pendingToken = review?.pending_reviewer_human_decision_comment_token;
-  if (!pendingToken) return ignoredIds;
-  const pendingCommentId =
-    review?.pending_reviewer_human_decision_comment_id;
-  if (pendingCommentId) {
-    ignoredIds.add(pendingCommentId);
-    return ignoredIds;
-  }
-
-  const marker = reviewerHumanDecisionCommentMarker(pendingToken);
-  const pendingComment = issueComments
-    .filter((comment) =>
-      isReviewerOwnedCommentForMarker(comment, marker)
-    )
-    .sort((a, b) => a.id - b.id)[0];
-  if (pendingComment) ignoredIds.add(pendingComment.id);
-  return ignoredIds;
 }
 
 function parsePRUrl(url: string): PRInfo | null {
@@ -341,12 +295,8 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
     .filter((comment) => isCommentFromSubmittedReview(comment, submittedIds))
     .map((comment) => comment.id);
 
-  const ignoredIssueCommentIds = reviewerHumanDecisionCommentIds(
-    prUrl,
-    issueComments
-  );
   const issueCommentIds = issueComments
-    .filter((comment) => !ignoredIssueCommentIds.has(comment.id))
+    .filter((comment) => !isReviewerTimelineComment(comment.body))
     .map((comment) => comment.id);
 
   return [...reviewCommentIds, ...issueCommentIds].sort();
@@ -412,13 +362,9 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
       .map((comment) => comment.id)
       .sort()
   );
-  const ignoredIssueCommentIds = reviewerHumanDecisionCommentIds(
-    prUrl,
-    issueComments
-  );
   const issueCommentIds = JSON.stringify(
     issueComments
-      .filter((comment) => !ignoredIssueCommentIds.has(comment.id))
+      .filter((comment) => !isReviewerTimelineComment(comment.body))
       .map((comment) => comment.id)
       .sort()
   );
@@ -447,27 +393,10 @@ interface PRViewResult {
 }
 
 interface PRReviewItem {
-  id?: number;
   user?: { login?: string };
   commit_id?: string;
   state?: string;
   submitted_at?: string;
-}
-
-function compareReviewsNewest(a: PRReviewItem, b: PRReviewItem): number {
-  const submittedAtOrder = (b.submitted_at || "").localeCompare(
-    a.submitted_at || ""
-  );
-  if (submittedAtOrder !== 0) return submittedAtOrder;
-
-  // GitHub review timestamps are second-granular. Numeric review IDs preserve
-  // creation order when two decisive reviews are submitted in the same second.
-  const aId =
-    typeof a.id === "number" && Number.isSafeInteger(a.id) ? a.id : 0;
-  const bId =
-    typeof b.id === "number" && Number.isSafeInteger(b.id) ? b.id : 0;
-  if (aId === bId) return 0;
-  return bId > aId ? 1 : -1;
 }
 
 const CORTEX_CITY_REVIEW_LABEL = "cortex-city-review";
@@ -509,7 +438,9 @@ export async function getMyLastReviewSha(
     (r) => r.user?.login === login && r.state !== "PENDING" && r.commit_id
   );
   if (mine.length === 0) return undefined;
-  mine.sort(compareReviewsNewest);
+  mine.sort((a, b) =>
+    (b.submitted_at || "").localeCompare(a.submitted_at || "")
+  );
   return mine[0].commit_id || undefined;
 }
 
@@ -543,9 +474,12 @@ export async function getMyReviewSignals(
   const mine = reviews.filter((r) => r.user?.login === login && r.commit_id);
   if (mine.length === 0) return {};
 
+  const byNewest = (a: PRReviewItem, b: PRReviewItem) =>
+    (b.submitted_at || "").localeCompare(a.submitted_at || "");
+
   const lastReview = [...mine]
     .filter((r) => r.state !== "PENDING")
-    .sort(compareReviewsNewest)[0];
+    .sort(byNewest)[0];
 
   // DISMISSED is included so that a dismissed review (GitHub's signal that a
   // prior approval no longer counts) supersedes an older APPROVED instead of
@@ -557,7 +491,7 @@ export async function getMyReviewSignals(
         r.state === "CHANGES_REQUESTED" ||
         r.state === "DISMISSED"
     )
-    .sort(compareReviewsNewest)[0];
+    .sort(byNewest)[0];
 
   return {
     last_review_sha: lastReview?.commit_id || undefined,
@@ -727,141 +661,6 @@ function execFileResult(
       }
     );
   });
-}
-
-export async function reconcileReviewerHumanDecisionComment(
-  prUrl: string,
-  token: string,
-  decisionBody?: string | null,
-  expectedCommentId?: number,
-  commentPrefix:
-    | typeof REVIEWER_HUMAN_DECISION_COMMENT_PREFIX
-    | typeof REVIEWER_SELF_APPROVAL_COMMENT_PREFIX =
-    REVIEWER_HUMAN_DECISION_COMMENT_PREFIX
-): Promise<number | undefined> {
-  const pr = parsePRUrl(prUrl);
-  if (
-    !pr ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      token
-    )
-  ) {
-    throw new Error("Invalid reviewer human-decision comment target or token.");
-  }
-  if (
-    expectedCommentId !== undefined &&
-    (!Number.isSafeInteger(expectedCommentId) || expectedCommentId <= 0)
-  ) {
-    throw new Error("Invalid reviewer human-decision comment receipt.");
-  }
-  if (
-    commentPrefix !== REVIEWER_HUMAN_DECISION_COMMENT_PREFIX &&
-    commentPrefix !== REVIEWER_SELF_APPROVAL_COMMENT_PREFIX
-  ) {
-    throw new Error("Invalid reviewer-owned comment prefix.");
-  }
-
-  const endpoint =
-    `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`;
-  const existing = await execPaginatedArrayStrict<IssueCommentItem>(endpoint);
-  if (!existing) {
-    throw new Error("Failed to inspect existing PR conversation comments.");
-  }
-  const marker = reviewerHumanDecisionCommentMarker(token);
-  const markerMatched = existing
-    .filter((comment) =>
-      isReviewerOwnedCommentForMarker(comment, marker)
-    )
-    .sort((a, b) => a.id - b.id)[0];
-  const receiptMatched = expectedCommentId
-    ? existing.find((comment) => comment.id === expectedCommentId)
-    : undefined;
-
-  const trimmedBody = decisionBody?.trim();
-  if (expectedCommentId && !receiptMatched) {
-    if (decisionBody === null) {
-      // The exact app-owned comment was already removed. Never fall back to a
-      // public marker match, which may belong to another PR participant.
-      return expectedCommentId;
-    }
-    if (trimmedBody) {
-      // The caller must persist a fresh token before recreating the prompt.
-      // Returning no receipt prevents this old token from adopting any public
-      // marker copy while allowing the pending action to advance safely.
-      return undefined;
-    }
-    return undefined;
-  }
-
-  if (!expectedCommentId && markerMatched) {
-    // A marker-only match is sufficient to recover and persist a receipt, but
-    // it must be pinned by the caller before any later PATCH or DELETE.
-    return markerMatched.id;
-  }
-
-  const matched = receiptMatched;
-  if (matched) {
-    const commentEndpoint =
-      `repos/${pr.owner}/${pr.repo}/issues/comments/${matched.id}`;
-    if (decisionBody === null) {
-      const result = await execFileResult("gh", [
-        "api",
-        "--method",
-        "DELETE",
-        commentEndpoint,
-      ]);
-      if (!result.ok) {
-        const detail = (result.stderr || result.stdout).trim();
-        throw new Error(
-          `Failed to remove the obsolete reviewer human-decision comment${detail ? `: ${detail}` : "."}`
-        );
-      }
-      return matched.id;
-    }
-    if (!trimmedBody) return matched.id;
-
-    const body = `${commentPrefix} ${trimmedBody}\n\n${marker}`;
-    if (matched.body === body) return matched.id;
-    const result = await execFileResult("gh", [
-      "api",
-      "--method",
-      "PATCH",
-      commentEndpoint,
-      "--raw-field",
-      `body=${body}`,
-      "--jq",
-      ".id",
-    ]);
-    const id = Number(result.stdout.trim());
-    if (!result.ok || id !== matched.id) {
-      const detail = (result.stderr || result.stdout).trim();
-      throw new Error(
-        `Failed to update the reviewer human-decision comment${detail ? `: ${detail}` : "."}`
-      );
-    }
-    return id;
-  }
-
-  if (!trimmedBody) return undefined;
-  const body = `${commentPrefix} ${trimmedBody}\n\n${marker}`;
-  const result = await execFileResult("gh", [
-    "api",
-    "--method",
-    "POST",
-    endpoint,
-    "--raw-field",
-    `body=${body}`,
-    "--jq",
-    ".id",
-  ]);
-  const id = Number(result.stdout.trim());
-  if (!result.ok || !Number.isSafeInteger(id) || id <= 0) {
-    const detail = (result.stderr || result.stdout).trim();
-    throw new Error(
-      `Failed to post the reviewer human-decision comment${detail ? `: ${detail}` : "."}`
-    );
-  }
-  return id;
 }
 
 export const __testUtils = {

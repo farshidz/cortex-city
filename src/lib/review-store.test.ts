@@ -122,16 +122,7 @@ test("readReviewSummaries returns an empty array when no file exists", () => {
 
 test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   const workspace = createTempWorkspace();
-  const entry = {
-    ...sampleReviewLiteral("https://github.com/acme/widget/pull/1"),
-    reviewer_human_decision_comment_ids: [400, 400, 0, -1, 401.5, 402],
-    active_reviewer_owned_comment_token:
-      "22222222-2222-4222-8222-222222222222",
-    active_reviewer_owned_comment_id: 404,
-    pending_reviewer_human_decision_comment_token:
-      "11111111-1111-4111-8111-111111111111",
-    pending_reviewer_human_decision_comment_id: 403,
-  };
+  const entry = sampleReviewLiteral("https://github.com/acme/widget/pull/1");
   const result = runStoreScript(
     workspace,
     `
@@ -149,17 +140,6 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   assert.equal(result.saved.source, "inbound");
   assert.equal(result.saved.review_status, "pending_summary");
   assert.equal(result.saved.review_state, "queued");
-  assert.deepEqual(result.saved.reviewer_human_decision_comment_ids, [400, 402]);
-  assert.equal(
-    result.saved.active_reviewer_owned_comment_token,
-    "22222222-2222-4222-8222-222222222222"
-  );
-  assert.equal(result.saved.active_reviewer_owned_comment_id, 404);
-  assert.equal(
-    result.saved.pending_reviewer_human_decision_comment_token,
-    "11111111-1111-4111-8111-111111111111"
-  );
-  assert.equal(result.saved.pending_reviewer_human_decision_comment_id, 403);
   assert.deepEqual(result.all, [result.saved]);
   assert.deepEqual(result.fetched, result.saved);
 

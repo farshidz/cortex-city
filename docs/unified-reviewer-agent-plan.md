@@ -19,7 +19,7 @@ Add one global reviewer model setting so the user can select GPT-5.6 or provide 
 - A live Cortex task takes precedence when its PR is also selected by `cortex-city-review`; the label does not bypass task pause, automatic-review opt-out, or builder-coordination rules.
 - The existing per-task reviewer on/off choice remains as an **Automatic review** opt-out. It controls whether a task PR enters the unified review queue; it does not select a different reviewer.
 - Settings defines the default reviewer runtime, model, and effort. The reviewer model is Settings-only; existing per-review runtime and effort overrides can remain. A task's runtime, model, and effort continue to configure its implementation agent only.
-- The Reviews area explicitly filters by review source. Clean inbound PRs from other authors are approved automatically at the reviewed SHA, while human-decision cases remain visible and receive a top-level PR conversation prompt. Task-owned results remain associated with the task workflow and GitHub feedback, where self-approval actions and inbound-review wording do not apply.
+- The Reviews area explicitly filters by review source. Clean inbound PRs from other authors are approved automatically at the reviewed SHA, while human-decision cases remain visible and receive a new top-level PR conversation comment. Clean self-authored and task-owned PRs receive a handoff to an eligible non-author reviewer or another repository-permitted manual action. Reviewer comments remain immutable timeline events.
 - Required changes found on a task-owned PR are left as GitHub comments. The implementation agent continues to detect and address that feedback through its existing PR-feedback workflow.
 
 ## Target Architecture
@@ -95,12 +95,13 @@ The unified reviewer owns review execution, summaries, verdicts, follow-ups, err
 - Ensure any task-owned review activity shown in existing task/session views uses labels appropriate for a PR author rather than actions such as approving their own PR.
 - For assigned PRs, automatically approve the exact reviewed SHA when the
   reviewer returns a clean verdict, unless the signed-in user already has a
-  current change request. When judgment is needed, post a signed PR comment and
-  keep the manual approval/request-changes actions available as fallbacks.
-- Never auto-approve self-authored or task-owned PRs. When one is otherwise
-  ready to approve, post a signed handoff comment explaining that the review is
-  clean and asking for an eligible non-author reviewer, or another manual merge
-  or coordination decision when repository policy permits.
+  current change request. When judgment is needed, post a new signed PR comment
+  and keep the manual approval/request-changes actions available as fallbacks.
+- Never auto-approve self-authored or task-owned PRs. Post a new clean-review
+  handoff that requests an eligible non-author reviewer or another permitted
+  manual coordination step.
+- Treat reviewer comments as immutable timeline events; later reviews post new
+  comments when needed and never update or delete earlier reviewer comments.
 - Update product documentation to describe one reviewer, its two sources, its learning loop, and the global runtime/model/effort settings.
 
 ## Validation and Rollout

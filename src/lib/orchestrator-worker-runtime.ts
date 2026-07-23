@@ -14,7 +14,6 @@ import {
   getPRStatus,
   getReviewRequestedPRs,
   isPRMergedOrClosed,
-  reconcileReviewerHumanDecisionComment,
 } from "./github";
 import {
   buildInterruptedTaskUpdates,
@@ -43,8 +42,6 @@ export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 export const DEAD_OWNED_PID_GRACE_MS = 10_000;
 export const FINAL_CLASSIFICATION_RETRY_MS = 15 * 60 * 1000;
 export const REVIEW_ERROR_RETRY_MS = 5 * 60 * 1000;
-const REVIEW_DECISION_ACTION_INTERRUPTED_ERROR =
-  "The reviewer human-decision comment action was interrupted before its receipt was saved.";
 
 export interface DeadOwnedPid {
   pid: number;
@@ -156,8 +153,6 @@ export interface WorkerRuntimeDeps {
   deleteReviewSummaryIf?: typeof deleteReviewSummaryIf;
   mutateReviewSummary?: typeof mutateReviewSummary;
   deleteReviewSummary: typeof deleteReviewSummary;
-  reconcileReviewerHumanDecisionComment?:
-    typeof reconcileReviewerHumanDecisionComment;
 }
 
 export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
@@ -194,7 +189,6 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   deleteReviewSummaryIf,
   mutateReviewSummary,
   deleteReviewSummary,
-  reconcileReviewerHumanDecisionComment,
 };
 
 interface LaunchOptions {
@@ -884,85 +878,6 @@ async function runReviewPhases(
   for (const review of Object.values(reviewMap)) {
     if (!review.current_run_pid) {
       activeReviewPids.delete(review.pr_url);
-      if (
-        review.current_run_id == null &&
-        review.pending_reviewer_human_decision_comment_token &&
-        deps.reconcileReviewerHumanDecisionComment
-      ) {
-        try {
-          const commentId =
-            await deps.reconcileReviewerHumanDecisionComment(
-              review.pr_url,
-              review.pending_reviewer_human_decision_comment_token,
-              undefined,
-              review.pending_reviewer_human_decision_comment_id
-            );
-          if (commentId) {
-            await mutateStoredReview(deps, review.pr_url, (current) => {
-              if (
-                !current ||
-                current.current_run_pid != null ||
-                current.current_run_id != null ||
-                current.pending_reviewer_human_decision_comment_token !==
-                  review.pending_reviewer_human_decision_comment_token
-              ) {
-                return undefined;
-              }
-              return {
-                ...current,
-                reviewer_human_decision_comment_ids: [
-                  ...new Set([
-                    ...(current.reviewer_human_decision_comment_ids || []),
-                    commentId,
-                  ]),
-                ],
-                // Recovering the GitHub side effect does not recover the lost
-                // summary. Keep the action pending and force a retry; the next
-                // successful run reuses this token, finds the same comment,
-                // and clears the pending state without posting a duplicate.
-                pending_reviewer_human_decision_comment_token:
-                  review.pending_reviewer_human_decision_comment_token,
-                // Pin the recovered receipt before the retry can edit or
-                // delete anything. Future reconciliation must use this exact
-                // ID rather than selecting another public marker match.
-                pending_reviewer_human_decision_comment_id:
-                  review.pending_reviewer_human_decision_comment_id ||
-                  commentId,
-                agent_review_status: undefined,
-                error: REVIEW_DECISION_ACTION_INTERRUPTED_ERROR,
-                error_at:
-                  current.error === REVIEW_DECISION_ACTION_INTERRUPTED_ERROR &&
-                  current.error_at
-                    ? current.error_at
-                    : new Date().toISOString(),
-              };
-            });
-          } else {
-            await mutateStoredReview(deps, review.pr_url, (current) => {
-              if (
-                !current ||
-                current.current_run_pid != null ||
-                current.current_run_id != null ||
-                current.pending_reviewer_human_decision_comment_token !==
-                  review.pending_reviewer_human_decision_comment_token ||
-                current.error
-              ) {
-                return undefined;
-              }
-              return {
-                ...current,
-                error: REVIEW_DECISION_ACTION_INTERRUPTED_ERROR,
-                error_at: new Date().toISOString(),
-              };
-            });
-          }
-        } catch (error) {
-          deps.logger.error(
-            `[worker] Failed to reconcile reviewer decision comment for ${review.pr_url}:`,
-            error
-          );
-        }
-      }
       if (review.current_run_id != null) {
         const cleared = await mutateStoredReview(
           deps,

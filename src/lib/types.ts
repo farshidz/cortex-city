@@ -283,22 +283,6 @@ export interface ReviewSummary extends ReviewRequest {
   error?: string;
   error_at?: string;
   agent_review_status?: ReviewAgentStatus;
-  // Exact top-level PR conversation comments emitted for human decisions or
-  // self-approval handoffs. Tracking IDs avoids trusting a public body prefix
-  // when task feedback is filtered and remains valid across later review heads.
-  reviewer_human_decision_comment_ids?: number[];
-  // Token and exact receipt for the currently active reviewer-owned PR comment.
-  // Retaining both after a successful run lets a later review safely update or
-  // remove the prompt without adopting marker-shaped participant content.
-  active_reviewer_owned_comment_token?: string;
-  active_reviewer_owned_comment_id?: number;
-  // Persisted before any application-owned comment action and never exposed to
-  // the model. If the process dies after posting but before saving the receipt,
-  // this token identifies the one comment that must be reconciled on retry.
-  pending_reviewer_human_decision_comment_token?: string;
-  // Exact receipt pinned to the pending token before any later edit or delete.
-  // Destructive reconciliation must never fall back to a marker-only match.
-  pending_reviewer_human_decision_comment_id?: number;
   followups?: ReviewFollowup[];
   final_at?: string;
   final_state?: "merged" | "closed";

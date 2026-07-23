@@ -22,11 +22,6 @@ import {
   releaseReviewWorkspaceBeforeStart,
 } from "./review-workspace";
 import {
-  getAuthenticatedUserLogin,
-  getMyReviewSignals,
-  reconcileReviewerHumanDecisionComment,
-} from "./github";
-import {
   REVIEWER_GITHUB_COMMENT_PREFIX,
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
   REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
@@ -508,20 +503,21 @@ export function buildReviewWrapperPrompt(
       : [
           "- Do not approve this PR on GitHub. It is owned by the signed-in user,",
           "and GitHub does not allow an author to approve their own PR.",
-          "If your final status is `ready_for_human_approval`, Cortex City will",
-          "leave a top-level PR conversation comment explaining that the review is",
-          "clean but requires an eligible non-author reviewer or another permitted",
-          "manual coordination step. Do not post that handoff comment yourself.",
+          "If and only if your final status is `ready_for_human_approval`, post a new",
+          "top-level PR conversation comment with `gh pr comment <PR URL> --body ...`.",
+          "Do not use the review-comment surface for this handoff. Start it with",
+          `\`${REVIEWER_SELF_APPROVAL_COMMENT_PREFIX}\` and then use this exact text:`,
+          `\`${REVIEWER_SELF_APPROVAL_COMMENT_BODY}\``,
         ].join(" "),
     [
-      "- If your final status is `needs_human_decision`, add a `## Human Decision`",
-      "section after `## Agent Status`. Clearly present the uncertain or advisory",
-      "points and the decision the human needs to make. Do this for every review",
-      "source, including task-owned and other self-authored PRs. Do not post this",
-      "comment yourself and do not invent or report a comment ID. Cortex City will",
-      "create exactly one top-level PR conversation comment from that section, prefix",
-      `it with \`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\`, and durably record`,
-      "the GitHub receipt.",
+      "- If your final status is `needs_human_decision`, post one GitHub PR",
+      "comment that clearly presents the uncertain or advisory points and the",
+      "decision the human needs to make. Do this for every review source, including",
+      "task-owned and other self-authored PRs. Use the explicit PR URL because",
+      "the review workspace is not necessarily a checkout of the target repository.",
+      "Use `gh pr comment <PR URL> --body ...`; do not use the review-comment surface.",
+      `Start this specific comment with \`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\``,
+      "so Cortex City can distinguish it from implementation feedback.",
     ].join(" "),
     [
       "- Include uncertain or advisory points in the generated review as well as",
@@ -529,11 +525,16 @@ export function buildReviewWrapperPrompt(
     ].join(" "),
     [
       "- Do not submit a change-request review decision. Do not approve for any",
-      "status other than `ready_for_human_approval`, and do not include a Human",
-      "Decision section for any status other than `needs_human_decision`.",
+      "status other than `ready_for_human_approval`, and do not post the human-decision",
+      "comment for any status other than `needs_human_decision`.",
     ].join(" "),
     [
-      "- Complete any GitHub action assigned to you before emitting your final response.",
+      "- Treat every reviewer comment as an immutable timeline event. Never edit or",
+      "delete an earlier reviewer comment because a later commit or review reaches a",
+      "different result; post a new comment only when the current run requires one.",
+    ].join(" "),
+    [
+      "- Complete the required GitHub action before emitting your final response.",
       "If the action fails and you cannot verify that it succeeded, use `blocked`",
       "and explain the failure in the generated review.",
     ].join(" "),
@@ -599,18 +600,6 @@ export function parseReviewAgentStatus(
     if (exact) return exact;
   }
   return undefined;
-}
-
-export function parseReviewerHumanDecisionBody(
-  text: string
-): string | undefined {
-  const heading = /^## Human Decision\s*$/im.exec(text);
-  if (!heading) return undefined;
-  const remainder = text.slice(heading.index + heading[0].length);
-  const nextHeading = remainder.search(/^##\s+/m);
-  const body = (nextHeading >= 0 ? remainder.slice(0, nextHeading) : remainder)
-    .trim();
-  return body || undefined;
 }
 
 function buildClaudeArgs(
@@ -983,10 +972,6 @@ export async function spawnReviewSummary(
     followupReview && compatibleCachedSessionId
       ? compatibleCachedSessionId
       : undefined;
-  let reviewerHumanDecisionCommentToken =
-    cachedBefore?.pending_reviewer_human_decision_comment_token ||
-    cachedBefore?.active_reviewer_owned_comment_token ||
-    randomUUID();
   const baseEntry = {
     ...target,
     summary: cachedBefore?.summary ?? "",
@@ -1003,16 +988,6 @@ export async function spawnReviewSummary(
     agent_review_status: followupReview
       ? undefined
       : cachedBefore?.agent_review_status,
-    reviewer_human_decision_comment_ids:
-      cachedBefore?.reviewer_human_decision_comment_ids,
-    active_reviewer_owned_comment_token:
-      cachedBefore?.active_reviewer_owned_comment_token,
-    active_reviewer_owned_comment_id:
-      cachedBefore?.active_reviewer_owned_comment_id,
-    pending_reviewer_human_decision_comment_token:
-      cachedBefore?.pending_reviewer_human_decision_comment_token,
-    pending_reviewer_human_decision_comment_id:
-      cachedBefore?.pending_reviewer_human_decision_comment_id,
     followups: cachedBefore?.followups,
     final_at: cachedBefore?.final_at,
     error: cachedBefore?.error,
@@ -1108,10 +1083,6 @@ export async function spawnReviewSummary(
             : target.my_changes_requested_sha,
           error: error.message,
           error_at: failedAt,
-          pending_reviewer_human_decision_comment_token:
-            cachedBefore?.pending_reviewer_human_decision_comment_token,
-          pending_reviewer_human_decision_comment_id:
-            cachedBefore?.pending_reviewer_human_decision_comment_id,
           current_run_pid: undefined,
           current_run_id: undefined,
           ...retroFields(current || cachedBefore),
@@ -1172,290 +1143,8 @@ export async function spawnReviewSummary(
     }
 
     const generatedAt = new Date().toISOString();
-    const runtimeSuccessful = !finalOutput.error;
-    const agentReviewStatus = runtimeSuccessful
-      ? parseReviewAgentStatus(finalOutput.result_text)
-      : undefined;
-    const reviewerHumanDecisionBody = parseReviewerHumanDecisionBody(
-      finalOutput.result_text
-    );
-    let reviewerHumanDecisionCommentId: number | undefined;
-    let reviewActionError: string | undefined;
-    let approvalVerificationError: string | undefined;
-    let verifiedApprovalSha: string | undefined;
-    let verifiedLastReviewSha: string | undefined;
-    let reconciledActiveReviewerOwnedComment:
-      | { token: string; id: number }
-      | null
-      | undefined;
-    let preservePendingReviewAction = false;
+    const successful = !finalOutput.error;
     assertReviewRunLockHealthy(runLock);
-    let beforeReviewAction = getReviewSummary(target.pr_url);
-    if (beforeReviewAction?.current_run_id === runLock.data.token) {
-      const actionTarget = effectiveReviewRequest(
-        reviewRequestSnapshot(beforeReviewAction),
-        beforeReviewAction
-      );
-      const actionTargetChanged =
-        actionTarget.head_sha !== target.head_sha ||
-        reviewSourceOf(actionTarget) !== reviewSourceOf(target) ||
-        actionTarget.task_id !== target.task_id ||
-        actionTarget.task_title !== target.task_title ||
-        actionTarget.task_description !== target.task_description ||
-        actionTarget.task_plan !== target.task_plan;
-      const shouldVerifyAutomatedApproval =
-        runtimeSuccessful &&
-        !actionTargetChanged &&
-        agentReviewStatus === "ready_for_human_approval" &&
-        reviewSourceOf(actionTarget) === "inbound" &&
-        actionTarget.self_authored !== true;
-      if (shouldVerifyAutomatedApproval) {
-        try {
-          const login = await getAuthenticatedUserLogin();
-          if (!login) {
-            throw new Error("GitHub did not return the signed-in user.");
-          }
-          const signals = await getMyReviewSignals(target.pr_url, login);
-          if (signals.approval_sha !== target.head_sha) {
-            approvalVerificationError =
-              signals.changes_requested_sha === target.head_sha
-                ? "The reviewer returned ready_for_human_approval, but the signed-in user's current decision on the reviewed commit is CHANGES_REQUESTED."
-                : "The reviewer returned ready_for_human_approval, but Cortex City could not verify an approval from the signed-in user on the reviewed commit.";
-          } else {
-            verifiedApprovalSha = signals.approval_sha;
-            verifiedLastReviewSha = signals.last_review_sha;
-          }
-        } catch (error) {
-          approvalVerificationError = `Failed to verify the reviewer approval on the reviewed commit: ${
-            error instanceof Error ? error.message : "Unknown GitHub error."
-          }`;
-        }
-      }
-      const shouldCreateHumanDecisionComment =
-        runtimeSuccessful &&
-        !actionTargetChanged &&
-        agentReviewStatus === "needs_human_decision";
-      const shouldCreateSelfApprovalComment =
-        runtimeSuccessful &&
-        !actionTargetChanged &&
-        agentReviewStatus === "ready_for_human_approval" &&
-        (reviewSourceOf(actionTarget) === "task" ||
-          actionTarget.self_authored === true);
-      const shouldCreateReviewerOwnedComment =
-        shouldCreateHumanDecisionComment || shouldCreateSelfApprovalComment;
-      const reviewerOwnedCommentBody = shouldCreateSelfApprovalComment
-        ? REVIEWER_SELF_APPROVAL_COMMENT_BODY
-        : reviewerHumanDecisionBody;
-      const reviewerOwnedCommentPrefix = shouldCreateSelfApprovalComment
-        ? REVIEWER_SELF_APPROVAL_COMMENT_PREFIX
-        : REVIEWER_HUMAN_DECISION_COMMENT_PREFIX;
-      const hasPendingReviewerOwnedComment = Boolean(
-        beforeReviewAction.pending_reviewer_human_decision_comment_token
-      );
-      const hasActiveReviewerOwnedComment = Boolean(
-        beforeReviewAction.active_reviewer_owned_comment_token &&
-          beforeReviewAction.active_reviewer_owned_comment_id
-      );
-      const shouldRemoveReviewerOwnedComment =
-        (hasPendingReviewerOwnedComment || hasActiveReviewerOwnedComment) &&
-        runtimeSuccessful &&
-        !actionTargetChanged &&
-        agentReviewStatus !== undefined &&
-        !shouldCreateReviewerOwnedComment;
-      preservePendingReviewAction =
-        hasPendingReviewerOwnedComment &&
-        (!runtimeSuccessful ||
-          actionTargetChanged ||
-          !agentReviewStatus ||
-          Boolean(approvalVerificationError));
-      if (
-        !approvalVerificationError &&
-        (hasPendingReviewerOwnedComment ||
-          hasActiveReviewerOwnedComment ||
-          shouldCreateReviewerOwnedComment)
-      ) {
-        if (!beforeReviewAction.pending_reviewer_human_decision_comment_token) {
-          beforeReviewAction = await mutateReviewSummary(
-            target.pr_url,
-            (current) => {
-              if (
-                current?.current_run_id !== runLock.data.token ||
-                current.pending_reviewer_human_decision_comment_token
-              ) {
-                return undefined;
-              }
-              return {
-                ...current,
-                pending_reviewer_human_decision_comment_token:
-                  reviewerHumanDecisionCommentToken,
-                pending_reviewer_human_decision_comment_id:
-                  current.active_reviewer_owned_comment_token ===
-                    reviewerHumanDecisionCommentToken
-                    ? current.active_reviewer_owned_comment_id
-                    : undefined,
-              };
-            }
-          );
-        }
-        if (
-          beforeReviewAction?.pending_reviewer_human_decision_comment_token !==
-          reviewerHumanDecisionCommentToken
-        ) {
-          throw new Error(
-            `Review action ownership was lost before saving ${target.pr_url}`
-          );
-        }
-        try {
-          let expectedCommentId =
-            beforeReviewAction.pending_reviewer_human_decision_comment_id;
-          if (hasPendingReviewerOwnedComment && !expectedCommentId) {
-            const recoveredCommentId =
-              await reconcileReviewerHumanDecisionComment(
-                target.pr_url,
-                reviewerHumanDecisionCommentToken
-              );
-            if (recoveredCommentId) {
-              beforeReviewAction = await mutateReviewSummary(
-                target.pr_url,
-                (current) => {
-                  if (
-                    current?.current_run_id !== runLock.data.token ||
-                    current.pending_reviewer_human_decision_comment_token !==
-                      reviewerHumanDecisionCommentToken ||
-                    current.pending_reviewer_human_decision_comment_id
-                  ) {
-                    return undefined;
-                  }
-                  return {
-                    ...current,
-                    reviewer_human_decision_comment_ids: [
-                      ...new Set([
-                        ...(current.reviewer_human_decision_comment_ids || []),
-                        recoveredCommentId,
-                      ]),
-                    ],
-                    pending_reviewer_human_decision_comment_id:
-                      recoveredCommentId,
-                  };
-                }
-              );
-              if (
-                beforeReviewAction
-                  ?.pending_reviewer_human_decision_comment_id !==
-                recoveredCommentId
-              ) {
-                throw new Error(
-                  `Review comment receipt ownership was lost before saving ${target.pr_url}`
-                );
-              }
-              expectedCommentId = recoveredCommentId;
-            }
-          }
-          reviewerHumanDecisionCommentId = expectedCommentId;
-          if (shouldCreateHumanDecisionComment && !reviewerHumanDecisionBody) {
-            reviewActionError =
-              "The reviewer returned needs_human_decision without a Human Decision section.";
-          } else if (
-            hasPendingReviewerOwnedComment &&
-            runtimeSuccessful &&
-            !actionTargetChanged &&
-            !agentReviewStatus
-          ) {
-            reviewActionError =
-              "The rebuilt review did not return a valid Agent Status, so the pending reviewer-owned comment was left unchanged.";
-          } else {
-            reviewerHumanDecisionCommentId =
-              await reconcileReviewerHumanDecisionComment(
-                target.pr_url,
-                reviewerHumanDecisionCommentToken,
-                shouldCreateReviewerOwnedComment
-                  ? reviewerOwnedCommentBody
-                  : shouldRemoveReviewerOwnedComment
-                    ? null
-                    : undefined,
-                expectedCommentId,
-                reviewerOwnedCommentPrefix
-              );
-            if (
-              shouldCreateReviewerOwnedComment &&
-              expectedCommentId &&
-              !reviewerHumanDecisionCommentId
-            ) {
-              const priorToken = reviewerHumanDecisionCommentToken;
-              const replacementToken = randomUUID();
-              beforeReviewAction = await mutateReviewSummary(
-                target.pr_url,
-                (current) => {
-                  if (
-                    current?.current_run_id !== runLock.data.token ||
-                    current.pending_reviewer_human_decision_comment_token !==
-                      priorToken ||
-                    current.pending_reviewer_human_decision_comment_id !==
-                      expectedCommentId
-                  ) {
-                    return undefined;
-                  }
-                  return {
-                    ...current,
-                    pending_reviewer_human_decision_comment_token:
-                      replacementToken,
-                    pending_reviewer_human_decision_comment_id: undefined,
-                  };
-                }
-              );
-              if (
-                beforeReviewAction
-                  ?.pending_reviewer_human_decision_comment_token !==
-                  replacementToken ||
-                beforeReviewAction
-                  ?.pending_reviewer_human_decision_comment_id !== undefined
-              ) {
-                throw new Error(
-                  `Review comment replacement ownership was lost before saving ${target.pr_url}`
-                );
-              }
-              reviewerHumanDecisionCommentToken = replacementToken;
-              expectedCommentId = undefined;
-              reviewerHumanDecisionCommentId =
-                await reconcileReviewerHumanDecisionComment(
-                  target.pr_url,
-                  reviewerHumanDecisionCommentToken,
-                  reviewerOwnedCommentBody,
-                  undefined,
-                  reviewerOwnedCommentPrefix
-                );
-            }
-            if (
-              shouldCreateReviewerOwnedComment &&
-              !reviewerHumanDecisionCommentId
-            ) {
-              reviewActionError =
-                "GitHub did not return a reviewer-owned comment receipt.";
-            }
-            if (!reviewActionError) {
-              if (
-                shouldCreateReviewerOwnedComment &&
-                reviewerHumanDecisionCommentId
-              ) {
-                reconciledActiveReviewerOwnedComment = {
-                  token: reviewerHumanDecisionCommentToken,
-                  id: reviewerHumanDecisionCommentId,
-                };
-              } else if (shouldRemoveReviewerOwnedComment) {
-                reconciledActiveReviewerOwnedComment = null;
-              }
-            }
-          }
-        } catch (error) {
-          reviewActionError =
-            error instanceof Error
-              ? error.message
-              : "Unknown GitHub comment error.";
-        }
-      }
-    }
-    const successful =
-      runtimeSuccessful && !reviewActionError && !approvalVerificationError;
     const saved = await mutateReviewSummary(target.pr_url, (latestBeforeSave) => {
       if (latestBeforeSave?.current_run_id !== runLock.data.token) {
         return undefined;
@@ -1471,16 +1160,6 @@ export async function spawnReviewSummary(
         latestTarget.task_title !== target.task_title ||
         latestTarget.task_description !== target.task_description ||
         latestTarget.task_plan !== target.task_plan;
-      const existingReviewerHumanDecisionCommentIds =
-        latestBeforeSave.reviewer_human_decision_comment_ids || [];
-      const reviewerHumanDecisionCommentIds = reviewerHumanDecisionCommentId
-        ? [
-            ...new Set([
-              ...existingReviewerHumanDecisionCommentIds,
-              reviewerHumanDecisionCommentId,
-            ]),
-          ]
-        : existingReviewerHumanDecisionCommentIds;
       return {
         // Reconciliation may discover a new HEAD or change review context while
         // the agent is running. Keep the latest identity; a changed context is
@@ -1517,59 +1196,25 @@ export async function spawnReviewSummary(
         duration_ms: finalOutput.duration_ms,
         input_tokens: finalOutput.usage?.input_tokens,
         output_tokens: finalOutput.usage?.output_tokens,
-        error: reviewContextChangedDuringRun
-          ? undefined
-          : finalOutput.error || reviewActionError || approvalVerificationError,
+        error: reviewContextChangedDuringRun ? undefined : finalOutput.error,
         error_at:
           reviewContextChangedDuringRun || successful ? undefined : generatedAt,
         agent_review_status: successful
           ? headMovedDuringRun || reviewContextChangedDuringRun
             ? undefined
-            : agentReviewStatus
+            : parseReviewAgentStatus(finalOutput.result_text)
           : latestBeforeSave.agent_review_status,
-        reviewer_human_decision_comment_ids:
-          reviewerHumanDecisionCommentIds.length > 0
-            ? reviewerHumanDecisionCommentIds
-            : undefined,
-        active_reviewer_owned_comment_token:
-          reconciledActiveReviewerOwnedComment !== undefined
-            ? reconciledActiveReviewerOwnedComment?.token
-            : latestBeforeSave.active_reviewer_owned_comment_token,
-        active_reviewer_owned_comment_id:
-          reconciledActiveReviewerOwnedComment !== undefined
-            ? reconciledActiveReviewerOwnedComment?.id
-            : latestBeforeSave.active_reviewer_owned_comment_id,
-        pending_reviewer_human_decision_comment_token:
-          reviewActionError || preservePendingReviewAction
-            ? reviewerHumanDecisionCommentToken
-            : undefined,
-        pending_reviewer_human_decision_comment_id:
-          reviewActionError || preservePendingReviewAction
-            ? reviewerHumanDecisionCommentId ||
-              latestBeforeSave.pending_reviewer_human_decision_comment_id
-            : undefined,
         followups: reviewContextChangedDuringRun
           ? []
-          : followupReview ||
-              finalOutput.error ||
-              reviewActionError ||
-              approvalVerificationError
+          : followupReview || finalOutput.error
             ? latestBeforeSave.followups || []
             : [],
         // Review signals are owned by the worker poll and the submit route,
         // which may update them while this run is in flight. This mutation
         // executes under the store's cross-process lock, so it merges the
         // newest persisted signals and verifies ownership in one step.
-        my_last_review_sha:
-          verifiedApprovalSha &&
-          latestBeforeSave.my_changes_requested_sha !== target.head_sha
-            ? verifiedLastReviewSha || latestBeforeSave.my_last_review_sha
-            : latestBeforeSave.my_last_review_sha,
-        my_approval_sha:
-          verifiedApprovalSha &&
-          latestBeforeSave.my_changes_requested_sha !== target.head_sha
-            ? verifiedApprovalSha
-            : latestBeforeSave.my_approval_sha,
+        my_last_review_sha: latestBeforeSave.my_last_review_sha,
+        my_approval_sha: latestBeforeSave.my_approval_sha,
         my_changes_requested_sha: latestBeforeSave.my_changes_requested_sha,
         final_at: undefined,
         current_run_pid: undefined,
