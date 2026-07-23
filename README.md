@@ -85,7 +85,7 @@ From a task detail page, you can:
 
 ### Reviewer
 
-Cortex City uses one reviewer agent for both PRs created by Cortex tasks and other people's PRs that you are assigned to review. Task-owned reviews use the task's title, description, and plan as context, and leave actionable GitHub comments for changes the implementation agent should make. Turn off `Automatic review` on a task when you do not want its PR added to this review flow.
+Cortex City uses one reviewer agent for both PRs created by Cortex tasks and other people's PRs that you are assigned to review. Task-owned reviews use the task's title, description, and plan as context, and leave actionable GitHub comments for changes the implementation agent should make. Required findings stay within the PR's stated goal; the reviewer marks broader improvements as non-blocking suggestions for a separate task and PR. Turn off `Automatic review` on a task when you do not want its PR added to this review flow.
 
 For someone else's PR, a clean review automatically approves the exact reviewed commit. When the reviewer needs a human decision, it posts the uncertain or advisory points as a new top-level PR comment. Self-authored and task-owned PRs are never approved by the reviewer because GitHub does not allow authors to approve their own changes; a clean review instead posts a handoff requesting an eligible non-author reviewer or another repository-permitted manual action. Reviewer comments are immutable timeline events, so later reviews never edit or delete earlier comments.
 
