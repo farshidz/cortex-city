@@ -146,6 +146,8 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
 ];
 
 export const REVIEWER_GITHUB_COMMENT_PREFIX = "**🤖[Cortex City Reviewer]**";
+const REVIEWER_SEPARATE_FOLLOWUP_COMMENT_PREFIX =
+  `${REVIEWER_GITHUB_COMMENT_PREFIX} **Separate follow-up suggested (non-blocking):**`;
 const REVIEW_GITHUB_TOOL_INSTRUCTION =
   "Use the `gh` CLI for GitHub inspection and comments. The working directory persists for this PR, so reuse any existing checkout or artifacts.";
 
@@ -465,8 +467,27 @@ export function buildReviewWrapperPrompt(
       "as the first characters of the comment body.",
     ].join(" "),
     [
-      "- Put uncertain or advisory points in the generated review instead of",
-      "posting them to GitHub.",
+      "- Keep required changes within the PR's stated goal. Establish that goal from",
+      "the PR description and the supplied task details for task-owned PRs. A required",
+      "finding must identify a defect, regression, safety issue, or missing behavior",
+      "that must be fixed for this PR to deliver its stated goal correctly.",
+    ].join(" "),
+    [
+      "- Do not require substantial unrelated redesigns, generalized infrastructure,",
+      "optional refactors, stronger guarantees than the task requested, or fixes for",
+      "pre-existing problems. Prefer the smallest safe fix for an in-scope finding.",
+    ].join(" "),
+    [
+      "- If a broader improvement is valuable but not required for this PR, you may",
+      "leave one explicitly non-blocking top-level GitHub comment that recommends a separate task",
+      `and PR. Begin it with \`${REVIEWER_SEPARATE_FOLLOWUP_COMMENT_PREFIX}\`.`,
+      "Do not ask for that work to be implemented in the current PR. Such a suggestion",
+      "must not by itself produce `needs_author_changes` or `needs_human_decision`.",
+    ].join(" "),
+    [
+      "- Except for the explicitly labeled separate-follow-up comment above, put",
+      "uncertain or advisory points in the generated review instead of posting",
+      "them to GitHub.",
     ].join(" "),
     "- Do not approve, request changes, or submit a GitHub PR review decision.",
   ];

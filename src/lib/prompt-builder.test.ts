@@ -266,6 +266,25 @@ test("shared review template requires the robot prefix in GitHub replies", () =>
   assert.match(reviewTemplate, /Prefix your response with `\*\*🤖\[\{\{AGENT_NAME\}\}\]\*\* `/);
 });
 
+test("shared review template keeps separate follow-ups out of the current PR", () => {
+  const reviewTemplate = readFileSync(
+    path.join(REPO_ROOT, "prompts", "templates", "review.md"),
+    "utf-8"
+  );
+
+  assert.match(reviewTemplate, /Preserve the current PR's stated scope/i);
+  assert.match(
+    reviewTemplate,
+    /Separate follow-up suggested \(non-blocking\)/i
+  );
+  assert.match(reviewTemplate, /Do not implement it on this branch/i);
+  assert.match(reviewTemplate, /tool_calls\.create_task/);
+  assert.match(
+    reviewTemplate,
+    /Do not use scope as a reason to defer a defect or regression/i
+  );
+});
+
 test("shared cleanup template leaves local worktree cleanup to the orchestrator", () => {
   const cleanupTemplate = readFileSync(
     path.join(REPO_ROOT, "prompts", "templates", "cleanup.md"),

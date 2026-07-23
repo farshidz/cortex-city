@@ -85,7 +85,7 @@ From a task detail page, you can:
 
 ### Reviewer
 
-Cortex City uses one reviewer agent for both PRs created by Cortex tasks and other people's PRs that you are assigned to review. Task-owned reviews use the task's title, description, and plan as context, and leave actionable GitHub comments for changes the implementation agent should make. Turn off `Automatic review` on a task when you do not want its PR added to this review flow.
+Cortex City uses one reviewer agent for both PRs created by Cortex tasks and other people's PRs that you are assigned to review. Task-owned reviews use the task's title, description, and plan as context, and leave actionable GitHub comments for changes the implementation agent should make. Required findings stay within the PR's stated goal; broader improvements are marked as non-blocking suggestions for a separate task and PR so the implementation agent does not expand the current change. Turn off `Automatic review` on a task when you do not want its PR added to this review flow.
 
 The reviewer uses one shared learning history across both kinds of PR. When reviewed PRs merge, retrospectives improve those learnings for future reviews. Configure the global reviewer runtime, effort, and model in `Settings`; the model field accepts any model identifier supported by the selected runtime and can be left blank to use its default.
 
