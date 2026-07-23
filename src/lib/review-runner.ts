@@ -1039,6 +1039,8 @@ export async function spawnReviewSummary(
       ? undefined
       : cachedBefore?.agent_review_status,
     reviewer_comment_receipts: cachedBefore?.reviewer_comment_receipts,
+    reviewer_comment_cancellations:
+      cachedBefore?.reviewer_comment_cancellations,
     pending_reviewer_comment_delivery:
       cachedBefore?.pending_reviewer_comment_delivery,
     followups: cachedBefore?.followups,
@@ -1106,6 +1108,10 @@ export async function spawnReviewSummary(
           current
             ? current.reviewer_comment_receipts
             : cachedBefore?.reviewer_comment_receipts,
+        reviewer_comment_cancellations:
+          current
+            ? current.reviewer_comment_cancellations
+            : cachedBefore?.reviewer_comment_cancellations,
         pending_reviewer_comment_delivery:
           current
             ? current.pending_reviewer_comment_delivery
@@ -1148,6 +1154,10 @@ export async function spawnReviewSummary(
             current
               ? current.reviewer_comment_receipts
               : cachedBefore?.reviewer_comment_receipts,
+          reviewer_comment_cancellations:
+            current
+              ? current.reviewer_comment_cancellations
+              : cachedBefore?.reviewer_comment_cancellations,
           pending_reviewer_comment_delivery:
             current
               ? current.pending_reviewer_comment_delivery

@@ -717,6 +717,9 @@ test("summarizePR posts and persists an application-owned human-decision comment
   writeJson(ghStateFile, {
     prs: {
       "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "abc123",
         issueComments: [],
         nextIssueCommentId: 8123,
       },
@@ -1569,9 +1572,18 @@ test("summarizePR cancels an undelivered stale action before posting the current
   assert.doesNotMatch(calls, /"PATCH"|"DELETE"/);
 });
 
-test("spawnReviewSummary preserves retro state during summary refreshes", () => {
+test("spawnReviewSummary preserves retro and cancellation state through claim and completion", () => {
   const workspace = setupRunnerWorkspace("review-runner-retro-preserve-");
   const scenarioFile = path.join(workspace, "scenario.json");
+  const cancellation = {
+    action_token: "44444444-4444-4444-8444-444444444444",
+    reason: "head_changed",
+    expected_head_sha: "old-head",
+    observed_head_sha: "abc123",
+    observed_pr_state: "open",
+    body_sha256: "d".repeat(64),
+    canceled_at: "2026-05-01T00:15:00.000Z",
+  };
   writeJson(scenarioFile, {
     claude: {
       stdout: JSON.stringify({
@@ -1579,7 +1591,7 @@ test("spawnReviewSummary preserves retro state during summary refreshes", () => 
         result: "## Summary\nUpdated.",
         is_error: false,
       }),
-      sleepMs: 100,
+      sleepMs: 2_000,
     },
   });
 
@@ -1597,6 +1609,7 @@ test("spawnReviewSummary preserves retro state during summary refreshes", () => 
           generated_at: "2026-05-01T00:00:00.000Z",
           retro_status: "pending",
           retro_run_pid: 60_000,
+          reviewer_comment_cancellations: [cancellation],
         },
       },
       null,
@@ -1634,11 +1647,17 @@ test("spawnReviewSummary preserves retro state during summary refreshes", () => 
 
   assert.equal(result.during.retro_status, "pending");
   assert.equal(result.during.retro_run_pid, 60_000);
+  assert.equal(typeof result.during.current_run_pid, "number");
+  assert.deepEqual(result.during.reviewer_comment_cancellations, [cancellation]);
   assert.equal(result.summary.summary, "## Summary\nUpdated.");
   assert.equal(result.persisted.retro_status, "done");
   assert.equal(result.persisted.retro_done_at, "2026-05-01T00:20:00.000Z");
   assert.equal(result.persisted.retro_run_pid, undefined);
   assert.equal(result.persisted.retro_error, undefined);
+  assert.deepEqual(
+    result.persisted.reviewer_comment_cancellations,
+    [cancellation]
+  );
 });
 
 test("spawnReviewSummary preserves review signals updated while the run is in flight", () => {
@@ -2174,19 +2193,34 @@ test("summarizePR applies the configured task run timeout", () => {
   assert.equal(readdirSync(reviewRoot).length, 1);
 });
 
-test("summarizePR persists a review-specific low-disk preflight failure", () => {
+test("summarizePR preserves cancellation state on a low-disk preflight failure", () => {
   const workspace = setupRunnerWorkspace("review-runner-disk-preflight-");
   const request = sampleRequest({
     pr_url: "https://github.com/acme/widget/pull/301",
     pr_number: 301,
   });
+  const cancellation = {
+    action_token: "44444444-4444-4444-8444-444444444444",
+    reason: "pr_not_open",
+    expected_head_sha: "abc123",
+    observed_head_sha: "abc123",
+    observed_pr_state: "closed",
+    body_sha256: "e".repeat(64),
+    canceled_at: "2026-05-01T00:15:00.000Z",
+  };
   const result = runTsxScript(
     workspace,
     [
       `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
-      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
     ],
     `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "",
+        generated_at: "",
+        reviewer_comment_cancellations: ${JSON.stringify([cancellation])},
+      });
       let thrown;
       try {
         await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
@@ -2209,6 +2243,10 @@ test("summarizePR persists a review-specific low-disk preflight failure", () => 
   assert.equal(typeof result.persisted.error_at, "string");
   assert.equal(result.persisted.summary, "");
   assert.equal(result.persisted.current_run_pid, undefined);
+  assert.deepEqual(
+    result.persisted.reviewer_comment_cancellations,
+    [cancellation]
+  );
 });
 
 test("spawnRuntime terminates a running reviewer when it crosses the reserve", async () => {
