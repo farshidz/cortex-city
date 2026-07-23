@@ -309,6 +309,14 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   );
   assert.match(
     taskPrompt,
+    /every GitHub comment authored by the reviewer as immutable timeline history/i
+  );
+  assert.match(
+    taskPrompt,
+    /Never edit or delete an earlier reviewer comment/i
+  );
+  assert.match(
+    taskPrompt,
     /\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Human decision needed:\*\*/
   );
   assert.match(taskPrompt, /Task ID: task-42/);
@@ -1456,6 +1464,107 @@ test("summarizePR appends a distinct rebuilt decision after recovering a pending
     comments[1].body,
     /<!-- cortex-city-review-decision:[0-9a-f-]{36} -->$/
   );
+  const calls = readFileSync(ghCallsFile, "utf-8");
+  assert.doesNotMatch(calls, /"PATCH"|"DELETE"/);
+});
+
+test("summarizePR cancels an undelivered stale action before posting the current decision", () => {
+  const workspace = setupRunnerWorkspace("review-runner-stale-decision-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const ghCallsFile = path.join(workspace, "gh-calls.jsonl");
+  const priorToken = "11111111-1111-4111-8111-111111111111";
+  const priorDelivery = reviewerDelivery(
+    priorToken,
+    "Choose the stale implementation path.",
+    "old-head"
+  );
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "new-head",
+        issueComments: [],
+        nextIssueCommentId: 9000,
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-current-decision-session",
+        result: [
+          "## Summary",
+          "Only the new head was reviewed.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose the current implementation path.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({
+    source: "task",
+    task_id: "task-1",
+    head_sha: "new-head",
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        head_sha: "old-head",
+        summary: "The old head was reviewed.",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_reviewer_comment_delivery: ${JSON.stringify(priorDelivery)},
+      });
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_CALLS_FILE: ghCallsFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.persisted.summary_head_sha, "new-head");
+  assert.equal(result.persisted.pending_reviewer_comment_delivery, undefined);
+  assert.equal(
+    result.persisted.reviewer_comment_cancellations[0].action_token,
+    priorToken
+  );
+  assert.equal(
+    result.persisted.reviewer_comment_cancellations[0].reason,
+    "head_changed"
+  );
+  assert.deepEqual(
+    result.persisted.reviewer_comment_receipts.map(
+      (receipt: ReviewerCommentReceipt) => receipt.comment_id
+    ),
+    [9000]
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  const comments = ghState.prs["acme/widget#1"].issueComments;
+  assert.equal(comments.length, 1);
+  assert.doesNotMatch(comments[0].body, new RegExp(priorToken));
+  assert.match(comments[0].body, /Choose the current implementation path\./);
   const calls = readFileSync(ghCallsFile, "utf-8");
   assert.doesNotMatch(calls, /"PATCH"|"DELETE"/);
 });

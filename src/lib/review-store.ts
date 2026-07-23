@@ -2,9 +2,6 @@ import { createHash } from "crypto";
 import {
   existsSync,
   mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
 } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -17,9 +14,19 @@ import {
 import { withReviewState, withReviewStatus } from "./review-status";
 import type { ReviewState, ReviewStatus, ReviewSummary } from "./types";
 import { snapshotCortex } from "./cortex-git";
-import { ensureCortexDir } from "./store";
+import {
+  ensureCortexDir,
+  readJsonFileWithBackup,
+  writeJsonFileAtomic,
+} from "./store";
 
 const REVIEWS_FILE = path.join(process.cwd(), ".cortex", "reviews.json");
+const REVIEWS_BACKUP_FILE = path.join(
+  process.cwd(),
+  ".cortex",
+  "backups",
+  "reviews.json.last-good"
+);
 const REVIEW_STORE_LOCK_TARGET = path.join(
   tmpdir(),
   "cortex-city-review-store-locks",
@@ -88,6 +95,10 @@ type ReviewSummaryInput = Omit<ReviewSummary, "review_status" | "review_state"> 
 type ReviewMap = Record<string, ReviewSummary>;
 type RawReviewMap = Record<string, ReviewSummaryInput>;
 
+function isRawReviewMap(value: unknown): value is RawReviewMap {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
   const normalized: ReviewSummaryInput = {
     ...review,
@@ -119,6 +130,32 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
   normalized.reviewer_comment_receipts =
     receipts.length > 0 ? receipts : undefined;
 
+  const seenCancellationTokens = new Set<string>();
+  const cancellations = Array.isArray(
+    normalized.reviewer_comment_cancellations
+  )
+    ? normalized.reviewer_comment_cancellations.filter((cancellation) => {
+        const valid = Boolean(
+          cancellation &&
+            actionTokenPattern.test(cancellation.action_token) &&
+            !seenReceiptTokens.has(cancellation.action_token) &&
+            !seenCancellationTokens.has(cancellation.action_token) &&
+            (cancellation.reason === "head_changed" ||
+              cancellation.reason === "pr_not_open") &&
+            cancellation.expected_head_sha?.trim() &&
+            cancellation.observed_pr_state?.trim() &&
+            /^[0-9a-f]{64}$/i.test(cancellation.body_sha256) &&
+            Number.isFinite(new Date(cancellation.canceled_at).getTime())
+        );
+        if (valid) {
+          seenCancellationTokens.add(cancellation.action_token);
+        }
+        return valid;
+      })
+    : [];
+  normalized.reviewer_comment_cancellations =
+    cancellations.length > 0 ? cancellations : undefined;
+
   const delivery = normalized.pending_reviewer_comment_delivery;
   const deliveryPrefix =
     delivery?.kind === "human_decision"
@@ -129,6 +166,7 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
   normalized.pending_reviewer_comment_delivery =
     delivery &&
     actionTokenPattern.test(delivery.action_token) &&
+    !seenCancellationTokens.has(delivery.action_token) &&
     Boolean(delivery.head_sha?.trim()) &&
     deliveryPrefix &&
     delivery.body.startsWith(`${deliveryPrefix} `) &&
@@ -173,27 +211,17 @@ function normalizeMap(map: RawReviewMap): ReviewMap {
 
 function readMap(): ReviewMap {
   ensureCortexDir();
-  if (!existsSync(REVIEWS_FILE)) return {};
-  try {
-    const raw = readFileSync(REVIEWS_FILE, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return normalizeMap(parsed as RawReviewMap);
-    }
-    return {};
-  } catch {
-    return {};
-  }
+  if (!existsSync(REVIEWS_FILE) && !existsSync(REVIEWS_BACKUP_FILE)) return {};
+  const parsed = readJsonFileWithBackup<RawReviewMap>(
+    REVIEWS_FILE,
+    "reviews.json",
+    isRawReviewMap
+  );
+  return normalizeMap(parsed);
 }
 
 function writeMapLocked(map: ReviewMap): void {
-  ensureCortexDir();
-  const temp = path.join(
-    path.dirname(REVIEWS_FILE),
-    `.${path.basename(REVIEWS_FILE)}.${process.pid}.${Date.now()}.tmp`
-  );
-  writeFileSync(temp, JSON.stringify(map, null, 2));
-  renameSync(temp, REVIEWS_FILE);
+  writeJsonFileAtomic(REVIEWS_FILE, map, "reviews.json");
   snapshotCortex("reviews");
 }
 

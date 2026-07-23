@@ -1,5 +1,9 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
+import { mkdirSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
+import * as lockfile from "proper-lockfile";
 import {
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
   REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
@@ -9,6 +13,7 @@ import {
 import { getReviewSummary } from "./review-store";
 import type {
   PRStatus,
+  ReviewerCommentCancellation,
   ReviewerCommentDelivery,
   ReviewerCommentReceipt,
   ReviewRequest,
@@ -46,6 +51,55 @@ interface IssueCommentItem {
   id: number;
   body?: string | null;
   user?: { login?: string };
+}
+
+interface ReviewerCommentDeliveryTarget {
+  state?: string;
+  merged?: boolean;
+  head?: { sha?: string };
+}
+
+const REVIEWER_COMMENT_DELIVERY_LOCK_DIR = path.join(
+  tmpdir(),
+  "cortex-city-reviewer-comment-delivery-locks"
+);
+const REVIEWER_COMMENT_DELIVERY_LOCK_STALE_MS = 120_000;
+
+export class StaleReviewerCommentDeliveryError extends Error {
+  constructor(
+    readonly reason: ReviewerCommentCancellation["reason"],
+    readonly expectedHeadSha: string,
+    readonly observedHeadSha: string | undefined,
+    readonly observedPRState: string
+  ) {
+    super(
+      reason === "head_changed"
+        ? `Reviewer comment delivery was canceled because PR HEAD moved from ${expectedHeadSha} to ${observedHeadSha || "an unknown commit"}.`
+        : `Reviewer comment delivery was canceled because the PR is ${observedPRState}.`
+    );
+    this.name = "StaleReviewerCommentDeliveryError";
+  }
+}
+
+export function isStaleReviewerCommentDeliveryError(
+  error: unknown
+): error is StaleReviewerCommentDeliveryError {
+  return error instanceof StaleReviewerCommentDeliveryError;
+}
+
+export function reviewerCommentCancellationFromStaleError(
+  delivery: ReviewerCommentDelivery,
+  error: StaleReviewerCommentDeliveryError
+): ReviewerCommentCancellation {
+  return {
+    action_token: delivery.action_token,
+    reason: error.reason,
+    expected_head_sha: error.expectedHeadSha,
+    observed_head_sha: error.observedHeadSha,
+    observed_pr_state: error.observedPRState,
+    body_sha256: reviewerCommentBodySha256(delivery.body),
+    canceled_at: new Date().toISOString(),
+  };
 }
 
 function verifiedReviewerCommentIds(prUrl: string): Set<number> {
@@ -759,6 +813,77 @@ async function getIssueComment(
   }
 }
 
+async function getReviewerCommentDeliveryTarget(
+  pr: PRInfo
+): Promise<ReviewerCommentDeliveryTarget> {
+  const result = await execFileResult("gh", [
+    "api",
+    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`,
+  ]);
+  if (!result.ok || !result.stdout.trim()) {
+    throw new Error("Failed to verify the reviewer comment PR target.");
+  }
+  try {
+    const parsed = JSON.parse(result.stdout) as ReviewerCommentDeliveryTarget;
+    if (
+      typeof parsed.state !== "string" ||
+      typeof parsed.merged !== "boolean" ||
+      !parsed.head ||
+      typeof parsed.head.sha !== "string" ||
+      !parsed.head.sha.trim()
+    ) {
+      throw new Error("Incomplete GitHub PR target.");
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(
+      `Failed to parse the reviewer comment PR target: ${
+        error instanceof Error ? error.message : "unknown GitHub response"
+      }`
+    );
+  }
+}
+
+async function withReviewerCommentDeliveryLock<T>(
+  prUrl: string,
+  actionToken: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  mkdirSync(REVIEWER_COMMENT_DELIVERY_LOCK_DIR, { recursive: true });
+  const target = path.join(
+    REVIEWER_COMMENT_DELIVERY_LOCK_DIR,
+    createHash("sha256")
+      .update(`${prUrl}\0${actionToken}`)
+      .digest("hex")
+  );
+  let compromised: Error | undefined;
+  const release = await lockfile.lock(target, {
+    realpath: false,
+    stale: REVIEWER_COMMENT_DELIVERY_LOCK_STALE_MS,
+    update: Math.floor(REVIEWER_COMMENT_DELIVERY_LOCK_STALE_MS / 3),
+    retries: {
+      retries: 1_200,
+      factor: 1,
+      minTimeout: 25,
+      maxTimeout: 25,
+    },
+    onCompromised: (error) => {
+      compromised = error;
+    },
+  });
+  try {
+    const value = await fn();
+    if (compromised) throw compromised;
+    return value;
+  } finally {
+    try {
+      await release();
+    } catch (error) {
+      if (!compromised) throw error;
+    }
+  }
+}
+
 export async function deliverReviewerComment(
   prUrl: string,
   delivery: ReviewerCommentDelivery
@@ -772,50 +897,81 @@ export async function deliverReviewerComment(
     throw new Error("GitHub did not return the reviewer comment author.");
   }
 
-  const endpoint =
-    `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`;
-  const existing = await execPaginatedArrayStrict<IssueCommentItem>(endpoint);
-  if (!existing) {
-    throw new Error("Failed to inspect existing PR conversation comments.");
-  }
-  const recovered = existing
-    .filter(
-      (comment) =>
-        comment.user?.login === authorLogin && comment.body === delivery.body
-    )
-    .sort((a, b) => a.id - b.id)[0];
-  if (recovered) {
-    return verifiedReviewerCommentReceipt(
-      delivery,
-      recovered,
-      authorLogin
-    );
-  }
+  return withReviewerCommentDeliveryLock(
+    prUrl,
+    delivery.action_token,
+    async () => {
+      const endpoint =
+        `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`;
+      const existing = await execPaginatedArrayStrict<IssueCommentItem>(
+        endpoint
+      );
+      if (!existing) {
+        throw new Error("Failed to inspect existing PR conversation comments.");
+      }
+      const recovered = existing
+        .filter(
+          (comment) =>
+            comment.user?.login === authorLogin &&
+            comment.body === delivery.body
+        )
+        .sort((a, b) => a.id - b.id)[0];
+      if (recovered) {
+        return verifiedReviewerCommentReceipt(
+          delivery,
+          recovered,
+          authorLogin
+        );
+      }
 
-  const result = await execFileResult("gh", [
-    "api",
-    "--method",
-    "POST",
-    endpoint,
-    "--raw-field",
-    `body=${delivery.body}`,
-    "--jq",
-    ".id",
-  ]);
-  const id = Number(result.stdout.trim());
-  if (!result.ok || !Number.isSafeInteger(id) || id <= 0) {
-    const detail = (result.stderr || result.stdout).trim();
-    throw new Error(
-      `Failed to post the reviewer comment${detail ? `: ${detail}` : "."}`
-    );
-  }
-  const posted = await getIssueComment(
-    `repos/${pr.owner}/${pr.repo}/issues/comments/${id}`
+      const target = await getReviewerCommentDeliveryTarget(pr);
+      const observedPRState = target.merged
+        ? "merged"
+        : (target.state || "unknown").toLowerCase();
+      const observedHeadSha = target.head?.sha?.trim();
+      if (target.merged || observedPRState !== "open") {
+        throw new StaleReviewerCommentDeliveryError(
+          "pr_not_open",
+          delivery.head_sha,
+          observedHeadSha,
+          observedPRState
+        );
+      }
+      if (observedHeadSha !== delivery.head_sha) {
+        throw new StaleReviewerCommentDeliveryError(
+          "head_changed",
+          delivery.head_sha,
+          observedHeadSha,
+          observedPRState
+        );
+      }
+
+      const result = await execFileResult("gh", [
+        "api",
+        "--method",
+        "POST",
+        endpoint,
+        "--raw-field",
+        `body=${delivery.body}`,
+        "--jq",
+        ".id",
+      ]);
+      const id = Number(result.stdout.trim());
+      if (!result.ok || !Number.isSafeInteger(id) || id <= 0) {
+        const detail = (result.stderr || result.stdout).trim();
+        throw new Error(
+          `Failed to post the reviewer comment${detail ? `: ${detail}` : "."}`
+        );
+      }
+      const posted = await getIssueComment(
+        `repos/${pr.owner}/${pr.repo}/issues/comments/${id}`
+      );
+      if (!posted) {
+        throw new Error("Failed to verify the posted reviewer comment receipt.");
+      }
+      return verifiedReviewerCommentReceipt(delivery, posted, authorLogin);
+    }
   );
-  if (!posted) {
-    throw new Error("Failed to verify the posted reviewer comment receipt.");
-  }
-  return verifiedReviewerCommentReceipt(delivery, posted, authorLogin);
 }
 
 export const __testUtils = {

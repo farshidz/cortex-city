@@ -8,9 +8,11 @@
 > actions remain available as fallbacks. Self-authored and task-owned PRs are
 > never auto-approved; clean results receive a handoff to an eligible reviewer
 > or another repository-permitted manual action.
-> Those handoffs are append-only: a durable action precedes the GitHub POST,
-> recovery verifies the authenticated author and exact immutable body, and only
-> verified receipt IDs are filtered from later task-feedback detection.
+> Those handoffs are append-only: an fsync-backed durable action precedes the
+> GitHub POST, recovery is serialized across processes and verifies the
+> authenticated author and exact immutable body, and only verified receipt IDs
+> are filtered from later task-feedback detection. Undelivered actions are
+> durably canceled if the PR is no longer open at the reviewed SHA.
 
 ## Context
 

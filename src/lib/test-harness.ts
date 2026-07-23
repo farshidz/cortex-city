@@ -219,6 +219,16 @@ function output(value) {
   process.stdout.write(JSON.stringify(value));
 }
 
+function blockFor(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return;
+  Atomics.wait(
+    new Int32Array(new SharedArrayBuffer(4)),
+    0,
+    0,
+    milliseconds
+  );
+}
+
 const args = process.argv.slice(2);
 const state = loadState();
 logCall(args);
@@ -316,6 +326,7 @@ if (args[0] === "api") {
       process.exit(0);
     }
     if (scope === "issues" && resource === "comments") {
+      blockFor(Number(process.env.FAKE_GH_ISSUE_COMMENT_LIST_DELAY_MS || 0));
       output([pr.issueComments || []]);
       process.exit(0);
     }
@@ -360,6 +371,16 @@ if (args[0] === "api") {
     });
     process.exit(0);
   }
+  output({
+    ...pr,
+    state: pr.state || "open",
+    merged: Boolean(pr.merged),
+    head: {
+      ...(pr.head || {}),
+      sha: pr.head?.sha || pr.headRefOid || "",
+    },
+  });
+  process.exit(0);
 }
 
 if (args[0] === "pr" && args[1] === "checks") {

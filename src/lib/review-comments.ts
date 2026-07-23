@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import type { ReviewerCommentCancellation } from "./types";
 
 export const REVIEWER_GITHUB_COMMENT_PREFIX =
   "**🤖[Cortex City Reviewer]**";
@@ -28,4 +29,16 @@ export function buildReviewerCommentBody(
 
 export function reviewerCommentBodySha256(body: string): string {
   return createHash("sha256").update(body).digest("hex");
+}
+
+export function appendReviewerCommentCancellation(
+  existing: ReviewerCommentCancellation[] | undefined,
+  cancellation: ReviewerCommentCancellation
+): ReviewerCommentCancellation[] {
+  return [
+    ...(existing || []).filter(
+      (candidate) => candidate.action_token !== cancellation.action_token
+    ),
+    cancellation,
+  ];
 }

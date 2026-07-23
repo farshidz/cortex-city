@@ -62,13 +62,20 @@ The unified reviewer owns review execution, summaries, verdicts, follow-ups, err
   feedback. Posting that prompt must leave a task waiting for the human, while a
   later human PR response still wakes the implementation feedback loop.
 - Treat every reviewer-owned handoff as an immutable timeline event. Persist a
-  complete action and unguessable token before POST, verify the returned GitHub
-  author and exact body, and retain the receipt before completing the review.
-  Crash recovery may find or post that same action exactly once, but must never
-  patch or delete an earlier comment; a changed decision creates a new event.
+  complete action and unguessable token with an fsync-backed atomic write before
+  POST, serialize lookup/POST/verification across processes, verify the returned
+  GitHub author and exact body, and durably retain the receipt before completing
+  the review. Crash recovery may find or post that same action exactly once, but
+  must never patch or delete an earlier comment; a changed decision creates a
+  new event.
+- Before posting an action with no recoverable GitHub event, verify that the PR
+  remains open at the reviewed SHA. Durably cancel an undelivered action after a
+  head move, merge, or close; still receipt an exact event GitHub already
+  accepted before the state changed.
 - Filter task wakeups and PR-state hashes only by verified receipt IDs. A public
   prefix or copied hidden marker is never enough to classify participant text
-  as a reviewer event. Recover pending receipts before evaluating task wakeups.
+  as a reviewer event. Reconcile orphaned review ownership and recover pending
+  receipts before evaluating task wakeups.
 - Keep review scheduling independent of task execution capacity so reviews are not starved when implementation session slots are full.
 
 ### 3. Extend learning and lifecycle handling to task PRs

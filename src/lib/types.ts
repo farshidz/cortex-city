@@ -265,6 +265,18 @@ export interface ReviewerCommentReceipt {
   body_sha256: string;
 }
 
+export interface ReviewerCommentCancellation {
+  // An undelivered action is retained as an explicit terminal ledger entry
+  // when GitHub proves that its reviewed SHA or open-PR target is stale.
+  action_token: string;
+  reason: "head_changed" | "pr_not_open";
+  expected_head_sha: string;
+  observed_head_sha?: string;
+  observed_pr_state: string;
+  body_sha256: string;
+  canceled_at: string;
+}
+
 // Single backend-derived state that merges the pipeline/freshness axis
 // (ReviewStatus) with the agent verdict axis (ReviewAgentStatus). The verdict
 // wins whenever it is present; otherwise the pipeline/freshness state shows.
@@ -306,6 +318,9 @@ export interface ReviewSummary extends ReviewRequest {
   // Verified immutable GitHub events. Only these IDs may be filtered from task
   // wakeups and PR-state hashes; prefixes and public marker copies are ignored.
   reviewer_comment_receipts?: ReviewerCommentReceipt[];
+  // Terminal records for actions GitHub proved stale before any POST. These
+  // tokens must never be retried or treated as delivered timeline events.
+  reviewer_comment_cancellations?: ReviewerCommentCancellation[];
   // The complete action is durably saved before POST. It remains pending until
   // its verified receipt and the enclosing review result have both been saved.
   pending_reviewer_comment_delivery?: ReviewerCommentDelivery;

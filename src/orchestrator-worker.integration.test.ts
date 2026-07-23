@@ -459,7 +459,7 @@ test("pollOnce scans in-review tasks for merged, closed, pending, conflicts, unc
   assert.equal(taskById["review-unchanged"].last_run_result, undefined);
 });
 
-test("reviewer decision prompts wait for a human response before waking the task builder", () => {
+test("orphaned review ownership is cleared before decision recovery and task wakeup hashing", () => {
   const workspace = setupWorkspace({
     configOverrides: {
       max_parallel_sessions: 1,
@@ -562,6 +562,8 @@ test("reviewer decision prompts wait for a human response before waking the task
           head_sha: "decision-head",
           body: pendingBody,
         },
+        current_run_pid: 99999999,
+        current_run_id: "orphaned-decision-run",
       });
 
       const fs = require("node:fs");
@@ -619,8 +621,138 @@ test("reviewer decision prompts wait for a human response before waking the task
     result.reviewAfterReviewerPrompt.pending_reviewer_comment_delivery.action_token,
     "11111111-1111-4111-8111-111111111111"
   );
+  assert.equal(result.reviewAfterReviewerPrompt.current_run_pid, undefined);
+  assert.equal(result.reviewAfterReviewerPrompt.current_run_id, undefined);
   assert.equal(result.finalTask.last_run_result, "success");
   assert.equal(result.callCount, 1);
+});
+
+test("pollOnce durably cancels undelivered reviewer actions for moved and closed PRs", () => {
+  const workspace = setupWorkspace({
+    configOverrides: {
+      review_learning_enabled: false,
+    },
+  });
+  const movedPrUrl =
+    "https://github.com/farshidz/marqo-cortex-city/pull/42";
+  const closedPrUrl =
+    "https://github.com/farshidz/marqo-cortex-city/pull/43";
+  const ghStateFile = path.join(workspace, "stale-delivery-gh-state.json");
+  const callsFile = path.join(workspace, "stale-delivery-gh-calls.jsonl");
+  const movedToken = "11111111-1111-4111-8111-111111111111";
+  const closedToken = "22222222-2222-4222-8222-222222222222";
+  const movedBody = `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n<!-- cortex-city-review-decision:${movedToken} -->`;
+  const closedBody = `**🤖[Cortex City Reviewer]** **Ready for manual approval:** Approve this PR.\n\n<!-- cortex-city-review-decision:${closedToken} -->`;
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#42": {
+        state: "open",
+        merged: false,
+        headRefOid: "new-head",
+        issueComments: [],
+      },
+      "farshidz/marqo-cortex-city#43": {
+        state: "closed",
+        merged: false,
+        headRefOid: "closed-head",
+        issueComments: [],
+      },
+    },
+  });
+
+  const result = runWorkerScript(
+    workspace,
+    `
+      const base = {
+        source: "inbound",
+        pr_number: 42,
+        repo_slug: "farshidz/marqo-cortex-city",
+        title: "Stale action",
+        author: "octocat",
+        created_at: "2026-05-01T00:00:00.000Z",
+        updated_at: "2026-05-01T00:00:00.000Z",
+        summary: "Interrupted before delivery.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+      };
+      await upsertReviewSummary({
+        ...base,
+        pr_url: ${JSON.stringify(movedPrUrl)},
+        head_sha: "old-head",
+        pending_reviewer_comment_delivery: {
+          action_token: ${JSON.stringify(movedToken)},
+          kind: "human_decision",
+          head_sha: "old-head",
+          body: ${JSON.stringify(movedBody)},
+        },
+      });
+      await upsertReviewSummary({
+        ...base,
+        pr_url: ${JSON.stringify(closedPrUrl)},
+        pr_number: 43,
+        head_sha: "closed-head",
+        pending_reviewer_comment_delivery: {
+          action_token: ${JSON.stringify(closedToken)},
+          kind: "manual_approval",
+          head_sha: "closed-head",
+          body: ${JSON.stringify(closedBody)},
+        },
+      });
+      await pollOnce(new Map());
+      const fs = require("node:fs");
+      console.log(JSON.stringify({
+        reviews: readReviewSummaryMap(),
+        ghState: JSON.parse(fs.readFileSync(${JSON.stringify(ghStateFile)}, "utf-8")),
+        calls: fs.readFileSync(${JSON.stringify(callsFile)}, "utf-8")
+          .trim()
+          .split(/\\r?\\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line)),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+      FAKE_GH_CALLS_FILE: callsFile,
+    }
+  );
+
+  const moved = result.reviews[movedPrUrl];
+  const closed = result.reviews[closedPrUrl];
+  assert.equal(moved.pending_reviewer_comment_delivery, undefined);
+  assert.equal(
+    moved.reviewer_comment_cancellations[0].reason,
+    "head_changed"
+  );
+  assert.equal(
+    moved.reviewer_comment_cancellations[0].observed_head_sha,
+    "new-head"
+  );
+  assert.equal(closed.pending_reviewer_comment_delivery, undefined);
+  assert.equal(
+    closed.reviewer_comment_cancellations[0].reason,
+    "pr_not_open"
+  );
+  assert.equal(
+    closed.reviewer_comment_cancellations[0].observed_pr_state,
+    "closed"
+  );
+  assert.equal(
+    result.ghState.prs["farshidz/marqo-cortex-city#42"].issueComments.length,
+    0
+  );
+  assert.equal(
+    result.ghState.prs["farshidz/marqo-cortex-city#43"].issueComments.length,
+    0
+  );
+  assert.equal(
+    result.calls.some(
+      (args: string[]) =>
+        args[0] === "api" &&
+        args[1] === "--method" &&
+        ["POST", "PATCH", "DELETE"].includes(args[2])
+    ),
+    false
+  );
 });
 
 test("pollOnce rebuilds a crashed human-decision review without duplicating its comment", () => {

@@ -104,7 +104,11 @@ function writeTextFileAtomic(filePath: string, contents: string): void {
   }
 }
 
-function writeJsonFileAtomic(filePath: string, value: unknown, label: string): void {
+export function writeJsonFileAtomic(
+  filePath: string,
+  value: unknown,
+  label: string
+): void {
   ensureCortexDir();
   const contents = `${JSON.stringify(value, null, 2)}\n`;
   JSON.parse(contents);
@@ -121,33 +125,46 @@ function writeJsonFileAtomic(filePath: string, value: unknown, label: string): v
   }
 }
 
-function readJsonFileWithBackup<T>(filePath: string, label: string): T {
-  const raw = readFileSync(filePath, "utf-8");
-  try {
-    return JSON.parse(raw) as T;
-  } catch (error) {
-    const backupPath = backupPathFor(filePath);
-    if (!existsSync(backupPath)) throw error;
-
-    const backupRaw = readFileSync(backupPath, "utf-8");
-    const parsed = JSON.parse(backupRaw) as T;
-    console.error(
-      `[store] Failed to parse ${label}; using last-good backup at ${backupPath}:`,
-      error instanceof Error ? error.message : error
-    );
-
-    try {
-      assertSufficientDiskSpace(`restoring ${label} from backup`, CORTEX_DIR);
-      writeTextFileAtomic(filePath, backupRaw);
-    } catch (restoreError) {
-      console.error(
-        `[store] Failed to restore ${label} from last-good backup:`,
-        restoreError instanceof Error ? restoreError.message : restoreError
-      );
+export function readJsonFileWithBackup<T>(
+  filePath: string,
+  label: string,
+  validate?: (value: unknown) => value is T
+): T {
+  const parse = (raw: string): T => {
+    const parsed = JSON.parse(raw) as unknown;
+    if (validate && !validate(parsed)) {
+      throw new Error(`${label} has an invalid top-level structure.`);
     }
-
-    return parsed;
+    return parsed as T;
+  };
+  let primaryError: unknown;
+  try {
+    return parse(readFileSync(filePath, "utf-8"));
+  } catch (error) {
+    primaryError = error;
   }
+
+  const backupPath = backupPathFor(filePath);
+  if (!existsSync(backupPath)) throw primaryError;
+
+  const backupRaw = readFileSync(backupPath, "utf-8");
+  const parsed = parse(backupRaw);
+  console.error(
+    `[store] Failed to read ${label}; using last-good backup at ${backupPath}:`,
+    primaryError instanceof Error ? primaryError.message : primaryError
+  );
+
+  try {
+    assertSufficientDiskSpace(`restoring ${label} from backup`, CORTEX_DIR);
+    writeTextFileAtomic(filePath, backupRaw);
+  } catch (restoreError) {
+    console.error(
+      `[store] Failed to restore ${label} from last-good backup:`,
+      restoreError instanceof Error ? restoreError.message : restoreError
+    );
+  }
+
+  return parsed;
 }
 
 // Simple promise-chain mutex for serializing writes

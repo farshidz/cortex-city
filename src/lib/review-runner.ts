@@ -25,8 +25,12 @@ import {
   deliverReviewerComment,
   getAuthenticatedUserLogin,
   getMyReviewSignals,
+  isStaleReviewerCommentDeliveryError,
+  reviewerCommentCancellationFromStaleError,
+  type StaleReviewerCommentDeliveryError,
 } from "./github";
 import {
+  appendReviewerCommentCancellation,
   buildReviewerCommentBody,
   REVIEWER_GITHUB_COMMENT_PREFIX,
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
@@ -484,6 +488,11 @@ export function buildReviewWrapperPrompt(
     [
       `- Start every GitHub comment you post with \`${REVIEWER_GITHUB_COMMENT_PREFIX}\``,
       "as the first characters of the comment body.",
+    ].join(" "),
+    [
+      "- Treat every GitHub comment authored by the reviewer as immutable",
+      "timeline history. Never edit or delete an earlier reviewer comment;",
+      "post a new follow-up comment instead.",
     ].join(" "),
     [
       "- The source-aware GitHub action rules below are authoritative and",
@@ -1318,7 +1327,7 @@ export async function spawnReviewSummary(
 
         const deliverPending = async (
           delivery: ReviewerCommentDelivery
-        ): Promise<void> => {
+        ): Promise<StaleReviewerCommentDeliveryError | undefined> => {
           const savedReceipt = beforeReviewAction?.reviewer_comment_receipts?.find(
             (receipt) => receipt.action_token === delivery.action_token
           );
@@ -1326,13 +1335,62 @@ export async function spawnReviewSummary(
             savedReceipt?.body_sha256 ===
             reviewerCommentBodySha256(delivery.body)
           ) {
-            return;
+            return undefined;
           }
-          const receipt = await deliverReviewerComment(
-            target.pr_url,
-            delivery
-          );
-          await saveVerifiedReceipt(delivery, receipt);
+          try {
+            const receipt = await deliverReviewerComment(
+              target.pr_url,
+              delivery
+            );
+            await saveVerifiedReceipt(delivery, receipt);
+            return undefined;
+          } catch (error) {
+            if (!isStaleReviewerCommentDeliveryError(error)) throw error;
+            const cancellation = reviewerCommentCancellationFromStaleError(
+              delivery,
+              error
+            );
+            const cancellationSaved = await mutateReviewSummary(
+              target.pr_url,
+              (current) => {
+                if (
+                  current?.current_run_id !== runLock.data.token ||
+                  !current.pending_reviewer_comment_delivery ||
+                  !sameReviewerCommentDelivery(
+                    current.pending_reviewer_comment_delivery,
+                    delivery
+                  )
+                ) {
+                  return undefined;
+                }
+                return {
+                  ...current,
+                  reviewer_comment_cancellations:
+                    appendReviewerCommentCancellation(
+                      current.reviewer_comment_cancellations,
+                      cancellation
+                    ),
+                  pending_reviewer_comment_delivery: undefined,
+                  agent_review_status: undefined,
+                };
+              }
+            );
+            if (
+              !cancellationSaved?.reviewer_comment_cancellations?.some(
+                (candidate) =>
+                  candidate.action_token === cancellation.action_token &&
+                  candidate.body_sha256 === cancellation.body_sha256
+              ) ||
+              cancellationSaved.pending_reviewer_comment_delivery
+                ?.action_token === delivery.action_token
+            ) {
+              throw new Error(
+                `Review comment cancellation ownership was lost before saving ${target.pr_url}`
+              );
+            }
+            beforeReviewAction = cancellationSaved;
+            return error;
+          }
         };
 
         // Finish any older durable action before replacing it. A crash after
@@ -1340,17 +1398,28 @@ export async function spawnReviewSummary(
         // match; no prior timeline event is ever patched or deleted.
         const priorPending =
           beforeReviewAction.pending_reviewer_comment_delivery;
+        let reusablePriorPending = priorPending;
         if (priorPending) {
-          await deliverPending(priorPending);
+          const stalePrior = await deliverPending(priorPending);
+          if (stalePrior) {
+            reusablePriorPending = undefined;
+            const stalePriorSupersededByCurrentTarget =
+              stalePrior.reason === "head_changed" &&
+              stalePrior.observedPRState === "open" &&
+              stalePrior.observedHeadSha === target.head_sha;
+            if (!stalePriorSupersededByCurrentTarget) {
+              throw stalePrior;
+            }
+          }
         }
 
         if (shouldCreateHumanDecisionComment && !reviewerHumanDecisionBody) {
           reviewActionError =
             "The reviewer returned needs_human_decision without a Human Decision section.";
         } else if (shouldCreateReviewerOwnedComment) {
-          const reusablePending = priorPending
+          const reusablePending = reusablePriorPending
             ? {
-                ...priorPending,
+                ...reusablePriorPending,
                 kind: shouldCreateSelfApprovalComment
                   ? ("manual_approval" as const)
                   : ("human_decision" as const),
@@ -1358,15 +1427,18 @@ export async function spawnReviewSummary(
                 body: buildReviewerCommentBody(
                   reviewerOwnedCommentPrefix,
                   reviewerOwnedCommentBody || "",
-                  priorPending.action_token
+                  reusablePriorPending.action_token
                 ),
               }
             : undefined;
           let delivery =
-            priorPending &&
+            reusablePriorPending &&
             reusablePending &&
-            sameReviewerCommentDelivery(priorPending, reusablePending)
-              ? priorPending
+            sameReviewerCommentDelivery(
+              reusablePriorPending,
+              reusablePending
+            )
+              ? reusablePriorPending
               : undefined;
           if (!delivery) {
             const actionToken = randomUUID();
@@ -1406,11 +1478,13 @@ export async function spawnReviewSummary(
               );
             }
             beforeReviewAction = pendingSaved;
-            await deliverPending(delivery);
+            const staleDelivery = await deliverPending(delivery);
+            if (staleDelivery) throw staleDelivery;
           }
         }
       } catch (error) {
-        preservePendingDelivery = true;
+        preservePendingDelivery =
+          !isStaleReviewerCommentDeliveryError(error);
         reviewActionError =
           error instanceof Error
             ? error.message
@@ -1482,6 +1556,8 @@ export async function spawnReviewSummary(
           : latestBeforeSave.agent_review_status,
         reviewer_comment_receipts:
           latestBeforeSave.reviewer_comment_receipts,
+        reviewer_comment_cancellations:
+          latestBeforeSave.reviewer_comment_cancellations,
         pending_reviewer_comment_delivery: preservePendingDelivery
           ? latestBeforeSave.pending_reviewer_comment_delivery
           : undefined,

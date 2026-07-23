@@ -2,10 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  createTempWorkspace as createHarnessWorkspace,
+  prependBinToPath,
+  readJson,
+  writeFakeGhBinary,
+  writeJson,
+} from "./test-harness";
 
 const REPO_ROOT = process.cwd();
 const TSX_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "tsx");
@@ -137,6 +150,10 @@ function reviewCommentsKey(): string {
 
 function issueCommentsKey(): string {
   return "api --paginate --slurp repos/acme/widget/issues/123/comments";
+}
+
+function prDeliveryTargetKey(): string {
+  return "api repos/acme/widget/pulls/123";
 }
 
 function checksKey(prUrl: string): string {
@@ -509,6 +526,13 @@ test("deliverReviewerComment recovers only an exact authenticated event and veri
           [{ id: 300, body, user: { login: "participant" } }],
         ]),
       },
+      [prDeliveryTargetKey()]: {
+        stdout: JSON.stringify({
+          state: "open",
+          merged: false,
+          head: { sha: "abc123" },
+        }),
+      },
       [`api --method POST repos/acme/widget/issues/123/comments --raw-field body=${body} --jq .id`]: {
         stdout: "301",
       },
@@ -526,6 +550,82 @@ test("deliverReviewerComment recovers only an exact authenticated event and veri
   );
   assert.equal(posted.comment_id, 301);
   assert.equal(posted.author_login, "me");
+});
+
+test("deliverReviewerComment serializes concurrent recovery and POST attempts", () => {
+  const workspace = createHarnessWorkspace("github-delivery-lock-");
+  writeFakeGhBinary(workspace);
+  const stateFile = path.join(workspace, "gh-state.json");
+  const callsFile = path.join(workspace, "gh-calls.jsonl");
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const token = "11111111-1111-4111-8111-111111111111";
+  const body =
+    `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n` +
+    `<!-- cortex-city-review-decision:${token} -->`;
+  const delivery = {
+    action_token: token,
+    kind: "human_decision",
+    head_sha: "abc123",
+    body,
+  };
+  writeJson(stateFile, {
+    viewerLogin: "me",
+    prs: {
+      "acme/widget#123": {
+        state: "open",
+        merged: false,
+        headRefOid: "abc123",
+        issueComments: [],
+        nextIssueCommentId: 700,
+      },
+    },
+  });
+
+  const output = execFileSync(
+    TSX_BIN,
+    [
+      "--eval",
+      [
+        `import { deliverReviewerComment } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        "(async () => {",
+        `  const delivery = ${JSON.stringify(delivery)};`,
+        `  const receipts = await Promise.all([`,
+        `    deliverReviewerComment(${JSON.stringify(prUrl)}, delivery),`,
+        `    deliverReviewerComment(${JSON.stringify(prUrl)}, delivery),`,
+        "  ]);",
+        "  console.log(JSON.stringify(receipts));",
+        "})().catch((error) => { console.error(error); process.exit(1); });",
+      ].join("\n"),
+    ],
+    {
+      cwd: workspace,
+      encoding: "utf-8",
+      env: {
+        ...prependBinToPath(workspace),
+        FAKE_GH_STATE_FILE: stateFile,
+        FAKE_GH_CALLS_FILE: callsFile,
+        FAKE_GH_ISSUE_COMMENT_LIST_DELAY_MS: "150",
+      },
+    }
+  );
+  const receipts = JSON.parse(output.trim().split(/\r?\n/).pop()!);
+  const state = readJson<{
+    prs: Record<string, { issueComments: Array<{ id: number }> }>;
+  }>(stateFile);
+  const calls = readFileSync(callsFile, "utf-8")
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line) as string[]);
+  const posts = calls.filter(
+    (args) => args[0] === "api" && args[1] === "--method" && args[2] === "POST"
+  );
+
+  assert.deepEqual(
+    receipts.map((receipt: { comment_id: number }) => receipt.comment_id),
+    [700, 700]
+  );
+  assert.equal(state.prs["acme/widget#123"].issueComments.length, 1);
+  assert.equal(posts.length, 1);
 });
 
 test("getPRStateHash ignores empty approvals but keeps their inline comments", () => {
