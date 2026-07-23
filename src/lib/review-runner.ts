@@ -21,6 +21,11 @@ import {
   releaseReviewWorkspace,
   releaseReviewWorkspaceBeforeStart,
 } from "./review-workspace";
+import {
+  REVIEWER_GITHUB_COMMENT_PREFIX,
+  REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
+  REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
+} from "./review-comments";
 import { readReviewLearnings } from "./review-learnings-store";
 import {
   getReviewSummary,
@@ -43,6 +48,8 @@ import type {
   ReviewSummary,
   TaskEffort,
 } from "./types";
+
+export { REVIEWER_GITHUB_COMMENT_PREFIX } from "./review-comments";
 
 interface ReviewRunLockData {
   token: string;
@@ -145,15 +152,17 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
   "blocked",
 ];
 
-export const REVIEWER_GITHUB_COMMENT_PREFIX = "**🤖[Cortex City Reviewer]**";
 const REVIEW_GITHUB_TOOL_INSTRUCTION =
   "Use the `gh` CLI for GitHub inspection and comments. The working directory persists for this PR, so reuse any existing checkout or artifacts.";
+
+const REVIEWER_SELF_APPROVAL_COMMENT_BODY =
+  "Cortex City found no blocking issues and would approve this PR, but GitHub does not allow the PR author to approve their own pull request. Please ask an eligible non-author reviewer to approve it, or make the appropriate manual merge or coordination decision if repository policy permits.";
 
 export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request with Cortex City's unified review agent.
 
 Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused review as **GitHub-flavored Markdown**. Keep the existing review standard: surface the findings you would normally surface, but leave GitHub comments yourself when a finding requires the PR author to make a change. If you are unsure whether something should be posted as a PR comment, keep it in the generated review instead.
 
-Do not approve or request changes on GitHub.`;
+Follow the source-aware GitHub action rules in the Cortex City review protocol appended below.`;
 export const DEFAULT_REVIEW_PROMPT = DEFAULT_REVIEW_SUMMARY_PROMPT;
 
 export interface SpawnOpts {
@@ -418,6 +427,9 @@ export function buildReviewWrapperPrompt(
 ): string {
   const target = effectiveReviewRequest(request, cached);
   const source = reviewSourceOf(target);
+  const hasCurrentChangeRequest =
+    source === "inbound" &&
+    target.my_changes_requested_sha === target.head_sha;
   const base = resolveReviewPrompt(config);
   const reviewedHeadSha = summaryHeadShaFor(cached);
   const followup = isFollowupReview(target, cached);
@@ -465,10 +477,67 @@ export function buildReviewWrapperPrompt(
       "as the first characters of the comment body.",
     ].join(" "),
     [
-      "- Put uncertain or advisory points in the generated review instead of",
-      "posting them to GitHub.",
+      "- The source-aware GitHub action rules below are authoritative and",
+      "override any conflicting GitHub-action instruction earlier in the prompt.",
     ].join(" "),
-    "- Do not approve, request changes, or submit a GitHub PR review decision.",
+    source === "inbound" && !target.self_authored && !hasCurrentChangeRequest
+      ? [
+          "- If and only if your final status is `ready_for_human_approval`,",
+          "approve the reviewed commit on GitHub before finishing. Use the commit-bound",
+          "reviews API with the explicit repository, PR number, and reviewed SHA:",
+          "`gh api --method POST repos/<owner>/<repo>/pulls/<number>/reviews",
+          "--raw-field event=APPROVE --raw-field commit_id=<reviewed SHA>`.",
+          "Never use `gh pr review --approve`, which can approve a newer, unreviewed HEAD.",
+          "Immediately before the API call, inspect the signed-in user's latest",
+          "submitted decisive review for the reviewed SHA. If it is",
+          "`CHANGES_REQUESTED`, do not approve or overwrite it; switch to",
+          "`needs_human_decision` and explain the existing human decision.",
+        ].join(" ")
+      : hasCurrentChangeRequest
+        ? [
+            "- Do not approve this PR on GitHub. The signed-in user already has a",
+            "current `CHANGES_REQUESTED` decision on the reviewed SHA. Do not",
+            "overwrite that decision; if your code assessment would otherwise be",
+            "clean, use `needs_human_decision` and ask the human to reconcile it.",
+          ].join(" ")
+      : [
+          "- Do not approve this PR on GitHub. It is owned by the signed-in user,",
+          "and GitHub does not allow an author to approve their own PR.",
+          "If and only if your final status is `ready_for_human_approval`, post a new",
+          "top-level PR conversation comment with `gh pr comment <PR URL> --body ...`.",
+          "Do not use the review-comment surface for this handoff. Start it with",
+          `\`${REVIEWER_SELF_APPROVAL_COMMENT_PREFIX}\` and then use this exact text:`,
+          `\`${REVIEWER_SELF_APPROVAL_COMMENT_BODY}\``,
+        ].join(" "),
+    [
+      "- If your final status is `needs_human_decision`, post one GitHub PR",
+      "comment that clearly presents the uncertain or advisory points and the",
+      "decision the human needs to make. Do this for every review source, including",
+      "task-owned and other self-authored PRs. Use the explicit PR URL because",
+      "the review workspace is not necessarily a checkout of the target repository.",
+      "Use `gh pr comment <PR URL> --body ...`; do not use the review-comment surface.",
+      `Start this specific comment with \`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\``,
+      "so Cortex City can distinguish it from implementation feedback.",
+    ].join(" "),
+    [
+      "- Include uncertain or advisory points in the generated review as well as",
+      "in the required `needs_human_decision` GitHub comment.",
+    ].join(" "),
+    [
+      "- Do not submit a change-request review decision. Do not approve for any",
+      "status other than `ready_for_human_approval`, and do not post the human-decision",
+      "comment for any status other than `needs_human_decision`.",
+    ].join(" "),
+    [
+      "- Treat every reviewer comment as an immutable timeline event. Never edit or",
+      "delete an earlier reviewer comment because a later commit or review reaches a",
+      "different result; post a new comment only when the current run requires one.",
+    ].join(" "),
+    [
+      "- Complete the required GitHub action before emitting your final response.",
+      "If the action fails and you cannot verify that it succeeded, use `blocked`",
+      "and explain the failure in the generated review.",
+    ].join(" "),
   ];
 
   if (followup) {

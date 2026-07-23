@@ -43,6 +43,13 @@ export async function POST(request: NextRequest) {
   try {
     result = await summarizePR(
       {
+        source: cached.source,
+        task_id: cached.task_id,
+        task_title: cached.task_title,
+        task_description: cached.task_description,
+        task_plan: cached.task_plan,
+        label_only: cached.label_only,
+        self_authored: cached.self_authored,
         pr_url: cached.pr_url,
         pr_number: cached.pr_number,
         repo_slug: cached.repo_slug,

@@ -250,7 +250,20 @@ test("submitted comment tracking ignores pending inline review comments", () => 
       ]),
     },
     [issueCommentsKey()]: {
-      stdout: JSON.stringify([[{ id: 200 }]]),
+      stdout: JSON.stringify([
+        [
+          { id: 200, body: "Implementation feedback" },
+          {
+            id: 201,
+            body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.",
+          },
+          { id: 202, body: "Choose A." },
+          {
+            id: 203,
+            body: "**🤖[Cortex City Reviewer]** **Ready for manual approval:** Ask an eligible reviewer.",
+          },
+        ],
+      ]),
     },
   };
 
@@ -263,7 +276,7 @@ test("submitted comment tracking ignores pending inline review comments", () => 
     `
   );
 
-  assert.deepEqual(ids, [100, 200]);
+  assert.deepEqual(ids, [100, 200, 202]);
 });
 
 test("getPRStateHash ignores pending inline review comments", () => {
@@ -313,6 +326,57 @@ test("getPRStateHash ignores pending inline review comments", () => {
     .digest("hex")
     .slice(0, 16);
   assert.equal(hash, expected);
+});
+
+test("getPRStateHash ignores reviewer decision prompts but keeps later human replies", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const responses = (issueComments: Array<{ id: number; body: string }>) => ({
+    [prViewKey(prUrl)]: {
+      stdout: JSON.stringify({
+        headRefOid: "abc123",
+        statusCheckRollup: [],
+      }),
+    },
+    [reviewsKey()]: { stdout: JSON.stringify([[]]) },
+    [reviewCommentsKey()]: { stdout: JSON.stringify([[]]) },
+    [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
+    [checksKey(prUrl)]: { stdout: "" },
+  });
+  const hashFor = (issueComments: Array<{ id: number; body: string }>) =>
+    runGithubScript(
+      workspace,
+      responses(issueComments),
+      `
+        const hash = await getPRStateHash(${JSON.stringify(prUrl)});
+        console.log(JSON.stringify(hash));
+      `
+    );
+
+  const baseline = hashFor([]);
+  const reviewerPrompt = {
+    id: 200,
+    body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.",
+  };
+  assert.equal(hashFor([reviewerPrompt]), baseline);
+  const selfApprovalHandoff = {
+    id: 202,
+    body: "**🤖[Cortex City Reviewer]** **Ready for manual approval:** Ask an eligible reviewer.",
+  };
+  assert.equal(hashFor([selfApprovalHandoff]), baseline);
+
+  const withHumanReply = hashFor([
+    reviewerPrompt,
+    { id: 201, body: "Choose A." },
+  ]);
+  assert.notEqual(withHumanReply, baseline);
+  assert.equal(
+    withHumanReply,
+    createHash("sha256")
+      .update("abc123|[]|[201]|[]|")
+      .digest("hex")
+      .slice(0, 16)
+  );
 });
 
 test("getPRStateHash ignores empty approvals but keeps their inline comments", () => {

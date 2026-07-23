@@ -251,18 +251,54 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
     taskPrompt,
     /Start every GitHub comment you post with `\*\*🤖\[Cortex City Reviewer\]\*\*`/
   );
+  assert.match(
+    taskPrompt,
+    /\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Human decision needed:\*\*/
+  );
   assert.match(taskPrompt, /Task ID: task-42/);
   assert.match(taskPrompt, /Improve keyboard navigation/);
   assert.match(taskPrompt, /Make every dialog keyboard accessible/);
   assert.match(taskPrompt, /Add focus trapping/);
   assert.match(taskPrompt, /Check the task's accessibility requirements/);
   assert.match(taskPrompt, /never authorizes self-approval/i);
+  assert.match(taskPrompt, /Do not approve this PR on GitHub/i);
+  assert.match(
+    taskPrompt,
+    /GitHub does not allow an author to approve their own PR/i
+  );
+  assert.match(taskPrompt, /final status is `needs_human_decision`/i);
+  assert.match(taskPrompt, /including task-owned and other self-authored PRs/i);
+  assert.match(
+    taskPrompt,
+    /final status is `ready_for_human_approval`.*post a new top-level PR conversation comment/is
+  );
+  assert.match(
+    taskPrompt,
+    /\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Ready for manual approval:\*\*/
+  );
+  assert.match(taskPrompt, /eligible non-author reviewer/i);
+  assert.match(taskPrompt, /gh pr comment <PR URL> --body/);
+  assert.match(taskPrompt, /do not use the review-comment surface/i);
+  assert.match(taskPrompt, /immutable timeline event/i);
+  assert.match(taskPrompt, /Never edit or delete an earlier reviewer comment/i);
 
   const inboundPrompt = buildReviewWrapperPrompt(config, sampleRequest());
   assert.match(inboundPrompt, /Review source: inbound pull request/);
   assert.match(inboundPrompt, /someone else's PR/);
   assert.doesNotMatch(inboundPrompt, /accessibility requirements/);
   assert.doesNotMatch(inboundPrompt, /Cortex task context/);
+  assert.match(
+    inboundPrompt,
+    /final status is `ready_for_human_approval`.*approve the reviewed commit on GitHub/is
+  );
+  assert.match(inboundPrompt, /--raw-field commit_id=<reviewed SHA>/);
+  assert.match(inboundPrompt, /Never use `gh pr review --approve`/);
+  assert.match(inboundPrompt, /Immediately before the API call/i);
+  assert.match(inboundPrompt, /latest submitted decisive review/i);
+  assert.match(inboundPrompt, /do not approve or overwrite it/i);
+  assert.match(inboundPrompt, /final status is `needs_human_decision`/i);
+  assert.match(inboundPrompt, /post one GitHub PR comment/i);
+  assert.match(inboundPrompt, /Do not submit a change-request review decision/i);
 
   const selfAuthoredPrompt = buildReviewWrapperPrompt(
     config,
@@ -277,7 +313,27 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
     selfAuthoredPrompt,
     /never approve it or request changes on GitHub/i
   );
+  assert.match(selfAuthoredPrompt, /Do not approve this PR on GitHub/i);
+  assert.match(selfAuthoredPrompt, /Ready for manual approval/i);
+  assert.match(selfAuthoredPrompt, /eligible non-author reviewer/i);
+  assert.match(selfAuthoredPrompt, /final status is `needs_human_decision`/i);
+  assert.doesNotMatch(
+    selfAuthoredPrompt,
+    /--raw-field commit_id=<reviewed SHA>/
+  );
   assert.doesNotMatch(selfAuthoredPrompt, /someone else's PR/);
+
+  const changeRequestedPrompt = buildReviewWrapperPrompt(
+    config,
+    sampleRequest({ my_changes_requested_sha: "abc123" })
+  );
+  assert.match(changeRequestedPrompt, /already has a current `CHANGES_REQUESTED`/);
+  assert.match(changeRequestedPrompt, /Do not overwrite that decision/i);
+  assert.match(changeRequestedPrompt, /use `needs_human_decision`/i);
+  assert.doesNotMatch(
+    changeRequestedPrompt,
+    /--raw-field commit_id=<reviewed SHA>/
+  );
 });
 
 test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and the revision diff", () => {

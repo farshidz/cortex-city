@@ -1897,6 +1897,12 @@ test("review summarize route validates cached review state", () => {
 test("review summarize route launches Codex summaries with overrides", () => {
   runRouteAssertions(
     withReviewState(`
+      const reviewsPath = path.join(cortexDir, "reviews.json");
+      const seeded = readJson(reviewsPath);
+      seeded[prUrl].label_only = true;
+      seeded[prUrl].self_authored = true;
+      writeJson(reviewsPath, seeded);
+
       const summarizeRoute = await loadRoute("./src/app/api/reviews/summarize/route.ts");
       const summarized = await json(
         await summarizeRoute.POST(
@@ -1919,6 +1925,8 @@ test("review summarize route launches Codex summaries with overrides", () => {
       assert.equal(summarized.body.model, "gpt-test");
       assert.equal(summarized.body.session_id, "review-session");
       assert.equal(summarized.body.my_last_review_sha, "abc123");
+      assert.equal(summarized.body.label_only, true);
+      assert.equal(summarized.body.self_authored, true);
     `)
   );
 });
