@@ -122,7 +122,45 @@ test("readReviewSummaries returns an empty array when no file exists", () => {
 
 test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   const workspace = createTempWorkspace();
-  const entry = sampleReviewLiteral("https://github.com/acme/widget/pull/1");
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const pendingBody =
+    "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n" +
+    `<!-- cortex-city-review-decision:${pendingToken} -->`;
+  const entry = {
+    ...sampleReviewLiteral("https://github.com/acme/widget/pull/1"),
+    reviewer_comment_receipts: [
+      {
+        action_token: "22222222-2222-4222-8222-222222222222",
+        comment_id: 400,
+        author_login: "me",
+        body_sha256: "a".repeat(64),
+      },
+      {
+        action_token: "22222222-2222-4222-8222-222222222222",
+        comment_id: 401,
+        author_login: "me",
+        body_sha256: "b".repeat(64),
+      },
+      {
+        action_token: "33333333-3333-4333-8333-333333333333",
+        comment_id: 402,
+        author_login: "me",
+        body_sha256: "c".repeat(64),
+      },
+      {
+        action_token: "invalid",
+        comment_id: -1,
+        author_login: "",
+        body_sha256: "bad",
+      },
+    ],
+    pending_reviewer_comment_delivery: {
+      action_token: pendingToken,
+      kind: "human_decision",
+      head_sha: "abc123",
+      body: pendingBody,
+    },
+  };
   const result = runStoreScript(
     workspace,
     `
@@ -140,6 +178,16 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   assert.equal(result.saved.source, "inbound");
   assert.equal(result.saved.review_status, "pending_summary");
   assert.equal(result.saved.review_state, "queued");
+  assert.deepEqual(
+    result.saved.reviewer_comment_receipts.map(
+      (receipt: { comment_id: number }) => receipt.comment_id
+    ),
+    [400, 402]
+  );
+  assert.deepEqual(
+    result.saved.pending_reviewer_comment_delivery,
+    entry.pending_reviewer_comment_delivery
+  );
   assert.deepEqual(result.all, [result.saved]);
   assert.deepEqual(result.fetched, result.saved);
 

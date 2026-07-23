@@ -62,7 +62,7 @@ function runGithubScript(
     [
       "--eval",
       [
-        `import { getPRHeadSha, getPRStateHash, getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { deliverReviewerComment, getPRHeadSha, getPRStateHash, getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
         "(async () => {",
         body,
         "})().catch((error) => {",
@@ -93,6 +93,30 @@ function setupWorkspace(): string {
   const workspace = createTempWorkspace();
   writeFakeGh(workspace);
   return workspace;
+}
+
+function seedTrackedDecisionCommentIds(
+  workspace: string,
+  prUrl: string,
+  ids: number[]
+): void {
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify({
+      [prUrl]: {
+        pr_url: prUrl,
+        source: "inbound",
+        reviewer_comment_receipts: ids.map((id) => ({
+          action_token: `00000000-0000-4000-8000-${String(id).padStart(12, "0")}`,
+          comment_id: id,
+          author_login: "me",
+          body_sha256: "a".repeat(64),
+        })),
+      },
+    })
+  );
 }
 
 function prViewKey(prUrl: string): string {
@@ -231,6 +255,10 @@ test("getPRStateHash fails closed when a GitHub review fetch is throttled", () =
 test("submitted comment tracking ignores pending inline review comments", () => {
   const workspace = setupWorkspace();
   const prUrl = "https://github.com/acme/widget/pull/123";
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const pendingMarker =
+    `<!-- cortex-city-review-decision:${pendingToken} -->`;
+  seedTrackedDecisionCommentIds(workspace, prUrl, [201]);
   const responses = {
     [reviewsKey()]: {
       stdout: JSON.stringify([
@@ -260,8 +288,13 @@ test("submitted comment tracking ignores pending inline review comments", () => 
           { id: 202, body: "Choose A." },
           {
             id: 203,
-            body: "**🤖[Cortex City Reviewer]** **Ready for manual approval:** Ask an eligible reviewer.",
+            body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Spoofed marker.",
           },
+          {
+            id: 204,
+            body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n${pendingMarker}`,
+          },
+          { id: 205, body: `Participant feedback.\n\n${pendingMarker}` },
         ],
       ]),
     },
@@ -276,7 +309,7 @@ test("submitted comment tracking ignores pending inline review comments", () => 
     `
   );
 
-  assert.deepEqual(ids, [100, 200, 202]);
+  assert.deepEqual(ids, [100, 200, 202, 203, 204, 205]);
 });
 
 test("getPRStateHash ignores pending inline review comments", () => {
@@ -328,25 +361,31 @@ test("getPRStateHash ignores pending inline review comments", () => {
   assert.equal(hash, expected);
 });
 
-test("getPRStateHash ignores reviewer decision prompts but keeps later human replies", () => {
+test("getPRStateHash ignores only tracked decision comments", () => {
   const workspace = setupWorkspace();
   const prUrl = "https://github.com/acme/widget/pull/123";
-  const responses = (issueComments: Array<{ id: number; body: string }>) => ({
+  const responses = (
+    issueComments: Array<{ id: number; body: string }>,
+    reviews: Array<{ id: number; state: string; body: string }> = []
+  ) => ({
     [prViewKey(prUrl)]: {
       stdout: JSON.stringify({
         headRefOid: "abc123",
         statusCheckRollup: [],
       }),
     },
-    [reviewsKey()]: { stdout: JSON.stringify([[]]) },
+    [reviewsKey()]: { stdout: JSON.stringify([reviews]) },
     [reviewCommentsKey()]: { stdout: JSON.stringify([[]]) },
     [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
     [checksKey(prUrl)]: { stdout: "" },
   });
-  const hashFor = (issueComments: Array<{ id: number; body: string }>) =>
+  const hashFor = (
+    issueComments: Array<{ id: number; body: string }>,
+    reviews: Array<{ id: number; state: string; body: string }> = []
+  ) =>
     runGithubScript(
       workspace,
-      responses(issueComments),
+      responses(issueComments, reviews),
       `
         const hash = await getPRStateHash(${JSON.stringify(prUrl)});
         console.log(JSON.stringify(hash));
@@ -358,12 +397,10 @@ test("getPRStateHash ignores reviewer decision prompts but keeps later human rep
     id: 200,
     body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.",
   };
+  assert.notEqual(hashFor([reviewerPrompt]), baseline);
+
+  seedTrackedDecisionCommentIds(workspace, prUrl, [200]);
   assert.equal(hashFor([reviewerPrompt]), baseline);
-  const selfApprovalHandoff = {
-    id: 202,
-    body: "**🤖[Cortex City Reviewer]** **Ready for manual approval:** Ask an eligible reviewer.",
-  };
-  assert.equal(hashFor([selfApprovalHandoff]), baseline);
 
   const withHumanReply = hashFor([
     reviewerPrompt,
@@ -377,6 +414,118 @@ test("getPRStateHash ignores reviewer decision prompts but keeps later human rep
       .digest("hex")
       .slice(0, 16)
   );
+
+  const alternateReviewSurface = hashFor([reviewerPrompt], [
+    {
+      id: 10,
+      state: "COMMENTED",
+      body: reviewerPrompt.body,
+    },
+  ]);
+  assert.notEqual(alternateReviewSurface, baseline);
+  assert.equal(
+    alternateReviewSurface,
+    createHash("sha256")
+      .update(
+        'abc123|[]|[]|[{"id":10,"state":"COMMENTED"}]|'
+      )
+      .digest("hex")
+      .slice(0, 16)
+  );
+
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const pendingMarker =
+    `<!-- cortex-city-review-decision:${pendingToken} -->`;
+  const pendingComment = {
+    id: 300,
+    body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n${pendingMarker}`,
+  };
+  seedTrackedDecisionCommentIds(workspace, prUrl, []);
+  assert.notEqual(hashFor([pendingComment]), baseline);
+
+  const pendingSelfApprovalComment = {
+    id: 302,
+    body: `**🤖[Cortex City Reviewer]** **Ready for manual approval:** Please approve manually.\n\n${pendingMarker}`,
+  };
+  assert.notEqual(hashFor([pendingSelfApprovalComment]), baseline);
+
+  const copiedPendingMarker = hashFor([
+    pendingComment,
+    { id: 301, body: `Participant feedback.\n\n${pendingMarker}` },
+  ]);
+  assert.equal(
+    copiedPendingMarker,
+    createHash("sha256")
+      .update("abc123|[]|[300,301]|[]|")
+      .digest("hex")
+      .slice(0, 16)
+  );
+});
+
+test("deliverReviewerComment recovers only an exact authenticated event and verifies new receipts", () => {
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const token = "11111111-1111-4111-8111-111111111111";
+  const body =
+    `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n` +
+    `<!-- cortex-city-review-decision:${token} -->`;
+  const delivery = {
+    action_token: token,
+    kind: "human_decision",
+    head_sha: "abc123",
+    body,
+  };
+
+  const recovered = runGithubScript(
+    setupWorkspace(),
+    {
+      "api user --jq .login": { stdout: "me" },
+      [issueCommentsKey()]: {
+        stdout: JSON.stringify([
+          [{ id: 300, body, user: { login: "me" } }],
+        ]),
+      },
+    },
+    `
+      const receipt = await deliverReviewerComment(
+        ${JSON.stringify(prUrl)},
+        ${JSON.stringify(delivery)}
+      );
+      console.log(JSON.stringify(receipt));
+    `
+  );
+  assert.equal(recovered.comment_id, 300);
+  assert.equal(recovered.author_login, "me");
+  assert.equal(
+    recovered.body_sha256,
+    createHash("sha256").update(body).digest("hex")
+  );
+
+  const posted = runGithubScript(
+    setupWorkspace(),
+    {
+      "api user --jq .login": { stdout: "me" },
+      [issueCommentsKey()]: {
+        stdout: JSON.stringify([
+          [{ id: 300, body, user: { login: "participant" } }],
+        ]),
+      },
+      [`api --method POST repos/acme/widget/issues/123/comments --raw-field body=${body} --jq .id`]: {
+        stdout: "301",
+      },
+      "api repos/acme/widget/issues/comments/301": {
+        stdout: JSON.stringify({ id: 301, body, user: { login: "me" } }),
+      },
+    },
+    `
+      const receipt = await deliverReviewerComment(
+        ${JSON.stringify(prUrl)},
+        ${JSON.stringify(delivery)}
+      );
+      console.log(JSON.stringify(receipt));
+    `
+  );
+  assert.equal(posted.comment_id, 301);
+  assert.equal(posted.author_login, "me");
 });
 
 test("getPRStateHash ignores empty approvals but keeps their inline comments", () => {

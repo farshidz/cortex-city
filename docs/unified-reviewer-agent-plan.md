@@ -61,6 +61,14 @@ The unified reviewer owns review execution, summaries, verdicts, follow-ups, err
 - Keep reviewer-authored human-decision prompts distinct from implementation
   feedback. Posting that prompt must leave a task waiting for the human, while a
   later human PR response still wakes the implementation feedback loop.
+- Treat every reviewer-owned handoff as an immutable timeline event. Persist a
+  complete action and unguessable token before POST, verify the returned GitHub
+  author and exact body, and retain the receipt before completing the review.
+  Crash recovery may find or post that same action exactly once, but must never
+  patch or delete an earlier comment; a changed decision creates a new event.
+- Filter task wakeups and PR-state hashes only by verified receipt IDs. A public
+  prefix or copied hidden marker is never enough to classify participant text
+  as a reviewer event. Recover pending receipts before evaluating task wakeups.
 - Keep review scheduling independent of task execution capacity so reviews are not starved when implementation session slots are full.
 
 ### 3. Extend learning and lifecycle handling to task PRs
@@ -95,13 +103,15 @@ The unified reviewer owns review execution, summaries, verdicts, follow-ups, err
 - Ensure any task-owned review activity shown in existing task/session views uses labels appropriate for a PR author rather than actions such as approving their own PR.
 - For assigned PRs, automatically approve the exact reviewed SHA when the
   reviewer returns a clean verdict, unless the signed-in user already has a
-  current change request. When judgment is needed, post a new signed PR comment
-  and keep the manual approval/request-changes actions available as fallbacks.
-- Never auto-approve self-authored or task-owned PRs. Post a new clean-review
-  handoff that requests an eligible non-author reviewer or another permitted
-  manual coordination step.
-- Treat reviewer comments as immutable timeline events; later reviews post new
-  comments when needed and never update or delete earlier reviewer comments.
+  current change request. When judgment is needed, post a signed PR comment and
+  keep the manual approval/request-changes actions available as fallbacks.
+- Verify the signed-in user's decisive approval at that exact SHA before saving
+  a clean automated result. GitHub timestamps are second-granular, so use the
+  numeric review ID as the deterministic tie-breaker for same-second decisions.
+- Never auto-approve self-authored or task-owned PRs. When one is otherwise
+  ready to approve, post a signed handoff comment explaining that the review is
+  clean and asking for an eligible non-author reviewer, or another manual merge
+  or coordination decision when repository policy permits.
 - Update product documentation to describe one reviewer, its two sources, its learning loop, and the global runtime/model/effort settings.
 
 ## Validation and Rollout

@@ -9,6 +9,11 @@ import {
 import { tmpdir } from "os";
 import path from "path";
 import * as lockfile from "proper-lockfile";
+import {
+  REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
+  REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
+  reviewerHumanDecisionCommentMarker,
+} from "./review-comments";
 import { withReviewState, withReviewStatus } from "./review-status";
 import type { ReviewState, ReviewStatus, ReviewSummary } from "./types";
 import { snapshotCortex } from "./cortex-git";
@@ -88,6 +93,50 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
     ...review,
     source: review.source === "task" ? "task" : "inbound",
   };
+  const actionTokenPattern =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const seenReceiptTokens = new Set<string>();
+  const seenReceiptIds = new Set<number>();
+  const receipts = Array.isArray(normalized.reviewer_comment_receipts)
+    ? normalized.reviewer_comment_receipts.filter((receipt) => {
+        const valid = Boolean(
+          receipt &&
+            actionTokenPattern.test(receipt.action_token) &&
+            Number.isSafeInteger(receipt.comment_id) &&
+            receipt.comment_id > 0 &&
+            receipt.author_login?.trim() &&
+            /^[0-9a-f]{64}$/i.test(receipt.body_sha256) &&
+            !seenReceiptTokens.has(receipt.action_token) &&
+            !seenReceiptIds.has(receipt.comment_id)
+        );
+        if (valid) {
+          seenReceiptTokens.add(receipt.action_token);
+          seenReceiptIds.add(receipt.comment_id);
+        }
+        return valid;
+      })
+    : [];
+  normalized.reviewer_comment_receipts =
+    receipts.length > 0 ? receipts : undefined;
+
+  const delivery = normalized.pending_reviewer_comment_delivery;
+  const deliveryPrefix =
+    delivery?.kind === "human_decision"
+      ? REVIEWER_HUMAN_DECISION_COMMENT_PREFIX
+      : delivery?.kind === "manual_approval"
+        ? REVIEWER_SELF_APPROVAL_COMMENT_PREFIX
+        : undefined;
+  normalized.pending_reviewer_comment_delivery =
+    delivery &&
+    actionTokenPattern.test(delivery.action_token) &&
+    Boolean(delivery.head_sha?.trim()) &&
+    deliveryPrefix &&
+    delivery.body.startsWith(`${deliveryPrefix} `) &&
+    delivery.body.endsWith(
+      `\n\n${reviewerHumanDecisionCommentMarker(delivery.action_token)}`
+    )
+      ? delivery
+      : undefined;
   if (normalized.source === "task") {
     // Human approval/change-request signals belong to inbound reviews. They
     // must never make a task owner's own PR look approved or changes-requested.

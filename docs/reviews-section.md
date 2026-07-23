@@ -7,8 +7,10 @@
 > judgment posts a signed, machine-distinguishable PR comment; the manual review
 > actions remain available as fallbacks. Self-authored and task-owned PRs are
 > never auto-approved; clean results receive a handoff to an eligible reviewer
-> or another repository-permitted manual action. These reviewer comments are
-> immutable timeline events rather than mutable status records.
+> or another repository-permitted manual action.
+> Those handoffs are append-only: a durable action precedes the GitHub POST,
+> recovery verifies the authenticated author and exact immutable body, and only
+> verified receipt IDs are filtered from later task-feedback detection.
 
 ## Context
 
