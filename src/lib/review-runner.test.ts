@@ -74,6 +74,16 @@ function sampleRequest(
   };
 }
 
+function approvedReview(commitId: string) {
+  return {
+    id: 91,
+    state: "APPROVED",
+    commit_id: commitId,
+    submitted_at: "2026-05-01T00:20:00.000Z",
+    user: { login: "me" },
+  };
+}
+
 function setupRunnerWorkspace(
   prefix: string,
   configOverrides: Partial<OrchestratorConfig> = {}
@@ -721,6 +731,11 @@ test("summarizePR posts and persists an application-owned human-decision comment
     undefined
   );
   const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.equal(result.persisted.active_reviewer_owned_comment_id, 8123);
+  assert.match(
+    result.persisted.active_reviewer_owned_comment_token,
+    /^[0-9a-f-]{36}$/
+  );
   assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
   assert.match(
     ghState.prs["acme/widget#1"].issueComments[0].body,
@@ -730,6 +745,145 @@ test("summarizePR posts and persists an application-owned human-decision comment
     ghState.prs["acme/widget#1"].issueComments[0].body,
     /<!-- cortex-city-review-decision:[0-9a-f-]{36} -->$/
   );
+});
+
+test("summarizePR updates a retained decision comment instead of posting a duplicate", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-update-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const activeToken = "11111111-1111-4111-8111-111111111111";
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "new-head",
+        issueComments: [
+          {
+            id: 8122,
+            body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose the legacy path.\n\n<!-- cortex-city-review-decision:${activeToken} -->`,
+          },
+        ],
+        nextIssueCommentId: 9000,
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-decision-update-session",
+        result: [
+          "## Summary",
+          "The new head still needs a decision.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose the new implementation path.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ head_sha: "new-head" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        head_sha: "old-head",
+        summary: "The old head needs a decision.",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        reviewer_human_decision_comment_ids: [8122],
+        active_reviewer_owned_comment_token: ${JSON.stringify(activeToken)},
+        active_reviewer_owned_comment_id: 8122,
+      });
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.persisted.agent_review_status, "needs_human_decision");
+  assert.equal(result.persisted.active_reviewer_owned_comment_token, activeToken);
+  assert.equal(result.persisted.active_reviewer_owned_comment_id, 8122);
+  assert.equal(
+    result.persisted.pending_reviewer_human_decision_comment_token,
+    undefined
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.deepEqual(ghState.prs["acme/widget#1"].issueComments, [
+    {
+      id: 8122,
+      body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose the new implementation path.\n\n<!-- cortex-city-review-decision:${activeToken} -->`,
+    },
+  ]);
+});
+
+test("summarizePR rejects a clean inbound verdict when approval is missing", () => {
+  const workspace = setupRunnerWorkspace("review-runner-approval-missing-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    viewerLogin: "me",
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [],
+        reviews: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-missing-approval-session",
+        result: [
+          "## Summary",
+          "No blocking issues found.",
+          "## Agent Status",
+          "Agent status: `ready_for_human_approval`",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "inbound" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.match(result.persisted.error, /could not verify an approval/i);
+  assert.equal(result.persisted.agent_review_status, undefined);
+  assert.equal(result.persisted.summary_head_sha, undefined);
+  assert.equal(result.persisted.review_state, "generation_failed");
 });
 
 test("summarizePR posts a manual-approval handoff for a clean self-authored review", () => {
@@ -796,6 +950,11 @@ test("summarizePR posts a manual-approval handoff for a clean self-authored revi
   assert.equal(
     result.persisted.pending_reviewer_human_decision_comment_token,
     undefined
+  );
+  assert.equal(result.persisted.active_reviewer_owned_comment_id, 8124);
+  assert.match(
+    result.persisted.active_reviewer_owned_comment_token,
+    /^[0-9a-f-]{36}$/
   );
   assert.deepEqual(result.submittedIds, []);
   const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
@@ -881,6 +1040,11 @@ test("summarizePR reconciles a decision comment posted before a prior save crash
     result.persisted.pending_reviewer_human_decision_comment_token,
     undefined
   );
+  assert.equal(
+    result.persisted.active_reviewer_owned_comment_token,
+    pendingToken
+  );
+  assert.equal(result.persisted.active_reviewer_owned_comment_id, 8122);
   const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
   assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
   assert.equal(
@@ -889,7 +1053,7 @@ test("summarizePR reconciles a decision comment posted before a prior save crash
   );
 });
 
-test("summarizePR removes a recovered decision comment when the rebuilt review is clean", () => {
+test("summarizePR removes a retained decision comment when a later review is clean", () => {
   const workspace = setupRunnerWorkspace("review-runner-decision-remove-");
   const scenarioFile = path.join(workspace, "scenario.json");
   const ghStateFile = path.join(workspace, "gh-state.json");
@@ -897,12 +1061,14 @@ test("summarizePR removes a recovered decision comment when the rebuilt review i
   writeJson(ghStateFile, {
     prs: {
       "acme/widget#1": {
+        headRefOid: "abc123",
         issueComments: [
           {
             id: 8122,
             body: `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose the legacy path.\n\n<!-- cortex-city-review-decision:${pendingToken} -->`,
           },
         ],
+        reviews: [approvedReview("abc123")],
       },
     },
   });
@@ -933,7 +1099,9 @@ test("summarizePR removes a recovered decision comment when the rebuilt review i
         ...${JSON.stringify(request)},
         summary: "A previous run did not save its receipt.",
         generated_at: "2026-05-01T00:10:00.000Z",
-        pending_reviewer_human_decision_comment_token: ${JSON.stringify(pendingToken)},
+        reviewer_human_decision_comment_ids: [8122],
+        active_reviewer_owned_comment_token: ${JSON.stringify(pendingToken)},
+        active_reviewer_owned_comment_id: 8122,
       });
       const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
       console.log(JSON.stringify({
@@ -953,6 +1121,9 @@ test("summarizePR removes a recovered decision comment when the rebuilt review i
     result.persisted.pending_reviewer_human_decision_comment_token,
     undefined
   );
+  assert.equal(result.persisted.active_reviewer_owned_comment_token, undefined);
+  assert.equal(result.persisted.active_reviewer_owned_comment_id, undefined);
+  assert.equal(result.persisted.my_approval_sha, "abc123");
   const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
   assert.deepEqual(ghState.prs["acme/widget#1"].issueComments, []);
 });
@@ -968,7 +1139,7 @@ test("summarizePR never mutates or suppresses a copied marker when the verified 
       "acme/widget#1": {
         headRefOid: "abc123",
         issueComments: [{ id: 8123, body: copiedBody }],
-        reviews: [],
+        reviews: [approvedReview("abc123")],
         comments: [],
         checks: [],
       },
@@ -1353,6 +1524,7 @@ test("spawnReviewSummary preserves a newer task target reconciled during the run
 test("spawnReviewSummary keeps a mid-flight change request over the run's verdict", () => {
   const workspace = setupRunnerWorkspace("review-runner-changes-preserve-");
   const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
   // The run finishes with a non-blocking verdict; a human change request lands
   // while it is in flight. The verdict must not bury the human's decision.
   writeJson(scenarioFile, {
@@ -1364,6 +1536,16 @@ test("spawnReviewSummary keeps a mid-flight change request over the run's verdic
         is_error: false,
       }),
       sleepMs: 100,
+    },
+  });
+  writeJson(ghStateFile, {
+    viewerLogin: "me",
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [],
+        reviews: [approvedReview("abc123")],
+      },
     },
   });
 
@@ -1406,6 +1588,7 @@ test("spawnReviewSummary keeps a mid-flight change request over the run's verdic
     {
       ...prependBinToPath(workspace),
       FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
     }
   );
 

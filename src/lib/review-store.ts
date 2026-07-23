@@ -101,6 +101,26 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
     : [];
   normalized.reviewer_human_decision_comment_ids =
     decisionCommentIds.length > 0 ? decisionCommentIds : undefined;
+  const activeReviewerOwnedCommentToken =
+    typeof normalized.active_reviewer_owned_comment_token === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      normalized.active_reviewer_owned_comment_token
+    )
+      ? normalized.active_reviewer_owned_comment_token
+      : undefined;
+  const activeReviewerOwnedCommentId =
+    Number.isSafeInteger(normalized.active_reviewer_owned_comment_id) &&
+    (normalized.active_reviewer_owned_comment_id ?? 0) > 0
+      ? normalized.active_reviewer_owned_comment_id
+      : undefined;
+  normalized.active_reviewer_owned_comment_token =
+    activeReviewerOwnedCommentToken && activeReviewerOwnedCommentId
+      ? activeReviewerOwnedCommentToken
+      : undefined;
+  normalized.active_reviewer_owned_comment_id =
+    activeReviewerOwnedCommentToken && activeReviewerOwnedCommentId
+      ? activeReviewerOwnedCommentId
+      : undefined;
   normalized.pending_reviewer_human_decision_comment_token =
     typeof normalized.pending_reviewer_human_decision_comment_token ===
       "string" &&

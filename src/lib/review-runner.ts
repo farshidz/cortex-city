@@ -21,7 +21,11 @@ import {
   releaseReviewWorkspace,
   releaseReviewWorkspaceBeforeStart,
 } from "./review-workspace";
-import { reconcileReviewerHumanDecisionComment } from "./github";
+import {
+  getAuthenticatedUserLogin,
+  getMyReviewSignals,
+  reconcileReviewerHumanDecisionComment,
+} from "./github";
 import {
   REVIEWER_GITHUB_COMMENT_PREFIX,
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
@@ -980,7 +984,9 @@ export async function spawnReviewSummary(
       ? compatibleCachedSessionId
       : undefined;
   let reviewerHumanDecisionCommentToken =
-    cachedBefore?.pending_reviewer_human_decision_comment_token || randomUUID();
+    cachedBefore?.pending_reviewer_human_decision_comment_token ||
+    cachedBefore?.active_reviewer_owned_comment_token ||
+    randomUUID();
   const baseEntry = {
     ...target,
     summary: cachedBefore?.summary ?? "",
@@ -999,6 +1005,10 @@ export async function spawnReviewSummary(
       : cachedBefore?.agent_review_status,
     reviewer_human_decision_comment_ids:
       cachedBefore?.reviewer_human_decision_comment_ids,
+    active_reviewer_owned_comment_token:
+      cachedBefore?.active_reviewer_owned_comment_token,
+    active_reviewer_owned_comment_id:
+      cachedBefore?.active_reviewer_owned_comment_id,
     pending_reviewer_human_decision_comment_token:
       cachedBefore?.pending_reviewer_human_decision_comment_token,
     pending_reviewer_human_decision_comment_id:
@@ -1171,6 +1181,13 @@ export async function spawnReviewSummary(
     );
     let reviewerHumanDecisionCommentId: number | undefined;
     let reviewActionError: string | undefined;
+    let approvalVerificationError: string | undefined;
+    let verifiedApprovalSha: string | undefined;
+    let verifiedLastReviewSha: string | undefined;
+    let reconciledActiveReviewerOwnedComment:
+      | { token: string; id: number }
+      | null
+      | undefined;
     let preservePendingReviewAction = false;
     assertReviewRunLockHealthy(runLock);
     let beforeReviewAction = getReviewSummary(target.pr_url);
@@ -1186,6 +1203,34 @@ export async function spawnReviewSummary(
         actionTarget.task_title !== target.task_title ||
         actionTarget.task_description !== target.task_description ||
         actionTarget.task_plan !== target.task_plan;
+      const shouldVerifyAutomatedApproval =
+        runtimeSuccessful &&
+        !actionTargetChanged &&
+        agentReviewStatus === "ready_for_human_approval" &&
+        reviewSourceOf(actionTarget) === "inbound" &&
+        actionTarget.self_authored !== true;
+      if (shouldVerifyAutomatedApproval) {
+        try {
+          const login = await getAuthenticatedUserLogin();
+          if (!login) {
+            throw new Error("GitHub did not return the signed-in user.");
+          }
+          const signals = await getMyReviewSignals(target.pr_url, login);
+          if (signals.approval_sha !== target.head_sha) {
+            approvalVerificationError =
+              signals.changes_requested_sha === target.head_sha
+                ? "The reviewer returned ready_for_human_approval, but the signed-in user's current decision on the reviewed commit is CHANGES_REQUESTED."
+                : "The reviewer returned ready_for_human_approval, but Cortex City could not verify an approval from the signed-in user on the reviewed commit.";
+          } else {
+            verifiedApprovalSha = signals.approval_sha;
+            verifiedLastReviewSha = signals.last_review_sha;
+          }
+        } catch (error) {
+          approvalVerificationError = `Failed to verify the reviewer approval on the reviewed commit: ${
+            error instanceof Error ? error.message : "Unknown GitHub error."
+          }`;
+        }
+      }
       const shouldCreateHumanDecisionComment =
         runtimeSuccessful &&
         !actionTargetChanged &&
@@ -1205,20 +1250,29 @@ export async function spawnReviewSummary(
         ? REVIEWER_SELF_APPROVAL_COMMENT_PREFIX
         : REVIEWER_HUMAN_DECISION_COMMENT_PREFIX;
       const hasPendingReviewerOwnedComment = Boolean(
-        cachedBefore?.pending_reviewer_human_decision_comment_token
+        beforeReviewAction.pending_reviewer_human_decision_comment_token
+      );
+      const hasActiveReviewerOwnedComment = Boolean(
+        beforeReviewAction.active_reviewer_owned_comment_token &&
+          beforeReviewAction.active_reviewer_owned_comment_id
       );
       const shouldRemoveReviewerOwnedComment =
-        hasPendingReviewerOwnedComment &&
+        (hasPendingReviewerOwnedComment || hasActiveReviewerOwnedComment) &&
         runtimeSuccessful &&
         !actionTargetChanged &&
         agentReviewStatus !== undefined &&
         !shouldCreateReviewerOwnedComment;
       preservePendingReviewAction =
         hasPendingReviewerOwnedComment &&
-        (!runtimeSuccessful || actionTargetChanged || !agentReviewStatus);
+        (!runtimeSuccessful ||
+          actionTargetChanged ||
+          !agentReviewStatus ||
+          Boolean(approvalVerificationError));
       if (
-        hasPendingReviewerOwnedComment ||
-        shouldCreateReviewerOwnedComment
+        !approvalVerificationError &&
+        (hasPendingReviewerOwnedComment ||
+          hasActiveReviewerOwnedComment ||
+          shouldCreateReviewerOwnedComment)
       ) {
         if (!beforeReviewAction.pending_reviewer_human_decision_comment_token) {
           beforeReviewAction = await mutateReviewSummary(
@@ -1234,6 +1288,11 @@ export async function spawnReviewSummary(
                 ...current,
                 pending_reviewer_human_decision_comment_token:
                   reviewerHumanDecisionCommentToken,
+                pending_reviewer_human_decision_comment_id:
+                  current.active_reviewer_owned_comment_token ===
+                    reviewerHumanDecisionCommentToken
+                    ? current.active_reviewer_owned_comment_id
+                    : undefined,
               };
             }
           );
@@ -1373,6 +1432,19 @@ export async function spawnReviewSummary(
               reviewActionError =
                 "GitHub did not return a reviewer-owned comment receipt.";
             }
+            if (!reviewActionError) {
+              if (
+                shouldCreateReviewerOwnedComment &&
+                reviewerHumanDecisionCommentId
+              ) {
+                reconciledActiveReviewerOwnedComment = {
+                  token: reviewerHumanDecisionCommentToken,
+                  id: reviewerHumanDecisionCommentId,
+                };
+              } else if (shouldRemoveReviewerOwnedComment) {
+                reconciledActiveReviewerOwnedComment = null;
+              }
+            }
           }
         } catch (error) {
           reviewActionError =
@@ -1382,7 +1454,8 @@ export async function spawnReviewSummary(
         }
       }
     }
-    const successful = runtimeSuccessful && !reviewActionError;
+    const successful =
+      runtimeSuccessful && !reviewActionError && !approvalVerificationError;
     const saved = await mutateReviewSummary(target.pr_url, (latestBeforeSave) => {
       if (latestBeforeSave?.current_run_id !== runLock.data.token) {
         return undefined;
@@ -1446,7 +1519,7 @@ export async function spawnReviewSummary(
         output_tokens: finalOutput.usage?.output_tokens,
         error: reviewContextChangedDuringRun
           ? undefined
-          : finalOutput.error || reviewActionError,
+          : finalOutput.error || reviewActionError || approvalVerificationError,
         error_at:
           reviewContextChangedDuringRun || successful ? undefined : generatedAt,
         agent_review_status: successful
@@ -1458,6 +1531,14 @@ export async function spawnReviewSummary(
           reviewerHumanDecisionCommentIds.length > 0
             ? reviewerHumanDecisionCommentIds
             : undefined,
+        active_reviewer_owned_comment_token:
+          reconciledActiveReviewerOwnedComment !== undefined
+            ? reconciledActiveReviewerOwnedComment?.token
+            : latestBeforeSave.active_reviewer_owned_comment_token,
+        active_reviewer_owned_comment_id:
+          reconciledActiveReviewerOwnedComment !== undefined
+            ? reconciledActiveReviewerOwnedComment?.id
+            : latestBeforeSave.active_reviewer_owned_comment_id,
         pending_reviewer_human_decision_comment_token:
           reviewActionError || preservePendingReviewAction
             ? reviewerHumanDecisionCommentToken
@@ -1469,15 +1550,26 @@ export async function spawnReviewSummary(
             : undefined,
         followups: reviewContextChangedDuringRun
           ? []
-          : followupReview || finalOutput.error || reviewActionError
+          : followupReview ||
+              finalOutput.error ||
+              reviewActionError ||
+              approvalVerificationError
             ? latestBeforeSave.followups || []
             : [],
         // Review signals are owned by the worker poll and the submit route,
         // which may update them while this run is in flight. This mutation
         // executes under the store's cross-process lock, so it merges the
         // newest persisted signals and verifies ownership in one step.
-        my_last_review_sha: latestBeforeSave.my_last_review_sha,
-        my_approval_sha: latestBeforeSave.my_approval_sha,
+        my_last_review_sha:
+          verifiedApprovalSha &&
+          latestBeforeSave.my_changes_requested_sha !== target.head_sha
+            ? verifiedLastReviewSha || latestBeforeSave.my_last_review_sha
+            : latestBeforeSave.my_last_review_sha,
+        my_approval_sha:
+          verifiedApprovalSha &&
+          latestBeforeSave.my_changes_requested_sha !== target.head_sha
+            ? verifiedApprovalSha
+            : latestBeforeSave.my_approval_sha,
         my_changes_requested_sha: latestBeforeSave.my_changes_requested_sha,
         final_at: undefined,
         current_run_pid: undefined,

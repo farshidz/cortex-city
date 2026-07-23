@@ -224,6 +224,15 @@ const state = loadState();
 logCall(args);
 
 if (args[0] === "api") {
+  if (args[1] === "user") {
+    const login = state.viewerLogin || "me";
+    const jqIndex = args.indexOf("--jq");
+    output(jqIndex >= 0 && args[jqIndex + 1] === ".login"
+      ? login
+      : { login });
+    process.exit(0);
+  }
+
   if (args[1] === "--method" && args[2] === "POST") {
     const endpoint = args[3];
     const match = endpoint.match(/^repos\\/([^/]+)\\/([^/]+)\\/issues\\/(\\d+)\\/comments$/);
