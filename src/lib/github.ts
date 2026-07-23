@@ -447,10 +447,27 @@ interface PRViewResult {
 }
 
 interface PRReviewItem {
+  id?: number;
   user?: { login?: string };
   commit_id?: string;
   state?: string;
   submitted_at?: string;
+}
+
+function compareReviewsNewest(a: PRReviewItem, b: PRReviewItem): number {
+  const submittedAtOrder = (b.submitted_at || "").localeCompare(
+    a.submitted_at || ""
+  );
+  if (submittedAtOrder !== 0) return submittedAtOrder;
+
+  // GitHub review timestamps are second-granular. Numeric review IDs preserve
+  // creation order when two decisive reviews are submitted in the same second.
+  const aId =
+    typeof a.id === "number" && Number.isSafeInteger(a.id) ? a.id : 0;
+  const bId =
+    typeof b.id === "number" && Number.isSafeInteger(b.id) ? b.id : 0;
+  if (aId === bId) return 0;
+  return bId > aId ? 1 : -1;
 }
 
 const CORTEX_CITY_REVIEW_LABEL = "cortex-city-review";
@@ -492,9 +509,7 @@ export async function getMyLastReviewSha(
     (r) => r.user?.login === login && r.state !== "PENDING" && r.commit_id
   );
   if (mine.length === 0) return undefined;
-  mine.sort((a, b) =>
-    (b.submitted_at || "").localeCompare(a.submitted_at || "")
-  );
+  mine.sort(compareReviewsNewest);
   return mine[0].commit_id || undefined;
 }
 
@@ -528,12 +543,9 @@ export async function getMyReviewSignals(
   const mine = reviews.filter((r) => r.user?.login === login && r.commit_id);
   if (mine.length === 0) return {};
 
-  const byNewest = (a: PRReviewItem, b: PRReviewItem) =>
-    (b.submitted_at || "").localeCompare(a.submitted_at || "");
-
   const lastReview = [...mine]
     .filter((r) => r.state !== "PENDING")
-    .sort(byNewest)[0];
+    .sort(compareReviewsNewest)[0];
 
   // DISMISSED is included so that a dismissed review (GitHub's signal that a
   // prior approval no longer counts) supersedes an older APPROVED instead of
@@ -545,7 +557,7 @@ export async function getMyReviewSignals(
         r.state === "CHANGES_REQUESTED" ||
         r.state === "DISMISSED"
     )
-    .sort(byNewest)[0];
+    .sort(compareReviewsNewest)[0];
 
   return {
     last_review_sha: lastReview?.commit_id || undefined,
