@@ -6,7 +6,8 @@
 > when a non-self-authored inbound review is clean. A review that needs human
 > judgment posts a signed, machine-distinguishable PR comment; the manual review
 > actions remain available as fallbacks. Self-authored and task-owned PRs are
-> never auto-approved.
+> never auto-approved; clean reviews instead post a signed manual-approval
+> handoff comment.
 
 ## Context
 

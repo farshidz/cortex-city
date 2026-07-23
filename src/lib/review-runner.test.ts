@@ -270,6 +270,8 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
     taskPrompt,
     /GitHub does not allow an author to approve their own PR/i
   );
+  assert.match(taskPrompt, /leave a top-level PR conversation comment/i);
+  assert.match(taskPrompt, /clean but requires manual approval/i);
   assert.match(taskPrompt, /final status is `needs_human_decision`/i);
   assert.match(taskPrompt, /including task-owned and other self-authored PRs/i);
   assert.match(taskPrompt, /add a `## Human Decision` section/i);
@@ -309,6 +311,8 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
     /never approve it or request changes on GitHub/i
   );
   assert.match(selfAuthoredPrompt, /Do not approve this PR on GitHub/i);
+  assert.match(selfAuthoredPrompt, /leave a top-level PR conversation comment/i);
+  assert.match(selfAuthoredPrompt, /Do not post that handoff comment yourself/i);
   assert.match(selfAuthoredPrompt, /final status is `needs_human_decision`/i);
   assert.doesNotMatch(
     selfAuthoredPrompt,
@@ -728,6 +732,84 @@ test("summarizePR posts and persists an application-owned human-decision comment
   );
 });
 
+test("summarizePR posts a manual-approval handoff for a clean self-authored review", () => {
+  const workspace = setupRunnerWorkspace("review-runner-self-approval-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [],
+        nextIssueCommentId: 8124,
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-self-approval-session",
+        result: [
+          "## Summary",
+          "No blocking issues found.",
+          "## Agent Status",
+          "Agent status: `ready_for_human_approval`",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({
+    source: "inbound",
+    label_only: true,
+    self_authored: true,
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      const submittedIds = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      console.log(JSON.stringify({
+        summary,
+        submittedIds,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.persisted.agent_review_status, "ready_for_human_approval");
+  assert.deepEqual(result.persisted.reviewer_human_decision_comment_ids, [8124]);
+  assert.equal(
+    result.persisted.pending_reviewer_human_decision_comment_token,
+    undefined
+  );
+  assert.deepEqual(result.submittedIds, []);
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
+  assert.match(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    /^\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Ready for manual approval:\*\* Cortex City found no blocking issues and would approve this PR, but GitHub does not allow an author to approve their own pull request\./
+  );
+  assert.match(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    /<!-- cortex-city-review-decision:[0-9a-f-]{36} -->$/
+  );
+});
+
 test("summarizePR reconciles a decision comment posted before a prior save crashed", () => {
   const workspace = setupRunnerWorkspace("review-runner-decision-reconcile-");
   const scenarioFile = path.join(workspace, "scenario.json");
@@ -763,7 +845,7 @@ test("summarizePR reconciles a decision comment posted before a prior save crash
     },
   });
 
-  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const request = sampleRequest({ source: "inbound" });
   const result = runTsxScript(
     workspace,
     [
@@ -839,7 +921,7 @@ test("summarizePR removes a recovered decision comment when the rebuilt review i
     },
   });
 
-  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const request = sampleRequest({ source: "inbound" });
   const result = runTsxScript(
     workspace,
     [
@@ -907,7 +989,7 @@ test("summarizePR never mutates or suppresses a copied marker when the verified 
     },
   });
 
-  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const request = sampleRequest({ source: "inbound" });
   const result = runTsxScript(
     workspace,
     [

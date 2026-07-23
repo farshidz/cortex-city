@@ -440,6 +440,12 @@ test("getPRStateHash ignores only tracked decision comments", () => {
   seedTrackedDecisionCommentIds(workspace, prUrl, [], pendingToken);
   assert.equal(hashFor([pendingComment]), baseline);
 
+  const pendingSelfApprovalComment = {
+    id: 302,
+    body: `**🤖[Cortex City Reviewer]** **Ready for manual approval:** Please approve manually.\n\n${pendingMarker}`,
+  };
+  assert.equal(hashFor([pendingSelfApprovalComment]), baseline);
+
   const copiedPendingMarker = hashFor([
     pendingComment,
     { id: 301, body: `Participant feedback.\n\n${pendingMarker}` },

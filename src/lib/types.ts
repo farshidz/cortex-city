@@ -283,9 +283,9 @@ export interface ReviewSummary extends ReviewRequest {
   error?: string;
   error_at?: string;
   agent_review_status?: ReviewAgentStatus;
-  // Exact top-level PR conversation comments emitted for needs_human_decision.
-  // Tracking IDs avoids trusting a public body prefix when task feedback is
-  // filtered and remains valid across later review heads.
+  // Exact top-level PR conversation comments emitted for human decisions or
+  // self-approval handoffs. Tracking IDs avoids trusting a public body prefix
+  // when task feedback is filtered and remains valid across later review heads.
   reviewer_human_decision_comment_ids?: number[];
   // Persisted before any application-owned comment action and never exposed to
   // the model. If the process dies after posting but before saving the receipt,

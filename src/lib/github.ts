@@ -2,6 +2,7 @@ import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
 import {
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
+  REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
   reviewerHumanDecisionCommentMarker,
 } from "./review-comments";
 import { getReviewSummary } from "./review-store";
@@ -40,13 +41,16 @@ interface IssueCommentItem {
   body?: string | null;
 }
 
-function isReviewerHumanDecisionCommentForMarker(
+function isReviewerOwnedCommentForMarker(
   comment: IssueCommentItem,
   marker: string
 ): boolean {
   const body = comment.body || "";
   return (
-    body.startsWith(`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX} `) &&
+    [
+      REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
+      REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
+    ].some((prefix) => body.startsWith(`${prefix} `)) &&
     body.trimEnd().endsWith(marker)
   );
 }
@@ -71,7 +75,7 @@ function reviewerHumanDecisionCommentIds(
   const marker = reviewerHumanDecisionCommentMarker(pendingToken);
   const pendingComment = issueComments
     .filter((comment) =>
-      isReviewerHumanDecisionCommentForMarker(comment, marker)
+      isReviewerOwnedCommentForMarker(comment, marker)
     )
     .sort((a, b) => a.id - b.id)[0];
   if (pendingComment) ignoredIds.add(pendingComment.id);
@@ -717,7 +721,11 @@ export async function reconcileReviewerHumanDecisionComment(
   prUrl: string,
   token: string,
   decisionBody?: string | null,
-  expectedCommentId?: number
+  expectedCommentId?: number,
+  commentPrefix:
+    | typeof REVIEWER_HUMAN_DECISION_COMMENT_PREFIX
+    | typeof REVIEWER_SELF_APPROVAL_COMMENT_PREFIX =
+    REVIEWER_HUMAN_DECISION_COMMENT_PREFIX
 ): Promise<number | undefined> {
   const pr = parsePRUrl(prUrl);
   if (
@@ -734,6 +742,12 @@ export async function reconcileReviewerHumanDecisionComment(
   ) {
     throw new Error("Invalid reviewer human-decision comment receipt.");
   }
+  if (
+    commentPrefix !== REVIEWER_HUMAN_DECISION_COMMENT_PREFIX &&
+    commentPrefix !== REVIEWER_SELF_APPROVAL_COMMENT_PREFIX
+  ) {
+    throw new Error("Invalid reviewer-owned comment prefix.");
+  }
 
   const endpoint =
     `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`;
@@ -744,7 +758,7 @@ export async function reconcileReviewerHumanDecisionComment(
   const marker = reviewerHumanDecisionCommentMarker(token);
   const markerMatched = existing
     .filter((comment) =>
-      isReviewerHumanDecisionCommentForMarker(comment, marker)
+      isReviewerOwnedCommentForMarker(comment, marker)
     )
     .sort((a, b) => a.id - b.id)[0];
   const receiptMatched = expectedCommentId
@@ -794,8 +808,7 @@ export async function reconcileReviewerHumanDecisionComment(
     }
     if (!trimmedBody) return matched.id;
 
-    const body =
-      `${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX} ${trimmedBody}\n\n${marker}`;
+    const body = `${commentPrefix} ${trimmedBody}\n\n${marker}`;
     if (matched.body === body) return matched.id;
     const result = await execFileResult("gh", [
       "api",
@@ -818,8 +831,7 @@ export async function reconcileReviewerHumanDecisionComment(
   }
 
   if (!trimmedBody) return undefined;
-  const body =
-    `${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX} ${trimmedBody}\n\n${marker}`;
+  const body = `${commentPrefix} ${trimmedBody}\n\n${marker}`;
   const result = await execFileResult("gh", [
     "api",
     "--method",

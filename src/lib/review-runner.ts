@@ -25,6 +25,7 @@ import { reconcileReviewerHumanDecisionComment } from "./github";
 import {
   REVIEWER_GITHUB_COMMENT_PREFIX,
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
+  REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
 } from "./review-comments";
 import { readReviewLearnings } from "./review-learnings-store";
 import {
@@ -154,6 +155,9 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
 
 const REVIEW_GITHUB_TOOL_INSTRUCTION =
   "Use the `gh` CLI for GitHub inspection and comments. The working directory persists for this PR, so reuse any existing checkout or artifacts.";
+
+const REVIEWER_SELF_APPROVAL_COMMENT_BODY =
+  "Cortex City found no blocking issues and would approve this PR, but GitHub does not allow an author to approve their own pull request. Please review and approve it manually if you agree.";
 
 export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request with Cortex City's unified review agent.
 
@@ -500,6 +504,9 @@ export function buildReviewWrapperPrompt(
       : [
           "- Do not approve this PR on GitHub. It is owned by the signed-in user,",
           "and GitHub does not allow an author to approve their own PR.",
+          "If your final status is `ready_for_human_approval`, Cortex City will",
+          "leave a top-level PR conversation comment explaining that the review is",
+          "clean but requires manual approval. Do not post that handoff comment yourself.",
         ].join(" "),
     [
       "- If your final status is `needs_human_decision`, add a `## Human Decision`",
@@ -1182,21 +1189,35 @@ export async function spawnReviewSummary(
         runtimeSuccessful &&
         !actionTargetChanged &&
         agentReviewStatus === "needs_human_decision";
-      const hasPendingHumanDecisionComment = Boolean(
+      const shouldCreateSelfApprovalComment =
+        runtimeSuccessful &&
+        !actionTargetChanged &&
+        agentReviewStatus === "ready_for_human_approval" &&
+        (reviewSourceOf(actionTarget) === "task" ||
+          actionTarget.self_authored === true);
+      const shouldCreateReviewerOwnedComment =
+        shouldCreateHumanDecisionComment || shouldCreateSelfApprovalComment;
+      const reviewerOwnedCommentBody = shouldCreateSelfApprovalComment
+        ? REVIEWER_SELF_APPROVAL_COMMENT_BODY
+        : reviewerHumanDecisionBody;
+      const reviewerOwnedCommentPrefix = shouldCreateSelfApprovalComment
+        ? REVIEWER_SELF_APPROVAL_COMMENT_PREFIX
+        : REVIEWER_HUMAN_DECISION_COMMENT_PREFIX;
+      const hasPendingReviewerOwnedComment = Boolean(
         cachedBefore?.pending_reviewer_human_decision_comment_token
       );
-      const shouldRemoveHumanDecisionComment =
-        hasPendingHumanDecisionComment &&
+      const shouldRemoveReviewerOwnedComment =
+        hasPendingReviewerOwnedComment &&
         runtimeSuccessful &&
         !actionTargetChanged &&
         agentReviewStatus !== undefined &&
-        agentReviewStatus !== "needs_human_decision";
+        !shouldCreateReviewerOwnedComment;
       preservePendingReviewAction =
-        hasPendingHumanDecisionComment &&
+        hasPendingReviewerOwnedComment &&
         (!runtimeSuccessful || actionTargetChanged || !agentReviewStatus);
       if (
-        hasPendingHumanDecisionComment ||
-        shouldCreateHumanDecisionComment
+        hasPendingReviewerOwnedComment ||
+        shouldCreateReviewerOwnedComment
       ) {
         if (!beforeReviewAction.pending_reviewer_human_decision_comment_token) {
           beforeReviewAction = await mutateReviewSummary(
@@ -1227,7 +1248,7 @@ export async function spawnReviewSummary(
         try {
           let expectedCommentId =
             beforeReviewAction.pending_reviewer_human_decision_comment_id;
-          if (hasPendingHumanDecisionComment && !expectedCommentId) {
+          if (hasPendingReviewerOwnedComment && !expectedCommentId) {
             const recoveredCommentId =
               await reconcileReviewerHumanDecisionComment(
                 target.pr_url,
@@ -1275,27 +1296,28 @@ export async function spawnReviewSummary(
             reviewActionError =
               "The reviewer returned needs_human_decision without a Human Decision section.";
           } else if (
-            hasPendingHumanDecisionComment &&
+            hasPendingReviewerOwnedComment &&
             runtimeSuccessful &&
             !actionTargetChanged &&
             !agentReviewStatus
           ) {
             reviewActionError =
-              "The rebuilt review did not return a valid Agent Status, so the pending human-decision comment was left unchanged.";
+              "The rebuilt review did not return a valid Agent Status, so the pending reviewer-owned comment was left unchanged.";
           } else {
             reviewerHumanDecisionCommentId =
               await reconcileReviewerHumanDecisionComment(
                 target.pr_url,
                 reviewerHumanDecisionCommentToken,
-                shouldCreateHumanDecisionComment
-                  ? reviewerHumanDecisionBody
-                  : shouldRemoveHumanDecisionComment
+                shouldCreateReviewerOwnedComment
+                  ? reviewerOwnedCommentBody
+                  : shouldRemoveReviewerOwnedComment
                     ? null
                     : undefined,
-                expectedCommentId
+                expectedCommentId,
+                reviewerOwnedCommentPrefix
               );
             if (
-              shouldCreateHumanDecisionComment &&
+              shouldCreateReviewerOwnedComment &&
               expectedCommentId &&
               !reviewerHumanDecisionCommentId
             ) {
@@ -1338,15 +1360,17 @@ export async function spawnReviewSummary(
                 await reconcileReviewerHumanDecisionComment(
                   target.pr_url,
                   reviewerHumanDecisionCommentToken,
-                  reviewerHumanDecisionBody
+                  reviewerOwnedCommentBody,
+                  undefined,
+                  reviewerOwnedCommentPrefix
                 );
             }
             if (
-              shouldCreateHumanDecisionComment &&
+              shouldCreateReviewerOwnedComment &&
               !reviewerHumanDecisionCommentId
             ) {
               reviewActionError =
-                "GitHub did not return a human-decision comment receipt.";
+                "GitHub did not return a reviewer-owned comment receipt.";
             }
           }
         } catch (error) {
