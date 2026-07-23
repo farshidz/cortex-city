@@ -393,6 +393,39 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   );
 });
 
+test("buildReviewWrapperPrompt keeps required feedback inside the PR scope", () => {
+  const prompt = buildReviewWrapperPrompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest()
+  );
+
+  assert.match(prompt, /Keep required changes within the PR's stated goal/i);
+  assert.match(prompt, /PR description.*supplied task details/i);
+  assert.match(
+    prompt,
+    /defect, regression, or safety issue introduced by the current changes/i
+  );
+  assert.match(
+    prompt,
+    /PR-introduced problems remain required.*outside the stated goal/i
+  );
+  assert.match(prompt, /Do not require substantial unrelated redesigns/i);
+  assert.match(prompt, /Prefer the smallest safe fix/i);
+  assert.match(
+    prompt,
+    /\*\*Separate follow-up suggested \(non-blocking\):\*\*/
+  );
+  assert.match(prompt, /separate task and PR/i);
+  assert.match(
+    prompt,
+    /Do not ask for that work to be implemented in the current PR/i
+  );
+  assert.match(
+    prompt,
+    /must not by itself produce `needs_author_changes` or `needs_human_decision`/i
+  );
+});
+
 test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and the revision diff", () => {
   const config = baseConfig({
     review_learning_enabled: false,

@@ -165,6 +165,8 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
   "blocked",
 ];
 
+const REVIEWER_SEPARATE_FOLLOWUP_COMMENT_PREFIX =
+  `${REVIEWER_GITHUB_COMMENT_PREFIX} **Separate follow-up suggested (non-blocking):**`;
 const REVIEW_GITHUB_TOOL_INSTRUCTION =
   "Use the `gh` CLI for GitHub inspection and comments. The working directory persists for this PR, so reuse any existing checkout or artifacts.";
 
@@ -493,6 +495,26 @@ export function buildReviewWrapperPrompt(
       "- Treat every GitHub comment authored by the reviewer as immutable",
       "timeline history. Never edit or delete an earlier reviewer comment;",
       "post a new follow-up comment instead.",
+    ].join(" "),
+    [
+      "- Keep required changes within the PR's stated goal. Establish that goal from",
+      "the PR description and the supplied task details for task-owned PRs. A required",
+      "finding must either be necessary for this PR to deliver that goal correctly",
+      "or identify a defect, regression, or safety issue introduced by the current",
+      "changes. PR-introduced problems remain required even when they affect behavior",
+      "outside the stated goal.",
+    ].join(" "),
+    [
+      "- Do not require substantial unrelated redesigns, generalized infrastructure,",
+      "optional refactors, stronger guarantees than the task requested, or fixes for",
+      "pre-existing problems. Prefer the smallest safe fix for an in-scope finding.",
+    ].join(" "),
+    [
+      "- If a broader improvement is valuable but not required for this PR, you may",
+      "leave one explicitly non-blocking top-level GitHub comment that recommends a separate task",
+      `and PR. Begin it with \`${REVIEWER_SEPARATE_FOLLOWUP_COMMENT_PREFIX}\`.`,
+      "Do not ask for that work to be implemented in the current PR. Such a suggestion",
+      "must not by itself produce `needs_author_changes` or `needs_human_decision`.",
     ].join(" "),
     [
       "- The source-aware GitHub action rules below are authoritative and",
