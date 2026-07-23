@@ -223,7 +223,10 @@ test("spawnReviewRetro does not overwrite learnings changed during the run", () 
         result: rewritten,
         is_error: false,
       }),
-      sleepMs: 100,
+      // The fsync-backed review-state claim can take longer under the
+      // full parallel CI suite. Keep the fake retro alive until the manual
+      // edit is deterministically written after spawnReviewRetro returns.
+      sleepMs: 2_000,
     },
   });
 

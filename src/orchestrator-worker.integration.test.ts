@@ -22,6 +22,7 @@ import {
 const WORKER_RUNTIME_MODULE_URL = moduleUrl("src/lib/orchestrator-worker-runtime.ts");
 const STORE_MODULE_URL = moduleUrl("src/lib/store.ts");
 const GITHUB_MODULE_URL = moduleUrl("src/lib/github.ts");
+const REVIEW_STORE_MODULE_URL = moduleUrl("src/lib/review-store.ts");
 
 function sampleTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -68,6 +69,7 @@ function runWorkerScript(
       `import { pollOnce } from ${JSON.stringify(WORKER_RUNTIME_MODULE_URL)};`,
       `import { createTask, readTasks } from ${JSON.stringify(STORE_MODULE_URL)};`,
       `import { getPRStateHash } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
     ],
     body,
     env
@@ -457,7 +459,7 @@ test("pollOnce scans in-review tasks for merged, closed, pending, conflicts, unc
   assert.equal(taskById["review-unchanged"].last_run_result, undefined);
 });
 
-test("reviewer decision prompts wait for a human response before waking the task builder", () => {
+test("orphaned review ownership is cleared before decision recovery and task wakeup hashing", () => {
   const workspace = setupWorkspace({
     configOverrides: {
       max_parallel_sessions: 1,
@@ -527,6 +529,8 @@ test("reviewer decision prompts wait for a human response before waking the task
     workspace,
     `
       const activePids = new Map();
+      const pendingToken = "11111111-1111-4111-8111-111111111111";
+      const pendingBody = "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.\\n\\n<!-- cortex-city-review-decision:" + pendingToken + " -->";
       const baselineHash = await getPRStateHash(${JSON.stringify(prUrl)});
       await createTask({
         ...${JSON.stringify(sampleTask({
@@ -539,18 +543,42 @@ test("reviewer decision prompts wait for a human response before waking the task
         }))},
         last_review_gh_state: baselineHash,
       });
+      await upsertReviewSummary({
+        source: "task",
+        task_id: "human-decision-task",
+        pr_url: ${JSON.stringify(prUrl)},
+        pr_number: 40,
+        repo_slug: "farshidz/marqo-cortex-city",
+        title: "Choose an implementation",
+        author: "farshidz",
+        head_sha: "decision-head",
+        created_at: "2026-05-01T00:00:00.000Z",
+        updated_at: "2026-05-01T00:00:00.000Z",
+        summary: "A human decision is required.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_reviewer_comment_delivery: {
+          action_token: pendingToken,
+          kind: "human_decision",
+          head_sha: "decision-head",
+          body: pendingBody,
+        },
+        current_run_pid: 99999999,
+        current_run_id: "orphaned-decision-run",
+      });
 
       const fs = require("node:fs");
       const state = JSON.parse(fs.readFileSync(${JSON.stringify(ghStateFile)}, "utf-8"));
       const pr = state.prs["farshidz/marqo-cortex-city#40"];
       pr.issueComments = [{
         id: 400,
-        body: "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B.",
+        body: pendingBody,
+        user: { login: "me" },
       }];
       fs.writeFileSync(${JSON.stringify(ghStateFile)}, JSON.stringify(state));
 
       await pollOnce(activePids);
       const afterReviewerPrompt = readTasks()[0];
+      const reviewAfterReviewerPrompt = readReviewSummaryMap()[${JSON.stringify(prUrl)}];
       const callsAfterReviewerPrompt = fs.existsSync(${JSON.stringify(callsFile)})
         ? fs.readFileSync(${JSON.stringify(callsFile)}, "utf-8").trim().split(/\\r?\\n/).filter(Boolean).length
         : 0;
@@ -567,6 +595,7 @@ test("reviewer decision prompts wait for a human response before waking the task
         : [];
       console.log(JSON.stringify({
         afterReviewerPrompt,
+        reviewAfterReviewerPrompt,
         callsAfterReviewerPrompt,
         finalTask: readTasks()[0],
         callCount: calls.length,
@@ -582,8 +611,307 @@ test("reviewer decision prompts wait for a human response before waking the task
 
   assert.equal(result.afterReviewerPrompt.last_run_result, undefined);
   assert.equal(result.callsAfterReviewerPrompt, 0);
+  assert.deepEqual(
+    result.reviewAfterReviewerPrompt.reviewer_comment_receipts.map(
+      (receipt: { comment_id: number }) => receipt.comment_id
+    ),
+    [400]
+  );
+  assert.equal(
+    result.reviewAfterReviewerPrompt.pending_reviewer_comment_delivery.action_token,
+    "11111111-1111-4111-8111-111111111111"
+  );
+  assert.equal(result.reviewAfterReviewerPrompt.current_run_pid, undefined);
+  assert.equal(result.reviewAfterReviewerPrompt.current_run_id, undefined);
   assert.equal(result.finalTask.last_run_result, "success");
   assert.equal(result.callCount, 1);
+});
+
+test("pollOnce durably cancels undelivered reviewer actions for moved and closed PRs", () => {
+  const workspace = setupWorkspace({
+    configOverrides: {
+      review_learning_enabled: false,
+    },
+  });
+  const movedPrUrl =
+    "https://github.com/farshidz/marqo-cortex-city/pull/42";
+  const closedPrUrl =
+    "https://github.com/farshidz/marqo-cortex-city/pull/43";
+  const ghStateFile = path.join(workspace, "stale-delivery-gh-state.json");
+  const callsFile = path.join(workspace, "stale-delivery-gh-calls.jsonl");
+  const movedToken = "11111111-1111-4111-8111-111111111111";
+  const closedToken = "22222222-2222-4222-8222-222222222222";
+  const movedBody = `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n<!-- cortex-city-review-decision:${movedToken} -->`;
+  const closedBody = `**🤖[Cortex City Reviewer]** **Ready for manual approval:** Approve this PR.\n\n<!-- cortex-city-review-decision:${closedToken} -->`;
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#42": {
+        state: "open",
+        merged: false,
+        headRefOid: "new-head",
+        issueComments: [],
+      },
+      "farshidz/marqo-cortex-city#43": {
+        state: "closed",
+        merged: false,
+        headRefOid: "closed-head",
+        issueComments: [],
+      },
+    },
+  });
+
+  const result = runWorkerScript(
+    workspace,
+    `
+      const base = {
+        source: "inbound",
+        pr_number: 42,
+        repo_slug: "farshidz/marqo-cortex-city",
+        title: "Stale action",
+        author: "octocat",
+        created_at: "2026-05-01T00:00:00.000Z",
+        updated_at: "2026-05-01T00:00:00.000Z",
+        summary: "Interrupted before delivery.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+      };
+      await upsertReviewSummary({
+        ...base,
+        pr_url: ${JSON.stringify(movedPrUrl)},
+        head_sha: "old-head",
+        pending_reviewer_comment_delivery: {
+          action_token: ${JSON.stringify(movedToken)},
+          kind: "human_decision",
+          head_sha: "old-head",
+          body: ${JSON.stringify(movedBody)},
+        },
+      });
+      await upsertReviewSummary({
+        ...base,
+        pr_url: ${JSON.stringify(closedPrUrl)},
+        pr_number: 43,
+        head_sha: "closed-head",
+        pending_reviewer_comment_delivery: {
+          action_token: ${JSON.stringify(closedToken)},
+          kind: "manual_approval",
+          head_sha: "closed-head",
+          body: ${JSON.stringify(closedBody)},
+        },
+      });
+      await pollOnce(new Map());
+      const fs = require("node:fs");
+      console.log(JSON.stringify({
+        reviews: readReviewSummaryMap(),
+        ghState: JSON.parse(fs.readFileSync(${JSON.stringify(ghStateFile)}, "utf-8")),
+        calls: fs.readFileSync(${JSON.stringify(callsFile)}, "utf-8")
+          .trim()
+          .split(/\\r?\\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line)),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+      FAKE_GH_CALLS_FILE: callsFile,
+    }
+  );
+
+  const moved = result.reviews[movedPrUrl];
+  const closed = result.reviews[closedPrUrl];
+  assert.equal(moved.pending_reviewer_comment_delivery, undefined);
+  assert.equal(
+    moved.reviewer_comment_cancellations[0].reason,
+    "head_changed"
+  );
+  assert.equal(
+    moved.reviewer_comment_cancellations[0].observed_head_sha,
+    "new-head"
+  );
+  assert.equal(closed.pending_reviewer_comment_delivery, undefined);
+  assert.equal(
+    closed.reviewer_comment_cancellations[0].reason,
+    "pr_not_open"
+  );
+  assert.equal(
+    closed.reviewer_comment_cancellations[0].observed_pr_state,
+    "closed"
+  );
+  assert.equal(
+    result.ghState.prs["farshidz/marqo-cortex-city#42"].issueComments.length,
+    0
+  );
+  assert.equal(
+    result.ghState.prs["farshidz/marqo-cortex-city#43"].issueComments.length,
+    0
+  );
+  assert.equal(
+    result.calls.some(
+      (args: string[]) =>
+        args[0] === "api" &&
+        args[1] === "--method" &&
+        ["POST", "PATCH", "DELETE"].includes(args[2])
+    ),
+    false
+  );
+});
+
+test("pollOnce rebuilds a crashed human-decision review without duplicating its comment", () => {
+  const workspace = setupWorkspace({
+    configOverrides: {
+      max_parallel_reviews: 1,
+      review_runtime: "claude",
+    },
+  });
+  const prUrl = "https://github.com/farshidz/marqo-cortex-city/pull/41";
+  const scenarioFile = path.join(workspace, "decision-retry-scenario.json");
+  const ghStateFile = path.join(workspace, "decision-retry-gh-state.json");
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const interruptedError =
+    "The reviewer comment delivery was interrupted before its result was saved.";
+  const pendingBody = `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B before merging.\n\n<!-- cortex-city-review-decision:${pendingToken} -->`;
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "decision-retry-session",
+        result: [
+          "## Summary",
+          "Rebuilt after the interrupted comment action.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose A or B before merging.",
+        ].join("\n"),
+        is_error: false,
+      }),
+      sleepMs: 10,
+    },
+  });
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#41": {
+        state: "open",
+        merged: false,
+        mergeable_state: "clean",
+        mergeable: true,
+        headRefOid: "decision-retry-head",
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        nextIssueCommentId: 500,
+        checks: [{ name: "ci", state: "SUCCESS" }],
+      },
+    },
+  });
+
+  const result = runWorkerScript(
+    workspace,
+    `
+      const activePids = new Map();
+      await upsertReviewSummary({
+        source: "task",
+        task_id: "decision-retry-task",
+        task_title: "Recover a human decision",
+        task_description: "Rebuild the review result after an interrupted comment action.",
+        task_plan: "Reconcile the receipt, then rerun the reviewer.",
+        pr_url: ${JSON.stringify(prUrl)},
+        pr_number: 41,
+        repo_slug: "farshidz/marqo-cortex-city",
+        title: "Recover a human decision",
+        author: "farshidz",
+        head_sha: "decision-retry-head",
+        created_at: "2026-05-01T00:00:00.000Z",
+        updated_at: "2026-05-01T00:00:00.000Z",
+        summary: "Old clean summary.",
+        summary_head_sha: "decision-retry-head",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        agent_review_status: "ready_for_human_approval",
+        pending_reviewer_comment_delivery: ${JSON.stringify({
+          action_token: pendingToken,
+          kind: "human_decision",
+          head_sha: "decision-retry-head",
+          body: pendingBody,
+        })},
+        error: ${JSON.stringify(interruptedError)},
+        error_at: "2026-05-01T00:10:00.000Z",
+      });
+      const baselineHash = await getPRStateHash(${JSON.stringify(prUrl)});
+      const fs = require("node:fs");
+      const state = JSON.parse(fs.readFileSync(${JSON.stringify(ghStateFile)}, "utf-8"));
+      state.prs["farshidz/marqo-cortex-city#41"].issueComments = [{
+        id: 410,
+        body: ${JSON.stringify(pendingBody)},
+        user: { login: "me" },
+      }];
+      fs.writeFileSync(${JSON.stringify(ghStateFile)}, JSON.stringify(state));
+      await createTask({
+        ...${JSON.stringify(sampleTask({
+          id: "decision-retry-task",
+          title: "Recover a human decision",
+          description: "Rebuild the review result after an interrupted comment action.",
+          plan: "Reconcile the receipt, then rerun the reviewer.",
+          status: "in_review",
+          agent_runner: "claude",
+          reviewer_agent_enabled: true,
+          pr_url: prUrl,
+          worktree_path: workspace,
+        }))},
+        last_review_gh_state: baselineHash,
+      });
+
+      await pollOnce(activePids);
+      for (let i = 0; i < 30; i++) {
+        const review = readReviewSummaryMap()[${JSON.stringify(prUrl)}];
+        if (review?.summary_head_sha === "decision-retry-head" &&
+            review?.summary?.includes("Rebuilt after") &&
+            review?.current_run_pid == null) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      console.log(JSON.stringify({
+        review: readReviewSummaryMap()[${JSON.stringify(prUrl)}],
+        task: readTasks()[0],
+        ghState: JSON.parse(fs.readFileSync(${JSON.stringify(ghStateFile)}, "utf-8")),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(
+    result.review.summary,
+    [
+      "## Summary",
+      "Rebuilt after the interrupted comment action.",
+      "## Agent Status",
+      "Agent status: `needs_human_decision`",
+      "## Human Decision",
+      "Choose A or B before merging.",
+    ].join("\n")
+  );
+  assert.equal(result.review.summary_head_sha, "decision-retry-head");
+  assert.equal(result.review.agent_review_status, "needs_human_decision");
+  assert.deepEqual(
+    result.review.reviewer_comment_receipts.map(
+      (receipt: { comment_id: number }) => receipt.comment_id
+    ),
+    [410]
+  );
+  assert.equal(
+    result.review.pending_reviewer_comment_delivery,
+    undefined
+  );
+  assert.equal(result.review.error, undefined);
+  assert.equal(result.task.last_run_result, undefined);
+  assert.equal(
+    result.ghState.prs["farshidz/marqo-cortex-city#41"].issueComments.length,
+    1
+  );
+  assert.equal(
+    result.ghState.prs["farshidz/marqo-cortex-city#41"].issueComments[0].body,
+    `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A or B before merging.\n\n<!-- cortex-city-review-decision:${pendingToken} -->`
+  );
 });
 
 test("pollOnce runs final cleanup, removes worktrees, and prunes old task logs", () => {

@@ -1,7 +1,23 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
-import { isReviewerTimelineComment } from "./review-comments";
-import type { PRStatus, ReviewRequest } from "./types";
+import { mkdirSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
+import * as lockfile from "proper-lockfile";
+import {
+  REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
+  REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
+  reviewerCommentBodySha256,
+  reviewerHumanDecisionCommentMarker,
+} from "./review-comments";
+import { getReviewSummary } from "./review-store";
+import type {
+  PRStatus,
+  ReviewerCommentCancellation,
+  ReviewerCommentDelivery,
+  ReviewerCommentReceipt,
+  ReviewRequest,
+} from "./types";
 
 interface PRInfo {
   owner: string;
@@ -34,6 +50,65 @@ interface ReviewItem {
 interface IssueCommentItem {
   id: number;
   body?: string | null;
+  user?: { login?: string };
+}
+
+interface ReviewerCommentDeliveryTarget {
+  state?: string;
+  merged?: boolean;
+  head?: { sha?: string };
+}
+
+const REVIEWER_COMMENT_DELIVERY_LOCK_DIR = path.join(
+  tmpdir(),
+  "cortex-city-reviewer-comment-delivery-locks"
+);
+const REVIEWER_COMMENT_DELIVERY_LOCK_STALE_MS = 120_000;
+
+export class StaleReviewerCommentDeliveryError extends Error {
+  constructor(
+    readonly reason: ReviewerCommentCancellation["reason"],
+    readonly expectedHeadSha: string,
+    readonly observedHeadSha: string | undefined,
+    readonly observedPRState: string
+  ) {
+    super(
+      reason === "head_changed"
+        ? `Reviewer comment delivery was canceled because PR HEAD moved from ${expectedHeadSha} to ${observedHeadSha || "an unknown commit"}.`
+        : `Reviewer comment delivery was canceled because the PR is ${observedPRState}.`
+    );
+    this.name = "StaleReviewerCommentDeliveryError";
+  }
+}
+
+export function isStaleReviewerCommentDeliveryError(
+  error: unknown
+): error is StaleReviewerCommentDeliveryError {
+  return error instanceof StaleReviewerCommentDeliveryError;
+}
+
+export function reviewerCommentCancellationFromStaleError(
+  delivery: ReviewerCommentDelivery,
+  error: StaleReviewerCommentDeliveryError
+): ReviewerCommentCancellation {
+  return {
+    action_token: delivery.action_token,
+    reason: error.reason,
+    expected_head_sha: error.expectedHeadSha,
+    observed_head_sha: error.observedHeadSha,
+    observed_pr_state: error.observedPRState,
+    body_sha256: reviewerCommentBodySha256(delivery.body),
+    canceled_at: new Date().toISOString(),
+  };
+}
+
+function verifiedReviewerCommentIds(prUrl: string): Set<number> {
+  const review = getReviewSummary(prUrl);
+  return new Set(
+    (review?.reviewer_comment_receipts || []).map(
+      (receipt) => receipt.comment_id
+    )
+  );
 }
 
 function parsePRUrl(url: string): PRInfo | null {
@@ -295,8 +370,9 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
     .filter((comment) => isCommentFromSubmittedReview(comment, submittedIds))
     .map((comment) => comment.id);
 
+  const ignoredIssueCommentIds = verifiedReviewerCommentIds(prUrl);
   const issueCommentIds = issueComments
-    .filter((comment) => !isReviewerTimelineComment(comment.body))
+    .filter((comment) => !ignoredIssueCommentIds.has(comment.id))
     .map((comment) => comment.id);
 
   return [...reviewCommentIds, ...issueCommentIds].sort();
@@ -362,9 +438,10 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
       .map((comment) => comment.id)
       .sort()
   );
+  const ignoredIssueCommentIds = verifiedReviewerCommentIds(prUrl);
   const issueCommentIds = JSON.stringify(
     issueComments
-      .filter((comment) => !isReviewerTimelineComment(comment.body))
+      .filter((comment) => !ignoredIssueCommentIds.has(comment.id))
       .map((comment) => comment.id)
       .sort()
   );
@@ -393,10 +470,27 @@ interface PRViewResult {
 }
 
 interface PRReviewItem {
+  id?: number;
   user?: { login?: string };
   commit_id?: string;
   state?: string;
   submitted_at?: string;
+}
+
+function compareReviewsNewest(a: PRReviewItem, b: PRReviewItem): number {
+  const submittedAtOrder = (b.submitted_at || "").localeCompare(
+    a.submitted_at || ""
+  );
+  if (submittedAtOrder !== 0) return submittedAtOrder;
+
+  // GitHub review timestamps are second-granular. Numeric review IDs preserve
+  // creation order when two decisive reviews are submitted in the same second.
+  const aId =
+    typeof a.id === "number" && Number.isSafeInteger(a.id) ? a.id : 0;
+  const bId =
+    typeof b.id === "number" && Number.isSafeInteger(b.id) ? b.id : 0;
+  if (aId === bId) return 0;
+  return bId > aId ? 1 : -1;
 }
 
 const CORTEX_CITY_REVIEW_LABEL = "cortex-city-review";
@@ -438,9 +532,7 @@ export async function getMyLastReviewSha(
     (r) => r.user?.login === login && r.state !== "PENDING" && r.commit_id
   );
   if (mine.length === 0) return undefined;
-  mine.sort((a, b) =>
-    (b.submitted_at || "").localeCompare(a.submitted_at || "")
-  );
+  mine.sort(compareReviewsNewest);
   return mine[0].commit_id || undefined;
 }
 
@@ -474,12 +566,9 @@ export async function getMyReviewSignals(
   const mine = reviews.filter((r) => r.user?.login === login && r.commit_id);
   if (mine.length === 0) return {};
 
-  const byNewest = (a: PRReviewItem, b: PRReviewItem) =>
-    (b.submitted_at || "").localeCompare(a.submitted_at || "");
-
   const lastReview = [...mine]
     .filter((r) => r.state !== "PENDING")
-    .sort(byNewest)[0];
+    .sort(compareReviewsNewest)[0];
 
   // DISMISSED is included so that a dismissed review (GitHub's signal that a
   // prior approval no longer counts) supersedes an older APPROVED instead of
@@ -491,7 +580,7 @@ export async function getMyReviewSignals(
         r.state === "CHANGES_REQUESTED" ||
         r.state === "DISMISSED"
     )
-    .sort(byNewest)[0];
+    .sort(compareReviewsNewest)[0];
 
   return {
     last_review_sha: lastReview?.commit_id || undefined,
@@ -661,6 +750,228 @@ function execFileResult(
       }
     );
   });
+}
+
+function assertReviewerCommentDelivery(
+  delivery: ReviewerCommentDelivery
+): void {
+  const tokenIsValid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      delivery.action_token
+    );
+  const expectedPrefix =
+    delivery.kind === "human_decision"
+      ? REVIEWER_HUMAN_DECISION_COMMENT_PREFIX
+      : delivery.kind === "manual_approval"
+        ? REVIEWER_SELF_APPROVAL_COMMENT_PREFIX
+        : undefined;
+  if (
+    !tokenIsValid ||
+    !delivery.head_sha.trim() ||
+    !expectedPrefix ||
+    !delivery.body.startsWith(`${expectedPrefix} `) ||
+    !delivery.body.endsWith(
+      `\n\n${reviewerHumanDecisionCommentMarker(delivery.action_token)}`
+    )
+  ) {
+    throw new Error("Invalid reviewer comment delivery action.");
+  }
+}
+
+function verifiedReviewerCommentReceipt(
+  delivery: ReviewerCommentDelivery,
+  comment: IssueCommentItem,
+  authorLogin: string
+): ReviewerCommentReceipt {
+  if (
+    !Number.isSafeInteger(comment.id) ||
+    comment.id <= 0 ||
+    comment.user?.login !== authorLogin ||
+    comment.body !== delivery.body
+  ) {
+    throw new Error(
+      "GitHub did not return a verifiable reviewer comment receipt."
+    );
+  }
+  return {
+    action_token: delivery.action_token,
+    comment_id: comment.id,
+    author_login: authorLogin,
+    body_sha256: reviewerCommentBodySha256(delivery.body),
+  };
+}
+
+async function getIssueComment(
+  endpoint: string
+): Promise<IssueCommentItem | null> {
+  const result = await execFileResult("gh", ["api", endpoint]);
+  if (!result.ok || !result.stdout.trim()) return null;
+  try {
+    return JSON.parse(result.stdout) as IssueCommentItem;
+  } catch {
+    return null;
+  }
+}
+
+async function getReviewerCommentDeliveryTarget(
+  pr: PRInfo
+): Promise<ReviewerCommentDeliveryTarget> {
+  const result = await execFileResult("gh", [
+    "api",
+    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`,
+  ]);
+  if (!result.ok || !result.stdout.trim()) {
+    throw new Error("Failed to verify the reviewer comment PR target.");
+  }
+  try {
+    const parsed = JSON.parse(result.stdout) as ReviewerCommentDeliveryTarget;
+    if (
+      typeof parsed.state !== "string" ||
+      typeof parsed.merged !== "boolean" ||
+      !parsed.head ||
+      typeof parsed.head.sha !== "string" ||
+      !parsed.head.sha.trim()
+    ) {
+      throw new Error("Incomplete GitHub PR target.");
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(
+      `Failed to parse the reviewer comment PR target: ${
+        error instanceof Error ? error.message : "unknown GitHub response"
+      }`
+    );
+  }
+}
+
+async function withReviewerCommentDeliveryLock<T>(
+  prUrl: string,
+  actionToken: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  mkdirSync(REVIEWER_COMMENT_DELIVERY_LOCK_DIR, { recursive: true });
+  const target = path.join(
+    REVIEWER_COMMENT_DELIVERY_LOCK_DIR,
+    createHash("sha256")
+      .update(`${prUrl}\0${actionToken}`)
+      .digest("hex")
+  );
+  let compromised: Error | undefined;
+  const release = await lockfile.lock(target, {
+    realpath: false,
+    stale: REVIEWER_COMMENT_DELIVERY_LOCK_STALE_MS,
+    update: Math.floor(REVIEWER_COMMENT_DELIVERY_LOCK_STALE_MS / 3),
+    retries: {
+      retries: 1_200,
+      factor: 1,
+      minTimeout: 25,
+      maxTimeout: 25,
+    },
+    onCompromised: (error) => {
+      compromised = error;
+    },
+  });
+  try {
+    const value = await fn();
+    if (compromised) throw compromised;
+    return value;
+  } finally {
+    try {
+      await release();
+    } catch (error) {
+      if (!compromised) throw error;
+    }
+  }
+}
+
+export async function deliverReviewerComment(
+  prUrl: string,
+  delivery: ReviewerCommentDelivery
+): Promise<ReviewerCommentReceipt> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) throw new Error("Invalid reviewer comment target.");
+  assertReviewerCommentDelivery(delivery);
+
+  const authorLogin = await getAuthenticatedUserLogin();
+  if (!authorLogin) {
+    throw new Error("GitHub did not return the reviewer comment author.");
+  }
+
+  return withReviewerCommentDeliveryLock(
+    prUrl,
+    delivery.action_token,
+    async () => {
+      const endpoint =
+        `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`;
+      const existing = await execPaginatedArrayStrict<IssueCommentItem>(
+        endpoint
+      );
+      if (!existing) {
+        throw new Error("Failed to inspect existing PR conversation comments.");
+      }
+      const recovered = existing
+        .filter(
+          (comment) =>
+            comment.user?.login === authorLogin &&
+            comment.body === delivery.body
+        )
+        .sort((a, b) => a.id - b.id)[0];
+      if (recovered) {
+        return verifiedReviewerCommentReceipt(
+          delivery,
+          recovered,
+          authorLogin
+        );
+      }
+
+      const target = await getReviewerCommentDeliveryTarget(pr);
+      const observedPRState = target.merged
+        ? "merged"
+        : (target.state || "unknown").toLowerCase();
+      const observedHeadSha = target.head?.sha?.trim();
+      if (target.merged || observedPRState !== "open") {
+        throw new StaleReviewerCommentDeliveryError(
+          "pr_not_open",
+          delivery.head_sha,
+          observedHeadSha,
+          observedPRState
+        );
+      }
+      if (observedHeadSha !== delivery.head_sha) {
+        throw new StaleReviewerCommentDeliveryError(
+          "head_changed",
+          delivery.head_sha,
+          observedHeadSha,
+          observedPRState
+        );
+      }
+
+      const result = await execFileResult("gh", [
+        "api",
+        "--method",
+        "POST",
+        endpoint,
+        "--raw-field",
+        `body=${delivery.body}`,
+        "--jq",
+        ".id",
+      ]);
+      const id = Number(result.stdout.trim());
+      if (!result.ok || !Number.isSafeInteger(id) || id <= 0) {
+        const detail = (result.stderr || result.stdout).trim();
+        throw new Error(
+          `Failed to post the reviewer comment${detail ? `: ${detail}` : "."}`
+        );
+      }
+      const posted = await getIssueComment(
+        `repos/${pr.owner}/${pr.repo}/issues/comments/${id}`
+      );
+      if (!posted) {
+        throw new Error("Failed to verify the posted reviewer comment receipt.");
+      }
+      return verifiedReviewerCommentReceipt(delivery, posted, authorLogin);
+    }
+  );
 }
 
 export const __testUtils = {

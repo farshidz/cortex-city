@@ -182,7 +182,7 @@ export function writeFakeGhBinary(workspace: string): string {
   writeFileSync(
     binaryPath,
     `#!/usr/bin/env node
-const { appendFileSync, existsSync, readFileSync } = require("fs");
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("fs");
 
 function loadState() {
   const file = process.env.FAKE_GH_STATE_FILE;
@@ -219,11 +219,98 @@ function output(value) {
   process.stdout.write(JSON.stringify(value));
 }
 
+function blockFor(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return;
+  Atomics.wait(
+    new Int32Array(new SharedArrayBuffer(4)),
+    0,
+    0,
+    milliseconds
+  );
+}
+
 const args = process.argv.slice(2);
 const state = loadState();
 logCall(args);
 
 if (args[0] === "api") {
+  if (args[1] === "user") {
+    const login = state.viewerLogin || "me";
+    const jqIndex = args.indexOf("--jq");
+    output(jqIndex >= 0 && args[jqIndex + 1] === ".login"
+      ? login
+      : { login });
+    process.exit(0);
+  }
+
+  if (args[1] === "--method" && args[2] === "POST") {
+    const endpoint = args[3];
+    const match = endpoint.match(/^repos\\/([^/]+)\\/([^/]+)\\/issues\\/(\\d+)\\/comments$/);
+    if (!match) process.exit(0);
+    const [, owner, repo, number] = match;
+    const pr = getPr(state, owner, repo, number);
+    const bodyArgIndex = args.indexOf("--raw-field");
+    const bodyArg = bodyArgIndex >= 0 ? args[bodyArgIndex + 1] || "" : "";
+    const body = bodyArg.startsWith("body=") ? bodyArg.slice(5) : "";
+    const comments = pr.issueComments || [];
+    const id = pr.nextIssueCommentId ||
+      comments.reduce((max, comment) => Math.max(max, comment.id || 0), 0) + 1;
+    const comment = {
+      id,
+      body,
+      user: { login: state.viewerLogin || "me" },
+    };
+    comments.push(comment);
+    pr.issueComments = comments;
+    pr.nextIssueCommentId = id + 1;
+    if (process.env.FAKE_GH_STATE_FILE) {
+      writeFileSync(process.env.FAKE_GH_STATE_FILE, JSON.stringify(state));
+    }
+    const jqIndex = args.indexOf("--jq");
+    output(jqIndex >= 0 && args[jqIndex + 1] === ".id" ? String(id) : comment);
+    process.exit(0);
+  }
+
+  if (args[1] === "--method" && ["PATCH", "DELETE"].includes(args[2])) {
+    const method = args[2];
+    const endpoint = args[3];
+    const match = endpoint.match(/^repos\\/([^/]+)\\/([^/]+)\\/issues\\/comments\\/(\\d+)$/);
+    if (!match) process.exit(0);
+    const [, owner, repo, idText] = match;
+    const id = Number(idText);
+    let target;
+    for (const [key, pr] of Object.entries(state.prs || {})) {
+      if (!key.startsWith(\`\${owner}/\${repo}#\`)) continue;
+      const index = (pr.issueComments || []).findIndex((comment) => comment.id === id);
+      if (index >= 0) {
+        target = { pr, index };
+        break;
+      }
+    }
+    if (!target) {
+      process.stderr.write("Issue comment not found");
+      process.exit(1);
+    }
+    if (method === "PATCH") {
+      const bodyArgIndex = args.indexOf("--raw-field");
+      const bodyArg = bodyArgIndex >= 0 ? args[bodyArgIndex + 1] || "" : "";
+      const body = bodyArg.startsWith("body=") ? bodyArg.slice(5) : "";
+      target.pr.issueComments[target.index].body = body;
+    } else {
+      target.pr.issueComments.splice(target.index, 1);
+    }
+    if (process.env.FAKE_GH_STATE_FILE) {
+      writeFileSync(process.env.FAKE_GH_STATE_FILE, JSON.stringify(state));
+    }
+    if (method === "PATCH") {
+      const jqIndex = args.indexOf("--jq");
+      output(jqIndex >= 0 && args[jqIndex + 1] === ".id"
+        ? String(id)
+        : target.pr.issueComments[target.index]);
+    }
+    process.exit(0);
+  }
+
   if (args[1] === "--paginate" && args[2] === "--slurp") {
     const endpoint = args[3];
     const match = endpoint.match(/^repos\\/([^/]+)\\/([^/]+)\\/(pulls|issues)\\/(\\d+)\\/(reviews|comments)$/);
@@ -239,10 +326,31 @@ if (args[0] === "api") {
       process.exit(0);
     }
     if (scope === "issues" && resource === "comments") {
+      blockFor(Number(process.env.FAKE_GH_ISSUE_COMMENT_LIST_DELAY_MS || 0));
       output([pr.issueComments || []]);
       process.exit(0);
     }
     process.exit(0);
+  }
+
+  const issueCommentMatch = args[1]?.match(
+    /^repos\\/([^/]+)\\/([^/]+)\\/issues\\/comments\\/(\\d+)$/
+  );
+  if (issueCommentMatch) {
+    const [, owner, repo, idText] = issueCommentMatch;
+    const id = Number(idText);
+    for (const [key, pr] of Object.entries(state.prs || {})) {
+      if (!key.startsWith(\`\${owner}/\${repo}#\`)) continue;
+      const comment = (pr.issueComments || []).find(
+        (candidate) => candidate.id === id
+      );
+      if (comment) {
+        output(comment);
+        process.exit(0);
+      }
+    }
+    process.stderr.write("Issue comment not found");
+    process.exit(1);
   }
 
   const endpoint = args[1];
@@ -263,6 +371,16 @@ if (args[0] === "api") {
     });
     process.exit(0);
   }
+  output({
+    ...pr,
+    state: pr.state || "open",
+    merged: Boolean(pr.merged),
+    head: {
+      ...(pr.head || {}),
+      sha: pr.head?.sha || pr.headRefOid || "",
+    },
+  });
+  process.exit(0);
 }
 
 if (args[0] === "pr" && args[1] === "checks") {

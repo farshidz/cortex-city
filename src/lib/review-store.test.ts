@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -122,7 +128,64 @@ test("readReviewSummaries returns an empty array when no file exists", () => {
 
 test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   const workspace = createTempWorkspace();
-  const entry = sampleReviewLiteral("https://github.com/acme/widget/pull/1");
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const pendingBody =
+    "**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n" +
+    `<!-- cortex-city-review-decision:${pendingToken} -->`;
+  const entry = {
+    ...sampleReviewLiteral("https://github.com/acme/widget/pull/1"),
+    reviewer_comment_receipts: [
+      {
+        action_token: "22222222-2222-4222-8222-222222222222",
+        comment_id: 400,
+        author_login: "me",
+        body_sha256: "a".repeat(64),
+      },
+      {
+        action_token: "22222222-2222-4222-8222-222222222222",
+        comment_id: 401,
+        author_login: "me",
+        body_sha256: "b".repeat(64),
+      },
+      {
+        action_token: "33333333-3333-4333-8333-333333333333",
+        comment_id: 402,
+        author_login: "me",
+        body_sha256: "c".repeat(64),
+      },
+      {
+        action_token: "invalid",
+        comment_id: -1,
+        author_login: "",
+        body_sha256: "bad",
+      },
+    ],
+    reviewer_comment_cancellations: [
+      {
+        action_token: "44444444-4444-4444-8444-444444444444",
+        reason: "head_changed",
+        expected_head_sha: "old-head",
+        observed_head_sha: "abc123",
+        observed_pr_state: "open",
+        body_sha256: "d".repeat(64),
+        canceled_at: "2026-05-01T00:15:00.000Z",
+      },
+      {
+        action_token: "invalid",
+        reason: "head_changed",
+        expected_head_sha: "",
+        observed_pr_state: "",
+        body_sha256: "bad",
+        canceled_at: "invalid",
+      },
+    ],
+    pending_reviewer_comment_delivery: {
+      action_token: pendingToken,
+      kind: "human_decision",
+      head_sha: "abc123",
+      body: pendingBody,
+    },
+  };
   const result = runStoreScript(
     workspace,
     `
@@ -140,6 +203,20 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   assert.equal(result.saved.source, "inbound");
   assert.equal(result.saved.review_status, "pending_summary");
   assert.equal(result.saved.review_state, "queued");
+  assert.deepEqual(
+    result.saved.reviewer_comment_receipts.map(
+      (receipt: { comment_id: number }) => receipt.comment_id
+    ),
+    [400, 402]
+  );
+  assert.deepEqual(
+    result.saved.pending_reviewer_comment_delivery,
+    entry.pending_reviewer_comment_delivery
+  );
+  assert.deepEqual(
+    result.saved.reviewer_comment_cancellations,
+    entry.reviewer_comment_cancellations.slice(0, 1)
+  );
   assert.deepEqual(result.all, [result.saved]);
   assert.deepEqual(result.fetched, result.saved);
 
@@ -501,18 +578,79 @@ test("a separate process recovers a review store lock after its owner dies", asy
   assert.equal(result.pr_url, entry.pr_url);
 });
 
-test("readReviewSummaryMap recovers gracefully from malformed JSON on disk", () => {
+test("readReviewSummaryMap restores pending actions and receipts from the durable backup", () => {
   const workspace = createTempWorkspace();
   const cortexDir = path.join(workspace, ".cortex");
-  execFileSync("mkdir", ["-p", cortexDir]);
-  // Drop a non-object payload to ensure the reader doesn't blow up.
-  execFileSync("bash", [
-    "-c",
-    `echo '[not json' > ${JSON.stringify(path.join(cortexDir, "reviews.json"))}`,
-  ]);
+  const reviewsFile = path.join(cortexDir, "reviews.json");
+  const backupFile = path.join(
+    cortexDir,
+    "backups",
+    "reviews.json.last-good"
+  );
+  const prUrl = "https://github.com/acme/widget/pull/61";
+  const token = "11111111-1111-4111-8111-111111111111";
+  const body =
+    `**🤖[Cortex City Reviewer]** **Human decision needed:** Choose A.\n\n` +
+    `<!-- cortex-city-review-decision:${token} -->`;
+  runStoreScript(
+    workspace,
+    `
+      await store.upsertReviewSummary({
+        ...${JSON.stringify(sampleReviewLiteral(prUrl))},
+        reviewer_comment_receipts: [{
+          action_token: ${JSON.stringify(token)},
+          comment_id: 610,
+          author_login: "me",
+          body_sha256: "a".repeat(64),
+        }],
+        pending_reviewer_comment_delivery: {
+          action_token: ${JSON.stringify(token)},
+          kind: "human_decision",
+          head_sha: "abc123",
+          body: ${JSON.stringify(body)},
+        },
+      });
+      console.log(JSON.stringify(true));
+    `
+  );
+  assert.equal(existsSync(backupFile), true);
+
+  writeFileSync(reviewsFile, "[not json");
   const result = runStoreScript(
     workspace,
-    "console.log(JSON.stringify(store.readReviewSummaryMap()));"
+    `console.log(JSON.stringify(store.readReviewSummaryMap()[${JSON.stringify(prUrl)}]));`
   );
-  assert.deepEqual(result, {});
+  assert.equal(result.reviewer_comment_receipts[0].comment_id, 610);
+  assert.equal(
+    result.pending_reviewer_comment_delivery.action_token,
+    token
+  );
+  const restored = JSON.parse(readFileSync(reviewsFile, "utf-8"));
+  assert.equal(
+    restored[prUrl].pending_reviewer_comment_delivery.action_token,
+    token
+  );
+});
+
+test("readReviewSummaryMap fails closed when the ledger and backup are unreadable", () => {
+  const workspace = createTempWorkspace();
+  const cortexDir = path.join(workspace, ".cortex");
+  mkdirSync(cortexDir, { recursive: true });
+  writeFileSync(path.join(cortexDir, "reviews.json"), "[not json");
+  const result = runStoreScript(
+    workspace,
+    `
+      try {
+        store.readReviewSummaryMap();
+        console.log(JSON.stringify({ threw: false }));
+      } catch (error) {
+        console.log(JSON.stringify({
+          threw: true,
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      }
+    `
+  );
+  assert.equal(result.threw, true);
+  assert.match(result.message, /JSON|Unexpected|unterminated/i);
 });

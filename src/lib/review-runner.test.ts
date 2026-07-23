@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -16,6 +17,7 @@ import {
   DEFAULT_REVIEW_PROMPT,
   isReviewSessionCompatible,
   parseReviewAgentStatus,
+  parseReviewerHumanDecisionBody,
   resolveReviewOpts,
   resolveReviewPrompt,
   spawnRuntime,
@@ -26,17 +28,21 @@ import {
   prependBinToPath,
   runTsxScript,
   writeFakeAgentBinary,
+  writeFakeGhBinary,
   writeJson,
   writeTestConfig,
 } from "./test-harness";
 import type {
   OrchestratorConfig,
+  ReviewerCommentDelivery,
+  ReviewerCommentReceipt,
   ReviewRequest,
   ReviewSummary,
 } from "./types";
 
 const REVIEW_RUNNER_MODULE_URL = moduleUrl("src/lib/review-runner.ts");
 const REVIEW_STORE_MODULE_URL = moduleUrl("src/lib/review-store.ts");
+const GITHUB_MODULE_URL = moduleUrl("src/lib/github.ts");
 
 function baseConfig(
   overrides: Partial<OrchestratorConfig> = {}
@@ -71,6 +77,55 @@ function sampleRequest(
   };
 }
 
+function approvedReview(commitId: string) {
+  return {
+    id: 91,
+    state: "APPROVED",
+    commit_id: commitId,
+    submitted_at: "2026-05-01T00:20:00.000Z",
+    user: { login: "me" },
+  };
+}
+
+function reviewerCommentBody(
+  message: string,
+  token: string,
+  kind: "human_decision" | "manual_approval" = "human_decision"
+): string {
+  const prefix =
+    kind === "human_decision"
+      ? "**🤖[Cortex City Reviewer]** **Human decision needed:**"
+      : "**🤖[Cortex City Reviewer]** **Ready for manual approval:**";
+  return `${prefix} ${message}\n\n<!-- cortex-city-review-decision:${token} -->`;
+}
+
+function reviewerDelivery(
+  token: string,
+  message: string,
+  headSha = "abc123",
+  kind: "human_decision" | "manual_approval" = "human_decision"
+): ReviewerCommentDelivery {
+  return {
+    action_token: token,
+    kind,
+    head_sha: headSha,
+    body: reviewerCommentBody(message, token, kind),
+  };
+}
+
+function reviewerReceipt(
+  delivery: ReviewerCommentDelivery,
+  commentId: number,
+  authorLogin = "me"
+): ReviewerCommentReceipt {
+  return {
+    action_token: delivery.action_token,
+    comment_id: commentId,
+    author_login: authorLogin,
+    body_sha256: createHash("sha256").update(delivery.body).digest("hex"),
+  };
+}
+
 function setupRunnerWorkspace(
   prefix: string,
   configOverrides: Partial<OrchestratorConfig> = {}
@@ -83,6 +138,7 @@ function setupRunnerWorkspace(
   });
   writeFakeAgentBinary(workspace, "claude");
   writeFakeAgentBinary(workspace, "codex");
+  writeFakeGhBinary(workspace);
   return workspace;
 }
 
@@ -253,6 +309,14 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   );
   assert.match(
     taskPrompt,
+    /every GitHub comment authored by the reviewer as immutable timeline history/i
+  );
+  assert.match(
+    taskPrompt,
+    /Never edit or delete an earlier reviewer comment/i
+  );
+  assert.match(
+    taskPrompt,
     /\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Human decision needed:\*\*/
   );
   assert.match(taskPrompt, /Task ID: task-42/);
@@ -266,21 +330,14 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
     taskPrompt,
     /GitHub does not allow an author to approve their own PR/i
   );
+  assert.match(taskPrompt, /leave a top-level PR conversation comment/i);
+  assert.match(taskPrompt, /requires an eligible non-author reviewer/i);
   assert.match(taskPrompt, /final status is `needs_human_decision`/i);
   assert.match(taskPrompt, /including task-owned and other self-authored PRs/i);
-  assert.match(
-    taskPrompt,
-    /final status is `ready_for_human_approval`.*post a new top-level PR conversation comment/is
-  );
-  assert.match(
-    taskPrompt,
-    /\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Ready for manual approval:\*\*/
-  );
-  assert.match(taskPrompt, /eligible non-author reviewer/i);
-  assert.match(taskPrompt, /gh pr comment <PR URL> --body/);
-  assert.match(taskPrompt, /do not use the review-comment surface/i);
-  assert.match(taskPrompt, /immutable timeline event/i);
-  assert.match(taskPrompt, /Never edit or delete an earlier reviewer comment/i);
+  assert.match(taskPrompt, /add a `## Human Decision` section/i);
+  assert.match(taskPrompt, /Do not post this comment yourself/i);
+  assert.match(taskPrompt, /do not invent or report a comment ID/i);
+  assert.match(taskPrompt, /Cortex City will create exactly one top-level/i);
 
   const inboundPrompt = buildReviewWrapperPrompt(config, sampleRequest());
   assert.match(inboundPrompt, /Review source: inbound pull request/);
@@ -289,7 +346,7 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.doesNotMatch(inboundPrompt, /Cortex task context/);
   assert.match(
     inboundPrompt,
-    /final status is `ready_for_human_approval`.*approve the reviewed commit on GitHub/is
+    /final status is `ready_for_human_approval`[\s\S]*approve the reviewed commit on GitHub/i
   );
   assert.match(inboundPrompt, /--raw-field commit_id=<reviewed SHA>/);
   assert.match(inboundPrompt, /Never use `gh pr review --approve`/);
@@ -297,7 +354,7 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   assert.match(inboundPrompt, /latest submitted decisive review/i);
   assert.match(inboundPrompt, /do not approve or overwrite it/i);
   assert.match(inboundPrompt, /final status is `needs_human_decision`/i);
-  assert.match(inboundPrompt, /post one GitHub PR comment/i);
+  assert.match(inboundPrompt, /Cortex City will create exactly one top-level/i);
   assert.match(inboundPrompt, /Do not submit a change-request review decision/i);
 
   const selfAuthoredPrompt = buildReviewWrapperPrompt(
@@ -314,8 +371,8 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
     /never approve it or request changes on GitHub/i
   );
   assert.match(selfAuthoredPrompt, /Do not approve this PR on GitHub/i);
-  assert.match(selfAuthoredPrompt, /Ready for manual approval/i);
-  assert.match(selfAuthoredPrompt, /eligible non-author reviewer/i);
+  assert.match(selfAuthoredPrompt, /leave a top-level PR conversation comment/i);
+  assert.match(selfAuthoredPrompt, /Do not post that handoff comment yourself/i);
   assert.match(selfAuthoredPrompt, /final status is `needs_human_decision`/i);
   assert.doesNotMatch(
     selfAuthoredPrompt,
@@ -464,6 +521,23 @@ test("parseReviewAgentStatus reads the exact agent status marker", () => {
     "needs_author_changes"
   );
   assert.equal(parseReviewAgentStatus("No marker here"), undefined);
+});
+
+test("parseReviewerHumanDecisionBody reads only the dedicated section", () => {
+  assert.equal(
+    parseReviewerHumanDecisionBody(
+      "## Agent Status\nAgent status: `needs_human_decision`\n\n## Human Decision\nChoose A or B.\n\n## Details\nInternal context."
+    ),
+    "Choose A or B."
+  );
+  assert.equal(
+    parseReviewerHumanDecisionBody("Human Decision: Choose A or B."),
+    undefined
+  );
+  assert.equal(
+    parseReviewerHumanDecisionBody("## Human Decision\n\n## Details\nEmpty."),
+    undefined
+  );
 });
 
 test("spawnRuntime retains Claude workspaces while restoring bypass mode", () => {
@@ -669,9 +743,880 @@ test("summarizePR persists Claude output as a ReviewSummary", () => {
   assert.equal(result.persisted.session_id, "claude-session-1");
 });
 
-test("spawnReviewSummary preserves retro state during summary refreshes", () => {
+test("summarizePR posts and persists an application-owned human-decision comment", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-comment-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "abc123",
+        issueComments: [],
+        nextIssueCommentId: 8123,
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-decision-session",
+        result: [
+          "## Summary",
+          "A human choice remains.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "Human decision comment ID: 999",
+          "## Human Decision",
+          "Choose A or B before merging.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest();
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.summary.agent_review_status, "needs_human_decision");
+  assert.equal(result.summary.reviewer_comment_receipts.length, 1);
+  assert.equal(result.persisted.reviewer_comment_receipts.length, 1);
+  assert.equal(result.persisted.reviewer_comment_receipts[0].comment_id, 8123);
+  assert.equal(result.persisted.reviewer_comment_receipts[0].author_login, "me");
+  assert.match(
+    result.persisted.reviewer_comment_receipts[0].body_sha256,
+    /^[0-9a-f]{64}$/
+  );
+  assert.equal(
+    result.persisted.pending_reviewer_comment_delivery,
+    undefined
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
+  assert.equal(
+    ghState.prs["acme/widget#1"].issueComments[0].user.login,
+    "me"
+  );
+  assert.match(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    /^\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Human decision needed:\*\* Choose A or B before merging\./
+  );
+  assert.match(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    /<!-- cortex-city-review-decision:[0-9a-f-]{36} -->$/
+  );
+});
+
+test("summarizePR appends a revised decision without editing the prior event", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-update-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const ghCallsFile = path.join(workspace, "gh-calls.jsonl");
+  const activeToken = "11111111-1111-4111-8111-111111111111";
+  const priorDelivery = reviewerDelivery(
+    activeToken,
+    "Choose the legacy path.",
+    "old-head"
+  );
+  const priorReceipt = reviewerReceipt(priorDelivery, 8122);
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "new-head",
+        issueComments: [
+          {
+            id: 8122,
+            body: priorDelivery.body,
+            user: { login: "me" },
+          },
+        ],
+        nextIssueCommentId: 9000,
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-decision-update-session",
+        result: [
+          "## Summary",
+          "The new head still needs a decision.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose the new implementation path.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ head_sha: "new-head" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        head_sha: "old-head",
+        summary: "The old head needs a decision.",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        reviewer_comment_receipts: ${JSON.stringify([priorReceipt])},
+      });
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_CALLS_FILE: ghCallsFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.persisted.agent_review_status, "needs_human_decision");
+  assert.deepEqual(
+    result.persisted.reviewer_comment_receipts.map(
+      (receipt: ReviewerCommentReceipt) => receipt.comment_id
+    ),
+    [8122, 9000]
+  );
+  assert.equal(
+    result.persisted.pending_reviewer_comment_delivery,
+    undefined
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  const comments = ghState.prs["acme/widget#1"].issueComments;
+  assert.equal(comments.length, 2);
+  assert.equal(comments[0].body, priorDelivery.body);
+  assert.equal(comments[1].id, 9000);
+  assert.match(comments[1].body, /Choose the new implementation path\./);
+  assert.doesNotMatch(comments[1].body, new RegExp(activeToken));
+  const calls = readFileSync(ghCallsFile, "utf-8");
+  assert.doesNotMatch(calls, /"PATCH"|"DELETE"/);
+});
+
+test("summarizePR rejects a clean inbound verdict approved at another SHA", () => {
+  const workspace = setupRunnerWorkspace("review-runner-approval-missing-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    viewerLogin: "me",
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [],
+        reviews: [approvedReview("older-head")],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-missing-approval-session",
+        result: [
+          "## Summary",
+          "No blocking issues found.",
+          "## Agent Status",
+          "Agent status: `ready_for_human_approval`",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "inbound" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.match(result.persisted.error, /reviewed commit/i);
+  assert.equal(result.persisted.agent_review_status, undefined);
+  assert.equal(result.persisted.summary_head_sha, undefined);
+  assert.equal(result.persisted.review_state, "generation_failed");
+});
+
+test("summarizePR posts a manual-approval handoff for a clean self-authored review", () => {
+  const workspace = setupRunnerWorkspace("review-runner-self-approval-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [],
+        nextIssueCommentId: 8124,
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-self-approval-session",
+        result: [
+          "## Summary",
+          "No blocking issues found.",
+          "## Agent Status",
+          "Agent status: `ready_for_human_approval`",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({
+    source: "inbound",
+    label_only: true,
+    self_authored: true,
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      const submittedIds = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      console.log(JSON.stringify({
+        summary,
+        submittedIds,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.persisted.agent_review_status, "ready_for_human_approval");
+  assert.equal(result.persisted.reviewer_comment_receipts.length, 1);
+  assert.equal(result.persisted.reviewer_comment_receipts[0].comment_id, 8124);
+  assert.equal(
+    result.persisted.pending_reviewer_comment_delivery,
+    undefined
+  );
+  assert.match(
+    result.persisted.reviewer_comment_receipts[0].action_token,
+    /^[0-9a-f-]{36}$/
+  );
+  assert.deepEqual(result.submittedIds, []);
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
+  assert.match(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    /^\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Ready for manual approval:\*\* Cortex City found no blocking issues and would approve this PR, but GitHub does not allow the PR author to approve their own pull request\. Please ask an eligible non-author reviewer to approve it, or make the appropriate manual merge or coordination decision if repository policy permits\./
+  );
+  assert.match(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    /<!-- cortex-city-review-decision:[0-9a-f-]{36} -->$/
+  );
+});
+
+test("summarizePR recovers an exact comment posted before a prior save crashed", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-reconcile-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const pendingDelivery = reviewerDelivery(
+    pendingToken,
+    "Choose A or B before merging."
+  );
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        issueComments: [
+          {
+            id: 8122,
+            body: pendingDelivery.body,
+            user: { login: "me" },
+          },
+        ],
+        nextIssueCommentId: 9000,
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-reconcile-session",
+        result: [
+          "## Summary",
+          "A human choice remains.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose A or B before merging.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "inbound" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "A previous run did not save its receipt.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_reviewer_comment_delivery: ${JSON.stringify(pendingDelivery)},
+      });
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.persisted.reviewer_comment_receipts.length, 1);
+  assert.equal(result.persisted.reviewer_comment_receipts[0].comment_id, 8122);
+  assert.equal(
+    result.persisted.reviewer_comment_receipts[0].action_token,
+    pendingToken
+  );
+  assert.equal(
+    result.persisted.pending_reviewer_comment_delivery,
+    undefined
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
+  assert.equal(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    pendingDelivery.body
+  );
+});
+
+test("summarizePR trusts a verified receipt instead of recreating a deleted event", () => {
+  const workspace = setupRunnerWorkspace("review-runner-deleted-receipt-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const ghCallsFile = path.join(workspace, "gh-calls.jsonl");
+  const token = "11111111-1111-4111-8111-111111111111";
+  const delivery = reviewerDelivery(token, "Choose A or B before merging.");
+  const receipt = reviewerReceipt(delivery, 8122);
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        issueComments: [],
+        nextIssueCommentId: 9000,
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-deleted-receipt-session",
+        result: [
+          "## Summary",
+          "A human choice remains.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose A or B before merging.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "The prior result was interrupted.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        reviewer_comment_receipts: ${JSON.stringify([receipt])},
+        pending_reviewer_comment_delivery: ${JSON.stringify(delivery)},
+      });
+      await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_CALLS_FILE: ghCallsFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(result.persisted.reviewer_comment_receipts, [receipt]);
+  assert.equal(result.persisted.pending_reviewer_comment_delivery, undefined);
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.deepEqual(ghState.prs["acme/widget#1"].issueComments, []);
+  const calls = existsSync(ghCallsFile)
+    ? readFileSync(ghCallsFile, "utf-8")
+    : "";
+  assert.doesNotMatch(calls, /"POST"|"PATCH"|"DELETE"/);
+});
+
+test("summarizePR leaves a prior decision event immutable when a later review is clean", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-remove-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const priorDelivery = reviewerDelivery(
+    pendingToken,
+    "Choose the legacy path."
+  );
+  const priorReceipt = reviewerReceipt(priorDelivery, 8122);
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [
+          {
+            id: 8122,
+            body: priorDelivery.body,
+            user: { login: "me" },
+          },
+        ],
+        reviews: [approvedReview("abc123")],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-clean-rebuild-session",
+        result: [
+          "## Summary",
+          "The rebuilt review is clean.",
+          "## Agent Status",
+          "Agent status: `ready_for_human_approval`",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "inbound" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "A previous run did not save its receipt.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        reviewer_comment_receipts: ${JSON.stringify([priorReceipt])},
+      });
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.persisted.agent_review_status, "ready_for_human_approval");
+  assert.equal(
+    result.persisted.pending_reviewer_comment_delivery,
+    undefined
+  );
+  assert.deepEqual(result.persisted.reviewer_comment_receipts, [priorReceipt]);
+  assert.equal(result.persisted.my_approval_sha, "abc123");
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
+  assert.equal(
+    ghState.prs["acme/widget#1"].issueComments[0].body,
+    priorDelivery.body
+  );
+});
+
+test("summarizePR never adopts or filters a participant's copied action marker", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-copy-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const ghCallsFile = path.join(workspace, "gh-calls.jsonl");
+  const pendingToken = "11111111-1111-4111-8111-111111111111";
+  const pendingDelivery = reviewerDelivery(
+    pendingToken,
+    "Copied participant prompt."
+  );
+  const copiedBody = pendingDelivery.body;
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [
+          { id: 8123, body: copiedBody, user: { login: "participant" } },
+        ],
+        nextIssueCommentId: 9000,
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-copy-session",
+        result: [
+          "## Summary",
+          "A human choice remains.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Copied participant prompt.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "A previous run did not save its clean rebuild.",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_reviewer_comment_delivery: ${JSON.stringify(pendingDelivery)},
+      });
+      const submittedBefore = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      const submittedAfter = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      console.log(JSON.stringify({
+        summary,
+        submittedBefore,
+        submittedAfter,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_CALLS_FILE: ghCallsFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(result.submittedBefore, [8123]);
+  assert.deepEqual(result.submittedAfter, [8123]);
+  assert.equal(
+    result.persisted.pending_reviewer_comment_delivery,
+    undefined
+  );
+  assert.equal(result.persisted.reviewer_comment_receipts.length, 1);
+  assert.equal(result.persisted.reviewer_comment_receipts[0].comment_id, 9000);
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  const comments = ghState.prs["acme/widget#1"].issueComments;
+  assert.equal(comments.length, 2);
+  assert.equal(comments[0].user.login, "participant");
+  assert.equal(comments[1].user.login, "me");
+  assert.equal(comments[0].body, comments[1].body);
+  const calls = readFileSync(ghCallsFile, "utf-8");
+  assert.doesNotMatch(calls, /"PATCH"|"DELETE"/);
+});
+
+test("summarizePR appends a distinct rebuilt decision after recovering a pending event", () => {
+  const workspace = setupRunnerWorkspace("review-runner-decision-replace-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const ghCallsFile = path.join(workspace, "gh-calls.jsonl");
+  const priorToken = "11111111-1111-4111-8111-111111111111";
+  const priorDelivery = reviewerDelivery(
+    priorToken,
+    "Choose the old implementation path.",
+    "old-head"
+  );
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "new-head",
+        issueComments: [
+          { id: 8123, body: priorDelivery.body, user: { login: "me" } },
+        ],
+        nextIssueCommentId: 9000,
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-replacement-session",
+        result: [
+          "## Summary",
+          "The new head needs a different human decision.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose the new implementation path.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({
+    source: "task",
+    task_id: "task-1",
+    head_sha: "new-head",
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        head_sha: "old-head",
+        summary: "The old head was clean.",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_reviewer_comment_delivery: ${JSON.stringify(priorDelivery)},
+      });
+      const submittedBefore = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      const submittedAfter = await getSubmittedCommentIds(${JSON.stringify(request.pr_url)});
+      console.log(JSON.stringify({
+        summary,
+        submittedBefore,
+        submittedAfter,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_CALLS_FILE: ghCallsFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(result.submittedBefore, [8123]);
+  assert.deepEqual(result.submittedAfter, []);
+  assert.equal(result.persisted.summary_head_sha, "new-head");
+  assert.equal(result.persisted.agent_review_status, "needs_human_decision");
+  assert.equal(
+    result.persisted.pending_reviewer_comment_delivery,
+    undefined
+  );
+  assert.deepEqual(
+    result.persisted.reviewer_comment_receipts.map(
+      (receipt: ReviewerCommentReceipt) => receipt.comment_id
+    ),
+    [8123, 9000]
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  const comments = ghState.prs["acme/widget#1"].issueComments;
+  assert.equal(comments[0].body, priorDelivery.body);
+  assert.equal(comments.length, 2);
+  assert.match(
+    comments[1].body,
+    /^\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Human decision needed:\*\* Choose the new implementation path\./
+  );
+  assert.doesNotMatch(comments[1].body, new RegExp(priorToken));
+  assert.match(
+    comments[1].body,
+    /<!-- cortex-city-review-decision:[0-9a-f-]{36} -->$/
+  );
+  const calls = readFileSync(ghCallsFile, "utf-8");
+  assert.doesNotMatch(calls, /"PATCH"|"DELETE"/);
+});
+
+test("summarizePR cancels an undelivered stale action before posting the current decision", () => {
+  const workspace = setupRunnerWorkspace("review-runner-stale-decision-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const ghCallsFile = path.join(workspace, "gh-calls.jsonl");
+  const priorToken = "11111111-1111-4111-8111-111111111111";
+  const priorDelivery = reviewerDelivery(
+    priorToken,
+    "Choose the stale implementation path.",
+    "old-head"
+  );
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "new-head",
+        issueComments: [],
+        nextIssueCommentId: 9000,
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-current-decision-session",
+        result: [
+          "## Summary",
+          "Only the new head was reviewed.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "Choose the current implementation path.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({
+    source: "task",
+    task_id: "task-1",
+    head_sha: "new-head",
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        head_sha: "old-head",
+        summary: "The old head was reviewed.",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_reviewer_comment_delivery: ${JSON.stringify(priorDelivery)},
+      });
+      const summary = await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        summary,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_CALLS_FILE: ghCallsFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.persisted.summary_head_sha, "new-head");
+  assert.equal(result.persisted.pending_reviewer_comment_delivery, undefined);
+  assert.equal(
+    result.persisted.reviewer_comment_cancellations[0].action_token,
+    priorToken
+  );
+  assert.equal(
+    result.persisted.reviewer_comment_cancellations[0].reason,
+    "head_changed"
+  );
+  assert.deepEqual(
+    result.persisted.reviewer_comment_receipts.map(
+      (receipt: ReviewerCommentReceipt) => receipt.comment_id
+    ),
+    [9000]
+  );
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  const comments = ghState.prs["acme/widget#1"].issueComments;
+  assert.equal(comments.length, 1);
+  assert.doesNotMatch(comments[0].body, new RegExp(priorToken));
+  assert.match(comments[0].body, /Choose the current implementation path\./);
+  const calls = readFileSync(ghCallsFile, "utf-8");
+  assert.doesNotMatch(calls, /"PATCH"|"DELETE"/);
+});
+
+test("spawnReviewSummary preserves retro and cancellation state through claim and completion", () => {
   const workspace = setupRunnerWorkspace("review-runner-retro-preserve-");
   const scenarioFile = path.join(workspace, "scenario.json");
+  const cancellation = {
+    action_token: "44444444-4444-4444-8444-444444444444",
+    reason: "head_changed",
+    expected_head_sha: "old-head",
+    observed_head_sha: "abc123",
+    observed_pr_state: "open",
+    body_sha256: "d".repeat(64),
+    canceled_at: "2026-05-01T00:15:00.000Z",
+  };
   writeJson(scenarioFile, {
     claude: {
       stdout: JSON.stringify({
@@ -679,7 +1624,7 @@ test("spawnReviewSummary preserves retro state during summary refreshes", () => 
         result: "## Summary\nUpdated.",
         is_error: false,
       }),
-      sleepMs: 100,
+      sleepMs: 2_000,
     },
   });
 
@@ -697,6 +1642,7 @@ test("spawnReviewSummary preserves retro state during summary refreshes", () => 
           generated_at: "2026-05-01T00:00:00.000Z",
           retro_status: "pending",
           retro_run_pid: 60_000,
+          reviewer_comment_cancellations: [cancellation],
         },
       },
       null,
@@ -734,11 +1680,17 @@ test("spawnReviewSummary preserves retro state during summary refreshes", () => 
 
   assert.equal(result.during.retro_status, "pending");
   assert.equal(result.during.retro_run_pid, 60_000);
+  assert.equal(typeof result.during.current_run_pid, "number");
+  assert.deepEqual(result.during.reviewer_comment_cancellations, [cancellation]);
   assert.equal(result.summary.summary, "## Summary\nUpdated.");
   assert.equal(result.persisted.retro_status, "done");
   assert.equal(result.persisted.retro_done_at, "2026-05-01T00:20:00.000Z");
   assert.equal(result.persisted.retro_run_pid, undefined);
   assert.equal(result.persisted.retro_error, undefined);
+  assert.deepEqual(
+    result.persisted.reviewer_comment_cancellations,
+    [cancellation]
+  );
 });
 
 test("spawnReviewSummary preserves review signals updated while the run is in flight", () => {
@@ -877,6 +1829,7 @@ test("spawnReviewSummary preserves a newer task target reconciled during the run
 test("spawnReviewSummary keeps a mid-flight change request over the run's verdict", () => {
   const workspace = setupRunnerWorkspace("review-runner-changes-preserve-");
   const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
   // The run finishes with a non-blocking verdict; a human change request lands
   // while it is in flight. The verdict must not bury the human's decision.
   writeJson(scenarioFile, {
@@ -888,6 +1841,16 @@ test("spawnReviewSummary keeps a mid-flight change request over the run's verdic
         is_error: false,
       }),
       sleepMs: 100,
+    },
+  });
+  writeJson(ghStateFile, {
+    viewerLogin: "me",
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [],
+        reviews: [approvedReview("abc123")],
+      },
     },
   });
 
@@ -930,6 +1893,7 @@ test("spawnReviewSummary keeps a mid-flight change request over the run's verdic
     {
       ...prependBinToPath(workspace),
       FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
     }
   );
 
@@ -1262,19 +2226,34 @@ test("summarizePR applies the configured task run timeout", () => {
   assert.equal(readdirSync(reviewRoot).length, 1);
 });
 
-test("summarizePR persists a review-specific low-disk preflight failure", () => {
+test("summarizePR preserves cancellation state on a low-disk preflight failure", () => {
   const workspace = setupRunnerWorkspace("review-runner-disk-preflight-");
   const request = sampleRequest({
     pr_url: "https://github.com/acme/widget/pull/301",
     pr_number: 301,
   });
+  const cancellation = {
+    action_token: "44444444-4444-4444-8444-444444444444",
+    reason: "pr_not_open",
+    expected_head_sha: "abc123",
+    observed_head_sha: "abc123",
+    observed_pr_state: "closed",
+    body_sha256: "e".repeat(64),
+    canceled_at: "2026-05-01T00:15:00.000Z",
+  };
   const result = runTsxScript(
     workspace,
     [
       `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
-      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
     ],
     `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "",
+        generated_at: "",
+        reviewer_comment_cancellations: ${JSON.stringify([cancellation])},
+      });
       let thrown;
       try {
         await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
@@ -1297,6 +2276,10 @@ test("summarizePR persists a review-specific low-disk preflight failure", () => 
   assert.equal(typeof result.persisted.error_at, "string");
   assert.equal(result.persisted.summary, "");
   assert.equal(result.persisted.current_run_pid, undefined);
+  assert.deepEqual(
+    result.persisted.reviewer_comment_cancellations,
+    [cancellation]
+  );
 });
 
 test("spawnRuntime terminates a running reviewer when it crosses the reserve", async () => {

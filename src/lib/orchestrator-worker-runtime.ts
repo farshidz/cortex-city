@@ -9,11 +9,14 @@ import {
   shouldStartFinalCleanup,
 } from "./final-task-cleanup";
 import {
+  deliverReviewerComment,
   getPRHeadSha,
   getPRStateHash,
   getPRStatus,
   getReviewRequestedPRs,
+  isStaleReviewerCommentDeliveryError,
   isPRMergedOrClosed,
+  reviewerCommentCancellationFromStaleError,
 } from "./github";
 import {
   buildInterruptedTaskUpdates,
@@ -33,6 +36,10 @@ import { readReviewLearnings } from "./review-learnings-store";
 import { spawnReviewRetro } from "./review-learnings-runner";
 import { resolveReviewOpts, spawnReviewSummary } from "./review-runner";
 import { removeFinalReviewWorkspace } from "./review-workspace";
+import {
+  appendReviewerCommentCancellation,
+  reviewerCommentBodySha256,
+} from "./review-comments";
 import { unlinkTask as unlinkIssueTask } from "./issue-store";
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
 import { assertSufficientDiskSpace } from "./disk-guard";
@@ -42,6 +49,8 @@ export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 export const DEAD_OWNED_PID_GRACE_MS = 10_000;
 export const FINAL_CLASSIFICATION_RETRY_MS = 15 * 60 * 1000;
 export const REVIEW_ERROR_RETRY_MS = 5 * 60 * 1000;
+const REVIEW_DECISION_ACTION_INTERRUPTED_ERROR =
+  "The reviewer comment delivery was interrupted before its result was saved.";
 
 export interface DeadOwnedPid {
   pid: number;
@@ -153,6 +162,7 @@ export interface WorkerRuntimeDeps {
   deleteReviewSummaryIf?: typeof deleteReviewSummaryIf;
   mutateReviewSummary?: typeof mutateReviewSummary;
   deleteReviewSummary: typeof deleteReviewSummary;
+  deliverReviewerComment?: typeof deliverReviewerComment;
 }
 
 export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
@@ -189,6 +199,7 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   deleteReviewSummaryIf,
   mutateReviewSummary,
   deleteReviewSummary,
+  deliverReviewerComment,
 };
 
 interface LaunchOptions {
@@ -353,6 +364,206 @@ async function launchTaskRun(
   }
 }
 
+async function recoverPendingReviewerCommentDeliveries(
+  deps: WorkerRuntimeDeps
+): Promise<void> {
+  if (!deps.deliverReviewerComment) return;
+  for (const review of Object.values(deps.readReviewSummaryMap())) {
+    const delivery = review.pending_reviewer_comment_delivery;
+    if (
+      !delivery ||
+      review.current_run_pid != null ||
+      review.current_run_id != null
+    ) {
+      continue;
+    }
+    try {
+      const existingReceipt = review.reviewer_comment_receipts?.find(
+        (candidate) =>
+          candidate.action_token === delivery.action_token &&
+          candidate.body_sha256 === reviewerCommentBodySha256(delivery.body)
+      );
+      const deliveredReceipt =
+        existingReceipt ||
+        (await deps.deliverReviewerComment(review.pr_url, delivery));
+      await mutateStoredReview(deps, review.pr_url, (current) => {
+        const pending = current?.pending_reviewer_comment_delivery;
+        if (
+          !current ||
+          current.current_run_pid != null ||
+          current.current_run_id != null ||
+          !pending ||
+          pending.action_token !== delivery.action_token ||
+          pending.body !== delivery.body
+        ) {
+          return undefined;
+        }
+        return {
+          ...current,
+          reviewer_comment_receipts: [
+            ...(current.reviewer_comment_receipts || []).filter(
+              (candidate) =>
+                candidate.action_token !== deliveredReceipt.action_token &&
+                candidate.comment_id !== deliveredReceipt.comment_id
+            ),
+            deliveredReceipt,
+          ],
+          // The delivery is complete, but the process died before saving its
+          // review result. Retain the durable action so an identical rebuild
+          // reuses it rather than posting a second event.
+          pending_reviewer_comment_delivery: pending,
+          agent_review_status: undefined,
+          error: REVIEW_DECISION_ACTION_INTERRUPTED_ERROR,
+          error_at:
+            current.error === REVIEW_DECISION_ACTION_INTERRUPTED_ERROR &&
+            current.error_at
+              ? current.error_at
+              : new Date().toISOString(),
+        };
+      });
+    } catch (error) {
+      if (isStaleReviewerCommentDeliveryError(error)) {
+        const cancellation = reviewerCommentCancellationFromStaleError(
+          delivery,
+          error
+        );
+        await mutateStoredReview(deps, review.pr_url, (current) => {
+          const pending = current?.pending_reviewer_comment_delivery;
+          if (
+            !current ||
+            current.current_run_pid != null ||
+            current.current_run_id != null ||
+            !pending ||
+            pending.action_token !== delivery.action_token ||
+            pending.body !== delivery.body
+          ) {
+            return undefined;
+          }
+          return {
+            ...current,
+            reviewer_comment_cancellations:
+              appendReviewerCommentCancellation(
+                current.reviewer_comment_cancellations,
+                cancellation
+              ),
+            pending_reviewer_comment_delivery: undefined,
+            agent_review_status: undefined,
+            error: error.message,
+            error_at: cancellation.canceled_at,
+          };
+        });
+        deps.logger.log(
+          `[worker] Canceled stale reviewer comment delivery for ${review.pr_url}: ${error.message}`
+        );
+        continue;
+      }
+      deps.logger.error(
+        `[worker] Failed to recover reviewer comment delivery for ${review.pr_url}:`,
+        error
+      );
+      await mutateStoredReview(deps, review.pr_url, (current) => {
+        if (
+          !current ||
+          current.current_run_pid != null ||
+          current.current_run_id != null ||
+          current.pending_reviewer_comment_delivery?.action_token !==
+            delivery.action_token ||
+          current.error
+        ) {
+          return undefined;
+        }
+        return {
+          ...current,
+          error: REVIEW_DECISION_ACTION_INTERRUPTED_ERROR,
+          error_at: new Date().toISOString(),
+        };
+      });
+    }
+  }
+}
+
+async function reconcileReviewRunOwnership(
+  activeReviewPids: Map<string, number>,
+  deps: WorkerRuntimeDeps
+): Promise<void> {
+  const reviewMap = deps.readReviewSummaryMap();
+  const liveReviewKeys = new Set<string>();
+  for (const review of Object.values(reviewMap)) {
+    if (!review.current_run_pid) {
+      activeReviewPids.delete(review.pr_url);
+      if (review.current_run_id != null) {
+        const cleared = await mutateStoredReview(
+          deps,
+          review.pr_url,
+          (current) => {
+            if (
+              !current ||
+              current.current_run_pid != null ||
+              current.current_run_id !== review.current_run_id
+            ) {
+              return undefined;
+            }
+            return { ...current, current_run_id: undefined };
+          }
+        );
+        if (cleared) {
+          deps.logger.log(
+            `[worker] Cleared orphaned review run ID for ${review.pr_url}`
+          );
+        }
+      }
+      continue;
+    }
+    try {
+      if (!deps.isPidRunning(review.current_run_pid)) {
+        throw new Error("process not running");
+      }
+      activeReviewPids.set(review.pr_url, review.current_run_pid);
+      liveReviewKeys.add(review.pr_url);
+    } catch {
+      const cleared = deps.clearReviewRunIfMatching
+        ? await deps.clearReviewRunIfMatching(
+            review.pr_url,
+            review.current_run_pid,
+            review.current_run_id
+          )
+        : await deps.upsertReviewSummary({
+            ...review,
+            current_run_pid: undefined,
+            current_run_id: undefined,
+          });
+      if (cleared) {
+        deps.logger.log(
+          `[worker] Cleared orphaned review PID ${review.current_run_pid} for ${review.pr_url}`
+        );
+        activeReviewPids.delete(review.pr_url);
+      } else {
+        // Completion or a newer run won the store race. Re-read instead of
+        // clearing that newer owner's state from the worker-local map.
+        const latest = deps.readReviewSummaryMap()[review.pr_url];
+        let latestIsLive = false;
+        try {
+          latestIsLive = Boolean(
+            latest?.current_run_pid &&
+              deps.isPidRunning(latest.current_run_pid)
+          );
+        } catch {}
+        if (latest?.current_run_pid && latestIsLive) {
+          activeReviewPids.set(review.pr_url, latest.current_run_pid);
+          liveReviewKeys.add(review.pr_url);
+        } else {
+          activeReviewPids.delete(review.pr_url);
+        }
+      }
+    }
+  }
+  for (const prUrl of [...activeReviewPids.keys()]) {
+    if (!liveReviewKeys.has(prUrl)) {
+      activeReviewPids.delete(prUrl);
+    }
+  }
+}
+
 export async function pollOnce(
   activePids = new Map<string, number>(),
   deps: WorkerRuntimeDeps = defaultWorkerRuntimeDeps,
@@ -363,6 +574,10 @@ export async function pollOnce(
   let tasks = deps.readTasks();
   const config = deps.readConfig();
   const pollStartedAt = Date.now();
+  deps.logger.log("[worker] Poll phase: reconcile review pids");
+  await reconcileReviewRunOwnership(activeReviewPids, deps);
+  deps.logger.log("[worker] Poll phase: recover reviewer comment deliveries");
+  await recoverPendingReviewerCommentDeliveries(deps);
   const initialTaskUpdatedAt = new Map(
     tasks.map((task) => [task.id, new Date(task.updated_at).getTime()])
   );
@@ -871,84 +1086,6 @@ async function runReviewPhases(
 ): Promise<void> {
   const learningEnabled = config.review_learning_enabled !== false;
   const liveTaskPrUrls = new Set(liveTaskOwners.keys());
-
-  deps.logger.log("[worker] Poll phase: reconcile review pids");
-  const reviewMap = deps.readReviewSummaryMap();
-  const liveReviewKeys = new Set<string>();
-  for (const review of Object.values(reviewMap)) {
-    if (!review.current_run_pid) {
-      activeReviewPids.delete(review.pr_url);
-      if (review.current_run_id != null) {
-        const cleared = await mutateStoredReview(
-          deps,
-          review.pr_url,
-          (current) => {
-            if (
-              !current ||
-              current.current_run_pid != null ||
-              current.current_run_id !== review.current_run_id
-            ) {
-              return undefined;
-            }
-            return { ...current, current_run_id: undefined };
-          }
-        );
-        if (cleared) {
-          deps.logger.log(
-            `[worker] Cleared orphaned review run ID for ${review.pr_url}`
-          );
-        }
-      }
-      continue;
-    }
-    try {
-      if (!deps.isPidRunning(review.current_run_pid)) {
-        throw new Error("process not running");
-      }
-      activeReviewPids.set(review.pr_url, review.current_run_pid);
-      liveReviewKeys.add(review.pr_url);
-    } catch {
-      const cleared = deps.clearReviewRunIfMatching
-        ? await deps.clearReviewRunIfMatching(
-            review.pr_url,
-            review.current_run_pid,
-            review.current_run_id
-          )
-        : await deps.upsertReviewSummary({
-            ...review,
-            current_run_pid: undefined,
-            current_run_id: undefined,
-          });
-      if (cleared) {
-        deps.logger.log(
-          `[worker] Cleared orphaned review PID ${review.current_run_pid} for ${review.pr_url}`
-        );
-        activeReviewPids.delete(review.pr_url);
-      } else {
-        // Completion or a newer run won the store race. Re-read instead of
-        // clearing that newer owner's state from the worker-local map.
-        const latest = deps.readReviewSummaryMap()[review.pr_url];
-        let latestIsLive = false;
-        try {
-          latestIsLive = Boolean(
-            latest?.current_run_pid &&
-              deps.isPidRunning(latest.current_run_pid)
-          );
-        } catch {}
-        if (latest?.current_run_pid && latestIsLive) {
-          activeReviewPids.set(review.pr_url, latest.current_run_pid);
-          liveReviewKeys.add(review.pr_url);
-        } else {
-          activeReviewPids.delete(review.pr_url);
-        }
-      }
-    }
-  }
-  for (const prUrl of [...activeReviewPids.keys()]) {
-    if (!liveReviewKeys.has(prUrl)) {
-      activeReviewPids.delete(prUrl);
-    }
-  }
 
   deps.logger.log("[worker] Poll phase: scan review requests");
   let inboundReviewRequests: ReviewRequest[] = [];
