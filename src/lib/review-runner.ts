@@ -157,7 +157,7 @@ const REVIEW_GITHUB_TOOL_INSTRUCTION =
   "Use the `gh` CLI for GitHub inspection and comments. The working directory persists for this PR, so reuse any existing checkout or artifacts.";
 
 const REVIEWER_SELF_APPROVAL_COMMENT_BODY =
-  "Cortex City found no blocking issues and would approve this PR, but GitHub does not allow an author to approve their own pull request. Please review and approve it manually if you agree.";
+  "Cortex City found no blocking issues and would approve this PR, but GitHub does not allow the PR author to approve their own pull request. Please ask an eligible non-author reviewer to approve it, or make the appropriate manual merge or coordination decision if repository policy permits.";
 
 export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request with Cortex City's unified review agent.
 
@@ -506,7 +506,8 @@ export function buildReviewWrapperPrompt(
           "and GitHub does not allow an author to approve their own PR.",
           "If your final status is `ready_for_human_approval`, Cortex City will",
           "leave a top-level PR conversation comment explaining that the review is",
-          "clean but requires manual approval. Do not post that handoff comment yourself.",
+          "clean but requires an eligible non-author reviewer or another permitted",
+          "manual coordination step. Do not post that handoff comment yourself.",
         ].join(" "),
     [
       "- If your final status is `needs_human_decision`, add a `## Human Decision`",

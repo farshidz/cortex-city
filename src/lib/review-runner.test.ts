@@ -271,7 +271,7 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
     /GitHub does not allow an author to approve their own PR/i
   );
   assert.match(taskPrompt, /leave a top-level PR conversation comment/i);
-  assert.match(taskPrompt, /clean but requires manual approval/i);
+  assert.match(taskPrompt, /requires an eligible non-author reviewer/i);
   assert.match(taskPrompt, /final status is `needs_human_decision`/i);
   assert.match(taskPrompt, /including task-owned and other self-authored PRs/i);
   assert.match(taskPrompt, /add a `## Human Decision` section/i);
@@ -802,7 +802,7 @@ test("summarizePR posts a manual-approval handoff for a clean self-authored revi
   assert.equal(ghState.prs["acme/widget#1"].issueComments.length, 1);
   assert.match(
     ghState.prs["acme/widget#1"].issueComments[0].body,
-    /^\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Ready for manual approval:\*\* Cortex City found no blocking issues and would approve this PR, but GitHub does not allow an author to approve their own pull request\./
+    /^\*\*🤖\[Cortex City Reviewer\]\*\* \*\*Ready for manual approval:\*\* Cortex City found no blocking issues and would approve this PR, but GitHub does not allow the PR author to approve their own pull request\. Please ask an eligible non-author reviewer to approve it, or make the appropriate manual merge or coordination decision if repository policy permits\./
   );
   assert.match(
     ghState.prs["acme/widget#1"].issueComments[0].body,

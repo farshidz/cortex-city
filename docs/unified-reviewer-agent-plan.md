@@ -99,7 +99,8 @@ The unified reviewer owns review execution, summaries, verdicts, follow-ups, err
   keep the manual approval/request-changes actions available as fallbacks.
 - Never auto-approve self-authored or task-owned PRs. When one is otherwise
   ready to approve, post a signed handoff comment explaining that the review is
-  clean but the author must approve it manually.
+  clean and asking for an eligible non-author reviewer, or another manual merge
+  or coordination decision when repository policy permits.
 - Update product documentation to describe one reviewer, its two sources, its learning loop, and the global runtime/model/effort settings.
 
 ## Validation and Rollout
