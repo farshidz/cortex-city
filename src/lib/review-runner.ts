@@ -481,8 +481,10 @@ export function buildReviewWrapperPrompt(
     [
       "- Keep required changes within the PR's stated goal. Establish that goal from",
       "the PR description and the supplied task details for task-owned PRs. A required",
-      "finding must identify a defect, regression, safety issue, or missing behavior",
-      "that must be fixed for this PR to deliver its stated goal correctly.",
+      "finding must either be necessary for this PR to deliver that goal correctly",
+      "or identify a defect, regression, or safety issue introduced by the current",
+      "changes. PR-introduced problems remain required even when they affect behavior",
+      "outside the stated goal.",
     ].join(" "),
     [
       "- Do not require substantial unrelated redesigns, generalized infrastructure,",

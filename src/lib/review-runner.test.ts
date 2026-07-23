@@ -346,7 +346,11 @@ test("buildReviewWrapperPrompt keeps required feedback inside the PR scope", () 
   assert.match(prompt, /PR description.*supplied task details/i);
   assert.match(
     prompt,
-    /defect, regression, safety issue, or missing behavior/i
+    /defect, regression, or safety issue introduced by the current changes/i
+  );
+  assert.match(
+    prompt,
+    /PR-introduced problems remain required.*outside the stated goal/i
   );
   assert.match(prompt, /Do not require substantial unrelated redesigns/i);
   assert.match(prompt, /Prefer the smallest safe fix/i);
