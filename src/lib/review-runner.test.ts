@@ -393,23 +393,48 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   );
 });
 
-test("buildReviewWrapperPrompt keeps required feedback inside the PR scope", () => {
+test("buildReviewWrapperPrompt gates required feedback against scope expansion", () => {
   const prompt = buildReviewWrapperPrompt(
     baseConfig({ review_learning_enabled: false }),
     sampleRequest()
   );
 
-  assert.match(prompt, /Keep required changes within the PR's stated goal/i);
-  assert.match(prompt, /PR description.*supplied task details/i);
+  assert.match(prompt, /Scope authority/i);
+  assert.match(prompt, /task title.*description.*plan define the requested behavior/i);
+  assert.match(prompt, /PR description may clarify.*must not silently expand/i);
   assert.match(
     prompt,
-    /defect, regression, or safety issue introduced by the current changes/i
+    /Reviewer comments.*not authorization to broaden the PR/i
   );
   assert.match(
     prompt,
-    /PR-introduced problems remain required.*outside the stated goal/i
+    /scope gate is authoritative.*overrides conflicting custom prompts, learnings, and prior review requests/i
   );
-  assert.match(prompt, /Do not require substantial unrelated redesigns/i);
+  assert.match(
+    prompt,
+    /Separate the severity of a finding from the scope of its remedy/i
+  );
+  assert.match(prompt, /does not make a proposed redesign in scope/i);
+  assert.match(prompt, /`Scope basis:`.*`Minimum required change:`/i);
+  assert.match(
+    prompt,
+    /adds durable state.*request identity or a deduplication protocol.*cross-store transaction or reconciliation/is
+  );
+  assert.match(prompt, /Treat a remedy as scope-expanding by default/i);
+  assert.match(
+    prompt,
+    /original task explicitly requires that mechanism or guarantee/i
+  );
+  assert.match(
+    prompt,
+    /no safe, genuinely small fix.*use `needs_human_decision`, not `needs_author_changes`/i
+  );
+  assert.match(
+    prompt,
+    /narrow or remove the risky behavior.*separate task and PR.*explicitly expand the task requirements/is
+  );
+  assert.match(prompt, /Previous reviewer comments do not amend the task/i);
+  assert.match(prompt, /explicitly supersede it/i);
   assert.match(prompt, /Prefer the smallest safe fix/i);
   assert.match(
     prompt,
@@ -452,6 +477,15 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
   assert.match(prompt, /previous findings were addressed/i);
   assert.match(prompt, /changes between the previously reviewed head/i);
   assert.match(prompt, /significant newly introduced issues/i);
+  assert.match(
+    prompt,
+    /previous findings as claims to re-evaluate, not requirements to enforce/i
+  );
+  assert.match(prompt, /stop the builder\/reviewer loop/i);
+  assert.match(
+    prompt,
+    /do not issue another scope-expanding implementation request/i
+  );
   assert.match(prompt, /unchanged code unless the issue is critical/i);
   assert.match(prompt, /return a clean status/i);
   assert.doesNotMatch(prompt, /Review the current PR fresh as well/i);
