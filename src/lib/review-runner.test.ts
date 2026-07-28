@@ -393,24 +393,92 @@ test("buildReviewWrapperPrompt applies source-specific policy and task context",
   );
 });
 
-test("buildReviewWrapperPrompt keeps required feedback inside the PR scope", () => {
+test("buildReviewWrapperPrompt uses source-specific scope authority", () => {
+  const config = baseConfig({ review_learning_enabled: false });
+  const inboundPrompt = buildReviewWrapperPrompt(config, sampleRequest());
+  const taskPrompt = buildReviewWrapperPrompt(
+    config,
+    sampleRequest({
+      source: "task",
+      task_id: "task-42",
+      task_title: "Keep the change focused",
+      task_description: "Implement only the requested behavior.",
+      task_plan: "Make the smallest safe change.",
+    })
+  );
+
+  assert.match(inboundPrompt, /Scope authority/i);
+  assert.match(inboundPrompt, /PR's stated goal.*repository's existing contracts/i);
+  assert.doesNotMatch(
+    inboundPrompt,
+    /supplied Cortex task title|original task|task requirements|the builder/i
+  );
+
+  assert.match(taskPrompt, /Scope authority/i);
+  assert.match(taskPrompt, /supplied Cortex task title, description, and plan/i);
+  assert.match(taskPrompt, /<task_title>\s*Keep the change focused\s*<\/task_title>/i);
+
+  for (const prompt of [inboundPrompt, taskPrompt]) {
+    assert.match(prompt, /severity separately from the scope of its remedy/i);
+    assert.match(prompt, /Size and locality are the test, not the topic/i);
+    assert.match(
+      prompt,
+      /`needs_human_decision`, not `needs_author_changes`/i
+    );
+    assert.match(prompt, /Earlier reviewer comments are not requirements/i);
+    assert.match(
+      prompt,
+      /\*\*Separate follow-up suggested \(non-blocking\):\*\*/
+    );
+    assert.match(
+      prompt,
+      /Do not ask for that work to be implemented in the current PR/i
+    );
+  }
+});
+
+test("buildReviewWrapperPrompt routes blocking scope calls to a human", () => {
   const prompt = buildReviewWrapperPrompt(
     baseConfig({ review_learning_enabled: false }),
     sampleRequest()
   );
 
-  assert.match(prompt, /Keep required changes within the PR's stated goal/i);
-  assert.match(prompt, /PR description.*supplied task details/i);
   assert.match(
     prompt,
-    /defect, regression, or safety issue introduced by the current changes/i
+    /needs_human_decision.*blocking issue whose smallest correct fix would materially expand the PR/i
   );
   assert.match(
     prompt,
-    /PR-introduced problems remain required.*outside the stated goal/i
+    /needs_human_decision`, not `needs_author_changes`/i
   );
-  assert.match(prompt, /Do not require substantial unrelated redesigns/i);
-  assert.match(prompt, /Prefer the smallest safe fix/i);
+  assert.match(prompt, /points or blocking issue.*decision the human needs to make/i);
+});
+
+test("buildReviewWrapperPrompt stays within its protocol size budget", () => {
+  const config = baseConfig({ review_learning_enabled: false });
+  const wordCount = (value: string) => value.trim().split(/\s+/).length;
+
+  for (const request of [
+    sampleRequest(),
+    sampleRequest({
+      source: "task",
+      task_id: "task-42",
+      task_title: "Keep the change focused",
+    }),
+  ]) {
+    assert.ok(
+      wordCount(buildReviewWrapperPrompt(config, request)) < 1_100,
+      "merge or shorten existing protocol rules before raising the size budget"
+    );
+  }
+});
+
+test("buildReviewWrapperPrompt keeps broader improvements non-blocking", () => {
+  const prompt = buildReviewWrapperPrompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest()
+  );
+
   assert.match(
     prompt,
     /\*\*Separate follow-up suggested \(non-blocking\):\*\*/
@@ -452,6 +520,7 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
   assert.match(prompt, /previous findings were addressed/i);
   assert.match(prompt, /changes between the previously reviewed head/i);
   assert.match(prompt, /significant newly introduced issues/i);
+  assert.match(prompt, /Earlier reviewer comments are not requirements/i);
   assert.match(prompt, /unchanged code unless the issue is critical/i);
   assert.match(prompt, /return a clean status/i);
   assert.doesNotMatch(prompt, /Review the current PR fresh as well/i);

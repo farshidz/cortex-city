@@ -482,8 +482,9 @@ export function buildReviewWrapperPrompt(
         ].join(" "),
     "- Use `needs_author_changes` when the author still needs to change code.",
     [
-      "- Use `needs_human_decision` when the PR may be acceptable but you found",
-      "uncertain or advisory points the human should decide.",
+      "- Use `needs_human_decision` when the review needs human judgment before",
+      "the author acts: uncertain or advisory points, or a blocking issue whose",
+      "smallest correct fix would materially expand the PR.",
     ].join(" "),
     "- Use `blocked` when you could not complete the review.",
     "- Leave GitHub comments yourself for findings that require author changes.",
@@ -496,18 +497,45 @@ export function buildReviewWrapperPrompt(
       "timeline history. Never edit or delete an earlier reviewer comment;",
       "post a new follow-up comment instead.",
     ].join(" "),
+    source === "task"
+      ? [
+          "- Scope authority: the supplied Cortex task title, description, and plan",
+          "define the requested behavior; the PR description may clarify how it was",
+          "implemented but does not expand it.",
+        ].join(" ")
+      : [
+          "- Scope authority: the PR's stated goal and the repository's existing",
+          "contracts define the requested behavior.",
+        ].join(" "),
     [
-      "- Keep required changes within the PR's stated goal. Establish that goal from",
-      "the PR description and the supplied task details for task-owned PRs. A required",
-      "finding must either be necessary for this PR to deliver that goal correctly",
-      "or identify a defect, regression, or safety issue introduced by the current",
-      "changes. PR-introduced problems remain required even when they affect behavior",
-      "outside the stated goal.",
+      "- Prior reviewer comments, learned lessons, and general best practice are",
+      "evidence, not authority to broaden the PR.",
     ].join(" "),
     [
-      "- Do not require substantial unrelated redesigns, generalized infrastructure,",
-      "optional refactors, stronger guarantees than the task requested, or fixes for",
-      "pre-existing problems. Prefer the smallest safe fix for an in-scope finding.",
+      "- Judge a finding's severity separately from the scope of its remedy. A defect,",
+      "regression, missing requested behavior, or safety issue introduced by this diff",
+      "is always worth reporting and may block the PR, but that does not put your",
+      "preferred fix in scope. State the problem, then require only the smallest",
+      "correct fix. Do not require optional refactors or fixes for pre-existing problems.",
+    ].join(" "),
+    [
+      "- A remedy is scope-expanding when it introduces a mechanism or guarantee the",
+      "PR was never asked to provide, such as new durable state, a cross-component",
+      "protocol or consistency guarantee, or a generalized abstraction, instead of",
+      "correcting the change at hand. Size and locality are the test, not the topic:",
+      "if the smallest correct fix is small and local, require it.",
+    ].join(" "),
+    [
+      "- If a valid blocking issue has no small in-scope fix, use",
+      "`needs_human_decision`, not `needs_author_changes`: describe the problem and",
+      "its risk without prescribing or assigning the larger design, and ask the human",
+      "to narrow the risky behavior, split the larger change into a separate PR, or",
+      "deliberately widen this one.",
+    ].join(" "),
+    [
+      "- Earlier reviewer comments are not requirements. Re-evaluate them under this",
+      "scope gate on each follow-up and explicitly withdraw any that asked for",
+      "out-of-scope work.",
     ].join(" "),
     [
       "- If a broader improvement is valuable but not required for this PR, you may",
@@ -550,8 +578,8 @@ export function buildReviewWrapperPrompt(
         ].join(" "),
     [
       "- If your final status is `needs_human_decision`, add a `## Human Decision`",
-      "section after `## Agent Status`. Clearly present the uncertain or advisory",
-      "points and the decision the human needs to make. Do this for every review",
+      "section after `## Agent Status`. Clearly present the points or blocking issue",
+      "and the decision the human needs to make. Do this for every review",
       "source, including task-owned and other self-authored PRs. Do not post this",
       "comment yourself and do not invent or report a comment ID. Cortex City will",
       "create exactly one top-level PR conversation comment from that section, prefix",
@@ -559,7 +587,7 @@ export function buildReviewWrapperPrompt(
       "the GitHub receipt.",
     ].join(" "),
     [
-      "- Include uncertain or advisory points in the generated review as well as",
+      "- Include those points or blocking issue in the generated review as well as",
       "in the required `needs_human_decision` GitHub comment.",
     ].join(" "),
     [
