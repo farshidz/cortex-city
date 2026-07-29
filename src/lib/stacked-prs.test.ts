@@ -9,6 +9,7 @@ import {
   isStackedTask,
   openStackedPRs,
   reconcileStackedPRs,
+  stackEntriesOnClosedBase,
   stackEntriesRequiringRestack,
   stackRequiresRestack,
   stackTerminalStatus,
@@ -75,7 +76,7 @@ test("aggregateStackPRStatus reports the worst open-entry status", () => {
   );
 });
 
-test("stack restack detection keys off terminal base branches", () => {
+test("stack restack detection keys off merged base branches", () => {
   const healthy = [
     entry({ branch_name: "b1" }),
     entry({
@@ -114,6 +115,50 @@ test("stack restack detection keys off terminal base branches", () => {
     }),
   ];
   assert.equal(stackRequiresRestack(retargeted), false);
+});
+
+test("restacking a lower branch pulls every open entry above it into the set", () => {
+  // b1 <- b2 <- b3: merging PR 1 rewrites b2, which invalidates b3's merge
+  // base even though b3's own base (b2) is still open.
+  const threeEntryStack = [
+    entry({ branch_name: "b1", state: "merged" }),
+    entry({
+      position: 2,
+      pr_url: "https://github.com/acme/widget/pull/2",
+      branch_name: "b2",
+      base_branch: "b1",
+    }),
+    entry({
+      position: 3,
+      pr_url: "https://github.com/acme/widget/pull/3",
+      branch_name: "b3",
+      base_branch: "b2",
+    }),
+  ];
+  assert.deepEqual(
+    stackEntriesRequiringRestack(threeEntryStack).map((e) => e.position),
+    [2, 3]
+  );
+});
+
+test("a closed unmerged base is a broken stack, not a restack", () => {
+  const closedBelow = [
+    entry({ branch_name: "b1", state: "closed" }),
+    entry({
+      position: 2,
+      pr_url: "https://github.com/acme/widget/pull/2",
+      branch_name: "b2",
+      base_branch: "b1",
+    }),
+  ];
+  // The squash-merge restack protocol must never apply: the closed PR's
+  // commits are not in any base branch, so dropping them would delete work.
+  assert.equal(stackRequiresRestack(closedBelow), false);
+  assert.deepEqual(
+    stackEntriesOnClosedBase(closedBelow).map((e) => e.position),
+    [2]
+  );
+  assert.deepEqual(stackEntriesOnClosedBase([entry()]), []);
 });
 
 test("stackTerminalStatus distinguishes fully merged from abandoned stacks", () => {
@@ -232,33 +277,74 @@ test("reconcileStackedPRs keeps the tracked stack when the report omits it", () 
   assert.match(result.warnings[0], /omitted stacked_prs/);
 });
 
-test("reconcileStackedPRs skips duplicate and invalid reported entries", () => {
-  const result = reconcileStackedPRs(undefined, [
-    {
-      position: 1,
-      pr_url: "https://github.com/acme/widget/pull/1",
-      branch_name: "b1",
-      base_branch: "main",
-      scope: "Slice one",
-    },
-    {
-      position: 2,
-      pr_url: "https://github.com/acme/widget/pull/1",
-      branch_name: "b1-dup",
-      base_branch: "main",
-      scope: "Duplicate",
-    },
+test("reconcileStackedPRs rejects malformed reports atomically", () => {
+  const validEntry = {
+    position: 1,
+    pr_url: "https://github.com/acme/widget/pull/1",
+    branch_name: "b1",
+    base_branch: "main",
+    scope: "Slice one",
+  };
+
+  // A blank entry poisons the whole report: accepting only the valid part
+  // would silently shrink the stack and orphan the real PR.
+  const blankUrl = reconcileStackedPRs(undefined, [
+    validEntry,
+    { position: 2, pr_url: "  ", branch_name: "b2", base_branch: "b1", scope: "" },
+  ]);
+  assert.ok(blankUrl);
+  assert.equal(blankUrl.stack.length, 0);
+  assert.equal(blankUrl.warnings.length, 1);
+  assert.match(blankUrl.warnings[0], /Rejected stacked_prs report/);
+
+  // Non-canonical PR URLs are rejected.
+  const badUrl = reconcileStackedPRs(undefined, [
+    { ...validEntry, pr_url: "https://github.com/acme/widget/pulls" },
+  ]);
+  assert.ok(badUrl);
+  assert.equal(badUrl.stack.length, 0);
+  assert.match(badUrl.warnings[0], /not a canonical GitHub pull request URL/);
+
+  // Duplicate URLs and duplicate or non-contiguous positions are rejected.
+  const duplicateUrl = reconcileStackedPRs(undefined, [
+    validEntry,
+    { ...validEntry, position: 2, branch_name: "b1-dup" },
+  ]);
+  assert.ok(duplicateUrl);
+  assert.equal(duplicateUrl.stack.length, 0);
+  assert.match(duplicateUrl.warnings[0], /listed twice/);
+
+  const gappedPositions = reconcileStackedPRs(undefined, [
+    validEntry,
     {
       position: 3,
-      pr_url: "  ",
+      pr_url: "https://github.com/acme/widget/pull/3",
       branch_name: "b3",
-      base_branch: "b2",
-      scope: "Invalid",
+      base_branch: "b1",
+      scope: "Slice three",
     },
   ]);
-  assert.ok(result);
-  assert.equal(result.stack.length, 1);
-  assert.equal(result.stack[0].branch_name, "b1");
-  assert.equal(result.warnings.length, 1);
-  assert.match(result.warnings[0], /twice/);
+  assert.ok(gappedPositions);
+  assert.equal(gappedPositions.stack.length, 0);
+  assert.match(gappedPositions.warnings[0], /not contiguous/);
+
+  // With a tracked stack, rejection preserves it unchanged.
+  const tracked: TaskStackedPR[] = [
+    entry({ state: "merged" }),
+    entry({
+      position: 2,
+      pr_url: "https://github.com/acme/widget/pull/2",
+      branch_name: "b2",
+      base_branch: "b1",
+      last_review_gh_state: "hash-2",
+    }),
+  ];
+  const preserved = reconcileStackedPRs(tracked, [
+    { position: 1, pr_url: "not-a-url", branch_name: "b2", base_branch: "main", scope: "" },
+  ]);
+  assert.ok(preserved);
+  assert.equal(preserved.stack.length, 2);
+  assert.equal(preserved.stack[0].state, "merged");
+  assert.equal(preserved.stack[1].last_review_gh_state, "hash-2");
+  assert.match(preserved.warnings[0], /keeping the tracked stack unchanged/);
 });

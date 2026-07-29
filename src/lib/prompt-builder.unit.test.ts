@@ -171,6 +171,73 @@ test("buildStackSection lists entries bottom-first with stack rules", () => {
   assert.doesNotMatch(section, /Restack required/);
 });
 
+test("buildStackSection routes closed unmerged bases to a human decision, not a restack", () => {
+  const section = buildStackSection(
+    stackedTask([
+      {
+        position: 1,
+        pr_url: "https://github.com/acme/widget/pull/1",
+        branch_name: "b1",
+        base_branch: "main",
+        scope: "Slice one",
+        state: "closed",
+      },
+      {
+        position: 2,
+        pr_url: "https://github.com/acme/widget/pull/2",
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        state: "open",
+      },
+    ]),
+    "main"
+  );
+  assert.doesNotMatch(section, /### Restack required/);
+  assert.match(section, /### Broken stack — human decision required/);
+  assert.match(section, /CLOSED WITHOUT MERGING/);
+  assert.match(section, /Do NOT rebase, retarget, or force-push/);
+  assert.match(section, /Report status `blocked`/);
+});
+
+test("buildStackSection restacks the whole open suffix above a merged entry", () => {
+  const section = buildStackSection(
+    stackedTask([
+      {
+        position: 1,
+        pr_url: "https://github.com/acme/widget/pull/1",
+        branch_name: "b1",
+        base_branch: "main",
+        scope: "Slice one",
+        state: "merged",
+      },
+      {
+        position: 2,
+        pr_url: "https://github.com/acme/widget/pull/2",
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        state: "open",
+      },
+      {
+        position: 3,
+        pr_url: "https://github.com/acme/widget/pull/3",
+        branch_name: "b3",
+        base_branch: "b2",
+        scope: "Slice three",
+        state: "open",
+      },
+    ]),
+    "main"
+  );
+  assert.match(section, /### Restack required/);
+  // PR 3 is included even though its own base (b2) is still open.
+  assert.match(section, /PR 2 \(https:\/\/github\.com\/acme\/widget\/pull\/2\)/);
+  assert.match(section, /PR 3 \(https:\/\/github\.com\/acme\/widget\/pull\/3\)/);
+  assert.match(section, /record the current tip of every branch/);
+  assert.match(section, /Never restack only the lowest one/);
+});
+
 test("buildStackSection flags restack when an open entry bases on a merged branch", () => {
   const section = buildStackSection(
     stackedTask([

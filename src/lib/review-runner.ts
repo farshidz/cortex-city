@@ -326,6 +326,24 @@ function effectiveReviewRequest(
   };
 }
 
+// The single identity check for "is this still the same review?". Every field
+// that changes the reviewer's policy or completeness boundary must be listed
+// here — including the stack-slice fields — and every claim, pre-action, and
+// final-save comparison must go through this helper so a context change at an
+// unchanged HEAD can never publish or persist a stale result.
+function sameReviewContext(a: ReviewRequest, b: ReviewRequest): boolean {
+  return (
+    reviewSourceOf(a) === reviewSourceOf(b) &&
+    a.task_id === b.task_id &&
+    a.task_title === b.task_title &&
+    a.task_description === b.task_description &&
+    a.task_plan === b.task_plan &&
+    a.task_stack_position === b.task_stack_position &&
+    a.task_stack_size === b.task_stack_size &&
+    a.task_pr_scope === b.task_pr_scope
+  );
+}
+
 function reviewRequestSnapshot(review: ReviewRequest): ReviewRequest {
   return {
     source: review.source,
@@ -1144,12 +1162,6 @@ export async function spawnReviewSummary(
     );
     assertReviewRunLockHealthy(runLock);
     const claimed = await mutateReviewSummary(target.pr_url, (current) => {
-      const sameReviewContext = (a: ReviewRequest, b: ReviewRequest) =>
-        reviewSourceOf(a) === reviewSourceOf(b) &&
-        a.task_id === b.task_id &&
-        a.task_title === b.task_title &&
-        a.task_description === b.task_description &&
-        a.task_plan === b.task_plan;
       const currentMatchesPreparedState = Boolean(
         current &&
           cachedBefore &&
@@ -1323,11 +1335,7 @@ export async function spawnReviewSummary(
       );
       const actionTargetChanged =
         actionTarget.head_sha !== target.head_sha ||
-        reviewSourceOf(actionTarget) !== reviewSourceOf(target) ||
-        actionTarget.task_id !== target.task_id ||
-        actionTarget.task_title !== target.task_title ||
-        actionTarget.task_description !== target.task_description ||
-        actionTarget.task_plan !== target.task_plan;
+        !sameReviewContext(actionTarget, target);
       const shouldVerifyAutomatedApproval =
         runtimeSuccessful &&
         !actionTargetChanged &&
@@ -1592,12 +1600,10 @@ export async function spawnReviewSummary(
         latestBeforeSave
       );
       const headMovedDuringRun = latestTarget.head_sha !== target.head_sha;
-      const reviewContextChangedDuringRun =
-        reviewSourceOf(latestTarget) !== reviewSourceOf(target) ||
-        latestTarget.task_id !== target.task_id ||
-        latestTarget.task_title !== target.task_title ||
-        latestTarget.task_description !== target.task_description ||
-        latestTarget.task_plan !== target.task_plan;
+      const reviewContextChangedDuringRun = !sameReviewContext(
+        latestTarget,
+        target
+      );
       return {
         // Reconciliation may discover a new HEAD or change review context while
         // the agent is running. Keep the latest identity; a changed context is

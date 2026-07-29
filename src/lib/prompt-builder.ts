@@ -3,7 +3,11 @@ import path from "path";
 import type { Task, AgentConfig, OrchestratorConfig, TaskStackedPR } from "./types";
 import { readConfig, readTasks } from "./store";
 import { resolvePromptPath } from "./agent-files";
-import { isStackedTask, stackEntriesRequiringRestack } from "./stacked-prs";
+import {
+  isStackedTask,
+  stackEntriesOnClosedBase,
+  stackEntriesRequiringRestack,
+} from "./stacked-prs";
 
 const PROMPTS_DIR = path.join(process.cwd(), "prompts");
 
@@ -198,15 +202,29 @@ function buildStackSection(task: Task, baseBranch: string): string {
     lines.push(
       "",
       "### Restack required",
-      `These open PRs still target the branch of a merged or closed PR: ${restackEntries
+      `A PR below these open PRs has MERGED, so every open PR from the first affected one upward must be restacked in one pass: ${restackEntries
         .map((entry) => `PR ${entry.position} (${entry.pr_url})`)
         .join(", ")}.`,
-      "Restack them now, bottom-up, before addressing other feedback:",
+      "Rebasing a branch rewrites it, which breaks the merge base of every stack branch above it — so restack ALL of the PRs listed above, bottom-up, in this session. Never restack only the lowest one.",
       "1. `git fetch origin` and confirm which stack PRs GitHub reports as merged.",
-      `2. Retarget the affected PR's base to the merged PR's own base (\`gh pr edit <number> --base <new-base>\`) unless GitHub already retargeted it after the old base branch was deleted.`,
-      "3. Rebase the PR's branch onto the new base so the already-merged commits drop out: `git rebase --onto origin/<new-base> <old-base-tip> <branch>`, where `<old-base-tip>` is the last commit of the old base branch (for example `origin/<old-base>` before pruning). Squash merges rewrite merged commits, so the merged content must come from the new base — never keep the old stack commits.",
-      "4. Resolve any rebase conflicts in this session.",
-      "5. Push each restacked branch with `git push --force-with-lease`. This restack is the ONLY situation where rebasing and force-pushing are allowed; the no-rebase rule stays in force everywhere else."
+      "2. Before rewriting anything, record the current tip of every branch you are about to rebase (for example `git rev-parse origin/<branch>` for each listed PR's branch and its old base). The entry above each rewritten branch must be rebased relative to that OLD tip, not the rewritten one.",
+      `3. For the lowest listed PR: retarget its base to the merged PR's own base (\`gh pr edit <number> --base <new-base>\`) unless GitHub already retargeted it after the old base branch was deleted, then \`git rebase --onto origin/<new-base> <old-base-tip> <branch>\` so the already-merged commits drop out. Squash merges rewrite merged commits, so the merged content must come from the new base — never keep the old stack commits.`,
+      "4. For each PR above it, in order: rebase its branch onto the freshly rewritten branch below, using the OLD tip you recorded in step 2 as the `--onto` upstream boundary: `git rebase --onto <rewritten-lower-branch> <old-lower-tip> <branch>`.",
+      "5. Resolve any rebase conflicts in this session.",
+      "6. Push each restacked branch with `git push --force-with-lease`. This restack is the ONLY situation where rebasing and force-pushing are allowed; the no-rebase rule stays in force everywhere else."
+    );
+  }
+
+  const closedBaseEntries = stackEntriesOnClosedBase(stack);
+  if (closedBaseEntries.length > 0) {
+    lines.push(
+      "",
+      "### Broken stack — human decision required",
+      `These open PRs target the branch of a PR that was CLOSED WITHOUT MERGING: ${closedBaseEntries
+        .map((entry) => `PR ${entry.position} (${entry.pr_url})`)
+        .join(", ")}.`,
+      "The closed PR's commits are NOT in any base branch, so the restack protocol above does not apply — rebasing its commits away would silently delete that slice's work. Do NOT rebase, retarget, or force-push these PRs, and do not reopen or close anything on your own.",
+      "Report status `blocked` with a blocker explaining which PR was closed without merging and what decision is needed (reopen the closed PR, fold its changes into another slice, or abandon the stack)."
     );
   }
 

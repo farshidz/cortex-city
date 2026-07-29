@@ -10,6 +10,7 @@ import {
 } from "./final-task-cleanup";
 import {
   deliverReviewerComment,
+  getPRBaseBranch,
   getPRHeadSha,
   getPRStateHash,
   getPRStatus,
@@ -151,6 +152,7 @@ interface WorkerLogger {
 
 export interface WorkerRuntimeDeps {
   deleteTask: typeof deleteTask;
+  getPRBaseBranch?: typeof getPRBaseBranch;
   getPRHeadSha?: typeof getPRHeadSha;
   getPRStateHash: typeof getPRStateHash;
   getPRStatus: typeof getPRStatus;
@@ -181,6 +183,7 @@ export interface WorkerRuntimeDeps {
 
 export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   deleteTask,
+  getPRBaseBranch,
   getPRHeadSha,
   getPRStateHash,
   getPRStatus,
@@ -1023,6 +1026,18 @@ export async function pollOnce(
       const prStatus = await deps.getPRStatus(entry.pr_url);
       if (prStatus !== "unknown" && prStatus !== entry.pr_status) {
         entry.pr_status = prStatus;
+        stackChanged = true;
+      }
+      // GitHub is the authority on where an open PR points. The agent report
+      // only claims a base; if a retarget failed (or never happened), this
+      // override keeps the restack detector armed instead of trusting the
+      // claim.
+      const actualBase = (await deps.getPRBaseBranch?.(entry.pr_url))?.trim();
+      if (actualBase && actualBase !== entry.base_branch) {
+        deps.logger.log(
+          `[worker] Stack PR base for ${entry.pr_url} is ${actualBase} on GitHub (recorded ${entry.base_branch})`
+        );
+        entry.base_branch = actualBase;
         stackChanged = true;
       }
     }

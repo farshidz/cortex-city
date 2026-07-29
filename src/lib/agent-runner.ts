@@ -1377,11 +1377,15 @@ async function handleRunComplete(
         for (const warning of reconciled.warnings) {
           console.warn(`[agent-runner] Task ${taskId}: ${warning}`);
         }
-        updates.stacked_prs = reconciled.stack;
-        const frontier = frontierStackedPR(reconciled.stack);
-        if (frontier) {
-          updates.pr_url = frontier.pr_url;
-          updates.branch_name = frontier.branch_name;
+        // An empty stack means the report was rejected and nothing was
+        // tracked before — the task simply stays a single-PR task.
+        if (reconciled.stack.length > 0) {
+          updates.stacked_prs = reconciled.stack;
+          const frontier = frontierStackedPR(reconciled.stack);
+          if (frontier) {
+            updates.pr_url = frontier.pr_url;
+            updates.branch_name = frontier.branch_name;
+          }
         }
       }
 

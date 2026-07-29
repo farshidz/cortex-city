@@ -50,25 +50,47 @@ export function aggregateStackPRStatus(
   return PR_STATUS_SEVERITY.find((status) => statuses.has(status));
 }
 
-// A stack needs restacking when an open entry still bases on a branch whose
-// PR already reached a terminal state. Squash merges rewrite the merged
-// commits, so the open entry must be retargeted and rebased before it can
-// merge cleanly.
+// A stack needs restacking when an open entry still bases on the branch of a
+// MERGED PR: squash merges rewrite the merged commits, so the open entry must
+// be retargeted and rebased before it can merge cleanly. Rebasing that entry
+// rewrites its own branch too, which invalidates the merge base of every open
+// entry above it — so the restack set is the whole open suffix starting at
+// the first affected entry, not just the entries directly on merged bases.
 export function stackEntriesRequiringRestack(
   stack: TaskStackedPR[]
 ): TaskStackedPR[] {
-  const terminalBranches = new Set(
+  const mergedBranches = new Set(
     stack
-      .filter((entry) => entry.state !== "open")
+      .filter((entry) => entry.state === "merged")
       .map((entry) => entry.branch_name)
   );
-  return openStackedPRs(stack).filter((entry) =>
-    terminalBranches.has(entry.base_branch)
+  const open = openStackedPRs(stack);
+  const firstAffected = open.findIndex((entry) =>
+    mergedBranches.has(entry.base_branch)
   );
+  if (firstAffected === -1) return [];
+  return open.slice(firstAffected);
 }
 
 export function stackRequiresRestack(stack: TaskStackedPR[]): boolean {
   return stackEntriesRequiringRestack(stack).length > 0;
+}
+
+// A closed, unmerged base is a broken stack, not a restack: the closed PR's
+// commits are NOT in the base branch, so the squash-merge restack protocol
+// (dropping the lower commits) would silently delete that slice's work.
+// These entries need a human decision (reopen, re-plan, or abandon).
+export function stackEntriesOnClosedBase(
+  stack: TaskStackedPR[]
+): TaskStackedPR[] {
+  const closedBranches = new Set(
+    stack
+      .filter((entry) => entry.state === "closed")
+      .map((entry) => entry.branch_name)
+  );
+  return openStackedPRs(stack).filter((entry) =>
+    closedBranches.has(entry.base_branch)
+  );
 }
 
 // Terminal task status once every entry is terminal: merged only when the
@@ -82,13 +104,24 @@ export function stackTerminalStatus(
   return stack.every((entry) => entry.state === "merged") ? "merged" : "closed";
 }
 
+const CANONICAL_PR_URL_PATTERN =
+  /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/;
+
 function normalizeReportedEntry(
   entry: AgentReportStackedPR
-): AgentReportStackedPR | undefined {
+): AgentReportStackedPR | string {
   const pr_url = entry.pr_url?.trim();
   const branch_name = entry.branch_name?.trim();
   const base_branch = entry.base_branch?.trim();
-  if (!pr_url || !branch_name || !base_branch) return undefined;
+  if (!pr_url || !branch_name || !base_branch) {
+    return `stack entry ${JSON.stringify(entry.pr_url ?? "")} is missing a PR URL, branch, or base branch`;
+  }
+  if (!CANONICAL_PR_URL_PATTERN.test(pr_url)) {
+    return `stack entry PR URL ${JSON.stringify(pr_url)} is not a canonical GitHub pull request URL`;
+  }
+  if (!Number.isInteger(entry.position) || entry.position < 1) {
+    return `stack entry ${pr_url} has invalid position ${JSON.stringify(entry.position)}`;
+  }
   return {
     position: entry.position,
     pr_url,
@@ -96,6 +129,40 @@ function normalizeReportedEntry(
     base_branch,
     scope: entry.scope?.trim() || "",
   };
+}
+
+// The report replaces stack membership, so it must be valid as a whole: a
+// partially-accepted stack silently shrinks the task (an omitted real PR is
+// never reviewed, restacked, or waited on before the task completes).
+function validateReportedStack(
+  reported: AgentReportStackedPR[]
+): { entries: AgentReportStackedPR[] } | { error: string } {
+  const entries: AgentReportStackedPR[] = [];
+  const seenUrls = new Set<string>();
+  const seenPositions = new Set<number>();
+  for (const raw of reported) {
+    const normalized = normalizeReportedEntry(raw);
+    if (typeof normalized === "string") return { error: normalized };
+    if (seenUrls.has(normalized.pr_url)) {
+      return { error: `stack entry ${normalized.pr_url} is listed twice` };
+    }
+    if (seenPositions.has(normalized.position)) {
+      return {
+        error: `stack position ${normalized.position} is listed twice`,
+      };
+    }
+    seenUrls.add(normalized.pr_url);
+    seenPositions.add(normalized.position);
+    entries.push(normalized);
+  }
+  for (let position = 1; position <= entries.length; position++) {
+    if (!seenPositions.has(position)) {
+      return {
+        error: `stack positions are not contiguous from 1 (missing position ${position})`,
+      };
+    }
+  }
+  return { entries };
 }
 
 export interface StackReconciliation {
@@ -108,22 +175,39 @@ export interface StackReconciliation {
 // scopes, ordering); the worker-owned lifecycle fields on existing entries
 // (state, pr_status, last_review_gh_state) are preserved. Entries the report
 // omits are kept — the worker retires entries via GitHub state, not report
-// omissions — with a warning so prompt drift stays visible in logs.
+// omissions — with a warning so prompt drift stays visible in logs. A report
+// that fails validation is rejected atomically: the tracked stack is kept
+// unchanged rather than accepting a partial membership list.
 export function reconcileStackedPRs(
   current: TaskStackedPR[] | undefined,
   reported: AgentReportStackedPR[] | null | undefined
 ): StackReconciliation | undefined {
   const existing = current ?? [];
-  const validReported = (reported ?? [])
-    .map(normalizeReportedEntry)
-    .filter((entry): entry is AgentReportStackedPR => Boolean(entry));
 
-  if (validReported.length === 0) {
+  if (!reported || reported.length === 0) {
     if (existing.length === 0) return undefined;
     return {
-      stack: sortedByPosition(existing),
+      stack: sortedByPosition(existing).map((entry) => ({ ...entry })),
       warnings: [
         "Agent report omitted stacked_prs for a stacked task; keeping the tracked stack unchanged",
+      ],
+    };
+  }
+
+  const validated = validateReportedStack(reported);
+  if ("error" in validated) {
+    if (existing.length === 0) {
+      return {
+        stack: [],
+        warnings: [
+          `Rejected stacked_prs report (${validated.error}); the task keeps tracking a single PR`,
+        ],
+      };
+    }
+    return {
+      stack: sortedByPosition(existing).map((entry) => ({ ...entry })),
+      warnings: [
+        `Rejected stacked_prs report (${validated.error}); keeping the tracked stack unchanged`,
       ],
     };
   }
@@ -135,11 +219,7 @@ export function reconcileStackedPRs(
   const reportedUrls = new Set<string>();
   const merged: TaskStackedPR[] = [];
 
-  for (const entry of validReported) {
-    if (reportedUrls.has(entry.pr_url)) {
-      warnings.push(`Agent report listed ${entry.pr_url} twice; keeping the first entry`);
-      continue;
-    }
+  for (const entry of validated.entries) {
     reportedUrls.add(entry.pr_url);
     const tracked = existingByUrl.get(entry.pr_url);
     merged.push({

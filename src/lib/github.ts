@@ -341,6 +341,16 @@ export async function getPRHeadSha(prUrl: string): Promise<string> {
   return data?.headRefOid?.trim() || "";
 }
 
+export async function getPRBaseBranch(prUrl: string): Promise<string> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return "";
+
+  const data = await execJson<{ baseRefName?: string }>(
+    `gh pr view ${prUrl} --json baseRefName`
+  );
+  return data?.baseRefName?.trim() || "";
+}
+
 export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return [];

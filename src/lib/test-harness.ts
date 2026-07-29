@@ -409,6 +409,7 @@ if (args[0] === "pr" && args[1] === "view") {
   const pr = getPr(state, prInfo.owner, prInfo.repo, prInfo.number);
   output({
     headRefOid: pr.headRefOid || "",
+    baseRefName: pr.baseRefName || "",
     statusCheckRollup: pr.statusCheckRollup || pr.checks || [],
   });
 }
