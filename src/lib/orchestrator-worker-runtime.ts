@@ -1065,10 +1065,11 @@ export async function pollOnce(
     const automaticReviewEnabled = isAutomaticReviewEnabled(task);
     const size = stack.length;
     const openEntries = openStackedPRs(stack);
+    const reviewMap = deps.readReviewSummaryMap();
     let deferForPendingReview = false;
     for (const entry of openEntries) {
       const headSha = taskReviewHeads.get(entry.pr_url) || "";
-      const cached = deps.readReviewSummaryMap()[entry.pr_url];
+      const cached = reviewMap[entry.pr_url];
       const request = taskReviewRequest(task, headSha, { entry, size });
       if (automaticReviewEnabled) {
         if (request) {
