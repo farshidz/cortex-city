@@ -66,6 +66,7 @@ function writeTestTemplates(workspace: string) {
       "Base={{BASE_BRANCH}}",
       "Again={{BASE_BRANCH}}",
       "{{REPO_CONTEXT_SECTION}}",
+      "Subtasks={{EXISTING_SUBTASKS}}",
       "Directory={{AGENT_DIRECTORY}}",
     ].join("\n")
   );
@@ -197,6 +198,111 @@ test("buildInitialPrompt falls back when the task plan or agent prompt file is m
   assert.match(result, /## Repository Context\nNo agent-specific context configured\./);
 });
 
+test("buildReviewPrompt surfaces active follow-up tasks so review wakes do not duplicate them", () => {
+  const workspace = createTempWorkspace();
+  writeTestTemplates(workspace);
+  writeConfig(workspace);
+  writeFileSync(
+    path.join(workspace, ".cortex", "tasks.json"),
+    JSON.stringify([
+      sampleTask(),
+      sampleTask({
+        id: "child-ci",
+        title: "Fix failing CI",
+        status: "in_review",
+        parent_task_id: "task-1",
+      }),
+      sampleTask({
+        id: "child-docs",
+        title: "Update changelog",
+        status: "open",
+        parent_task_id: "task-1",
+        agent: "marqo-documentation-agent",
+      }),
+      sampleTask({
+        id: "child-finished",
+        title: "Finished cleanup",
+        status: "merged",
+        parent_task_id: "task-1",
+      }),
+      sampleTask({
+        id: "other-child",
+        title: "Unrelated work",
+        status: "open",
+        parent_task_id: "another-task",
+      }),
+    ])
+  );
+
+  const result = runPromptScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask())};
+      console.log(JSON.stringify(prompts.buildReviewPrompt(task)));
+    `
+  );
+
+  assert.match(result, /Do NOT request another follow-up that duplicates any of them/);
+  assert.match(
+    result,
+    /"Fix failing CI" — status: in_review, owner agent: `cortex-city-swe`/
+  );
+  assert.match(
+    result,
+    /"Update changelog" — status: open, owner agent: `marqo-documentation-agent`/
+  );
+  assert.doesNotMatch(result, /Finished cleanup/);
+  assert.doesNotMatch(result, /Unrelated work/);
+});
+
+test("resume and manual-instruction wakes include active follow-up tasks", () => {
+  const workspace = createTempWorkspace();
+  writeTestTemplates(workspace);
+  writeConfig(workspace);
+  writeFileSync(
+    path.join(workspace, ".cortex", "tasks.json"),
+    JSON.stringify([
+      sampleTask(),
+      sampleTask({
+        id: "child-ci",
+        title: "Fix failing CI",
+        status: "in_progress",
+        parent_task_id: "task-1",
+      }),
+      sampleTask({
+        id: "child-closed",
+        title: "Closed cleanup",
+        status: "closed",
+        parent_task_id: "task-1",
+      }),
+    ])
+  );
+
+  const result = runPromptScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask())};
+      console.log(
+        JSON.stringify({
+          resume: prompts.buildContinuePrompt(task),
+          manual: prompts.buildManualInstructionPrompt({
+            ...task,
+            pending_manual_instruction: "address the review",
+          }),
+        })
+      );
+    `
+  );
+
+  assert.match(result.resume, /^continue/);
+  assert.match(result.resume, /## Existing Follow-up Tasks/);
+  assert.match(result.resume, /"Fix failing CI" — status: in_progress/);
+  assert.doesNotMatch(result.resume, /Closed cleanup/);
+  assert.match(result.manual, /^address the review/);
+  assert.match(result.manual, /## Existing Follow-up Tasks/);
+  assert.match(result.manual, /"Fix failing CI"/);
+});
+
 test("buildReviewPrompt maps PR states and replaces every base-branch placeholder", () => {
   const workspace = createTempWorkspace();
   writeTestTemplates(workspace);
@@ -255,6 +361,18 @@ test("buildReviewPrompt uses sensible defaults for unknown mergeability", () => 
   );
   assert.match(result, /Base=trunk/);
   assert.doesNotMatch(result, /Agent Review Context/);
+  assert.match(result, /Subtasks=None yet/);
+});
+
+test("shared review template includes existing follow-up task context", () => {
+  const reviewTemplate = readFileSync(
+    path.join(REPO_ROOT, "prompts", "templates", "review.md"),
+    "utf-8"
+  );
+
+  assert.match(reviewTemplate, /## Existing Follow-up Tasks/);
+  assert.match(reviewTemplate, /\{\{EXISTING_SUBTASKS\}\}/);
+  assert.match(reviewTemplate, /do not request it again/);
 });
 
 test("shared review template requires the robot prefix in GitHub replies", () => {
@@ -298,7 +416,7 @@ test("buildCleanupPrompt and manual helpers provide the expected fallbacks", () 
         JSON.stringify({
           cleanup: prompts.buildCleanupPrompt(task),
           manual: prompts.buildManualInstructionPrompt(task),
-          resume: prompts.buildContinuePrompt(),
+          resume: prompts.buildContinuePrompt(task),
           emptyManual: prompts.buildManualInstructionPrompt({
             ...task,
             pending_manual_instruction: "   ",
