@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import path from "path";
 import type { Task, AgentConfig, OrchestratorConfig } from "./types";
-import { readConfig } from "./store";
+import { readConfig, readTasks } from "./store";
 import { resolvePromptPath } from "./agent-files";
 
 const PROMPTS_DIR = path.join(process.cwd(), "prompts");
@@ -33,12 +33,55 @@ function buildPromptContextSection(title: string, content?: string): string {
   return `## ${title}\n${content}\n`;
 }
 
-export function buildContinuePrompt(): string {
-  return "continue";
+function getActiveFollowupTasks(task: Task): Task[] {
+  return readTasks().filter(
+    (candidate) =>
+      candidate.parent_task_id === task.id &&
+      candidate.status !== "merged" &&
+      candidate.status !== "closed"
+  );
+}
+
+function formatFollowupTaskList(children: Task[]): string {
+  return children
+    .map(
+      (child) =>
+        `- "${child.title}" — status: ${child.status}, owner agent: \`${child.agent}\``
+    )
+    .join("\n");
+}
+
+function buildExistingFollowupTasksSection(task: Task): string {
+  const children = getActiveFollowupTasks(task);
+  if (children.length === 0) {
+    return "None yet — you have not created any follow-up tasks for this task.";
+  }
+  return [
+    "You have already created the following follow-up tasks for this task. Do NOT request another follow-up that duplicates any of them — assume the earlier request succeeded:",
+    formatFollowupTaskList(children),
+  ].join("\n");
+}
+
+function buildFollowupReminder(task: Task): string {
+  const children = getActiveFollowupTasks(task);
+  if (children.length === 0) return "";
+  return [
+    "",
+    "",
+    "## Existing Follow-up Tasks",
+    "You have already created the following follow-up tasks for this task. Before adding any `create_task` entry to your final report, do NOT request another that duplicates one of them — assume the earlier request succeeded:",
+    formatFollowupTaskList(children),
+  ].join("\n");
+}
+
+export function buildContinuePrompt(task: Task): string {
+  return `continue${buildFollowupReminder(task)}`;
 }
 
 export function buildManualInstructionPrompt(task: Task): string {
-  return task.pending_manual_instruction?.trim() || "";
+  const instruction = task.pending_manual_instruction?.trim();
+  if (!instruction) return "";
+  return `${instruction}${buildFollowupReminder(task)}`;
 }
 
 function describeMergeStatus(status: string | undefined, baseBranch: string): string {
@@ -109,6 +152,7 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
       "{{REPO_CONTEXT_SECTION}}",
       buildPromptContextSection("Agent Review Context", reviewContext)
     )
+    .replace("{{EXISTING_SUBTASKS}}", buildExistingFollowupTasksSection(task))
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
 }
 
