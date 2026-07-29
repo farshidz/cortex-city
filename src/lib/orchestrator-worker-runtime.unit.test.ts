@@ -824,25 +824,7 @@ test("pollOnce keeps forcing restack when GitHub still reports the old base", as
   assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
 });
 
-test("pollOnce does not force a destructive run when a lower PR closed unmerged", async () => {
-  const task = sample({
-    id: "task-1",
-    status: "in_review",
-    pr_url: STACK_PR_2,
-    branch_name: "b2",
-    stacked_prs: [
-      stackEntry({ state: "closed" }),
-      stackEntry({
-        position: 2,
-        pr_url: STACK_PR_2,
-        branch_name: "b2",
-        base_branch: "b1",
-        scope: "Slice two",
-        last_review_gh_state: "hash-2",
-        pr_status: "clean",
-      }),
-    ],
-  });
+test("pollOnce surfaces a closed unmerged base with a non-destructive decision run", async () => {
   const currentReview: ReviewSummary = {
     source: "task",
     task_id: "task-1",
@@ -866,8 +848,29 @@ test("pollOnce does not force a destructive run when a lower PR closed unmerged"
     review_status: "up_to_date",
     review_state: "reviewed",
   };
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_1,
+    branch_name: "b1",
+    stacked_prs: [
+      stackEntry(),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        last_review_gh_state: "hash-2",
+        pr_status: "clean",
+      }),
+    ],
+  });
   const { deps, launched, tasks } = makeStackedDeps({
     tasks: [task],
+    // PR 1 is observed closing unmerged this poll; PR 2's hashes are
+    // unchanged, so only the broken-stack condition can force the run.
+    mergedOrClosed: { [STACK_PR_1]: "closed" },
     prStatuses: { [STACK_PR_2]: "clean" },
     headShas: { [STACK_PR_2]: "head-2" },
     stateHashes: { [STACK_PR_2]: "hash-2" },
@@ -877,8 +880,32 @@ test("pollOnce does not force a destructive run when a lower PR closed unmerged"
 
   await pollOnce(new Map(), deps, new Map());
 
-  // The broken stack waits for a human decision: no forced review run, and
-  // the task stays in review rather than completing without the closed slice.
+  // The broken stack is surfaced through one review-mode run whose prompt
+  // forbids rebasing and instructs a blocked decision request; the task
+  // stays in review rather than completing without the closed slice.
+  assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
+  assert.equal(tasks[0].status, "in_review");
+  assert.equal(tasks[0].stacked_prs?.[0].state, "closed");
+
+  // Once the agent records the blocked decision request, the worker stops
+  // forcing runs and waits for the human.
+  tasks[0] = {
+    ...tasks[0],
+    current_run_pid: undefined,
+    current_run_mode: undefined,
+    last_agent_report: {
+      status: "blocked",
+      summary: "Stack broken: PR 1 closed without merging",
+      files_changed: [],
+      assumptions: [],
+      blockers: ["PR 1 closed without merging; needs a human decision"],
+      next_steps: [],
+    },
+  };
+  launched.length = 0;
+
+  await pollOnce(new Map(), deps, new Map());
+
   assert.deepEqual(launched, []);
   assert.equal(tasks[0].status, "in_review");
 });

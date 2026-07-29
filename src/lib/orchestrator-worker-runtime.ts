@@ -49,6 +49,7 @@ import {
   frontierStackedPR,
   isStackedTask,
   openStackedPRs,
+  stackEntriesOnClosedBase,
   stackRequiresRestack,
   stackTerminalStatus,
 } from "./stacked-prs";
@@ -235,6 +236,11 @@ interface ReviewRunCandidate {
   // may be forced by a pending restack regardless of hash equality.
   entryHashes?: Record<string, string>;
   restackRequired?: boolean;
+  // Set while a lower PR closed unmerged under an open dependent and the
+  // agent has not yet recorded a blocked decision request: forces a
+  // non-destructive run so the broken stack is surfaced instead of the task
+  // idling in review.
+  brokenStackNeedsDecision?: boolean;
 }
 
 function isAutomaticReviewEnabled(
@@ -1112,9 +1118,19 @@ export async function pollOnce(
     if (deferForPendingReview) return;
 
     const restackRequired = stackRequiresRestack(stack);
+    // A lower PR closing unmerged under an open dependent breaks the stack
+    // without changing any upper-PR hash. Keep forcing a non-destructive run
+    // (the prompt forbids rebasing and instructs a `blocked` report naming
+    // the decision needed) until that blocked decision request is recorded,
+    // so the broken stack cannot idle silently in review. Level-based rather
+    // than transition-based so a deferred or crashed run cannot swallow it.
+    const brokenStackNeedsDecision =
+      stackEntriesOnClosedBase(stack).length > 0 &&
+      task.last_agent_report?.status !== "blocked";
     if (
       !hasManualInstruction &&
       !restackRequired &&
+      !brokenStackNeedsDecision &&
       openEntries.some((entry) => entry.pr_status === "checks_pending")
     ) {
       return;
@@ -1130,7 +1146,14 @@ export async function pollOnce(
       entryHashes[entry.pr_url] = ghState;
       if (ghState !== entry.last_review_gh_state) anyHashChanged = true;
     }
-    if (!anyHash && !hasManualInstruction && !restackRequired) return;
+    if (
+      !anyHash &&
+      !hasManualInstruction &&
+      !restackRequired &&
+      !brokenStackNeedsDecision
+    ) {
+      return;
+    }
 
     const hasConflicts = openEntries.some(
       (entry) => entry.pr_status === "conflicts"
@@ -1139,6 +1162,7 @@ export async function pollOnce(
       !hasManualInstruction &&
       !hasConflicts &&
       !restackRequired &&
+      !brokenStackNeedsDecision &&
       !anyHashChanged
     ) {
       return;
@@ -1150,6 +1174,7 @@ export async function pollOnce(
       hasConflicts,
       entryHashes,
       restackRequired,
+      brokenStackNeedsDecision,
     });
   };
 
@@ -1264,10 +1289,15 @@ export async function pollOnce(
       );
       const restackRequired =
         Boolean(candidate.restackRequired) || stackRequiresRestack(stack);
+      const brokenStackNeedsDecision =
+        Boolean(candidate.brokenStackNeedsDecision) ||
+        (stackEntriesOnClosedBase(stack).length > 0 &&
+          task.last_agent_report?.status !== "blocked");
       if (
         !hasManualInstruction &&
         !hasConflicts &&
         !restackRequired &&
+        !brokenStackNeedsDecision &&
         !anyHashChanged
       ) {
         continue;
