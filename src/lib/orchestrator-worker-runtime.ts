@@ -43,7 +43,21 @@ import {
 import { unlinkTask as unlinkIssueTask } from "./issue-store";
 import { deleteTask, getTask, readConfig, readTasks, updateTask } from "./store";
 import { assertSufficientDiskSpace } from "./disk-guard";
-import type { ReviewRequest, ReviewSummary, Task, TaskRunMode } from "./types";
+import {
+  aggregateStackPRStatus,
+  frontierStackedPR,
+  isStackedTask,
+  openStackedPRs,
+  stackRequiresRestack,
+  stackTerminalStatus,
+} from "./stacked-prs";
+import type {
+  ReviewRequest,
+  ReviewSummary,
+  Task,
+  TaskRunMode,
+  TaskStackedPR,
+} from "./types";
 
 export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 export const DEAD_OWNED_PID_GRACE_MS = 10_000;
@@ -214,6 +228,10 @@ interface ReviewRunCandidate {
   task: Task & { pr_url: string };
   ghState: string;
   hasConflicts: boolean;
+  // Stacked tasks compare per-entry hashes instead of the single ghState and
+  // may be forced by a pending restack regardless of hash equality.
+  entryHashes?: Record<string, string>;
+  restackRequired?: boolean;
 }
 
 function isAutomaticReviewEnabled(
@@ -222,11 +240,58 @@ function isAutomaticReviewEnabled(
   return task.reviewer_agent_enabled !== false;
 }
 
+interface StackEntryContext {
+  entry: TaskStackedPR;
+  size: number;
+}
+
+// Every PR URL a task owns: all stack entries (any state) plus the mirror
+// pr_url. Inbound discovery and review scheduling must treat each of them as
+// task-owned.
+function trackedTaskPRUrls(task: Task): string[] {
+  const urls = new Set<string>();
+  if (isStackedTask(task)) {
+    for (const entry of task.stacked_prs) urls.add(entry.pr_url);
+  }
+  if (typeof task.pr_url === "string") urls.add(task.pr_url);
+  return [...urls];
+}
+
+// The PR URLs whose reviews the worker schedules for this task: the open
+// stack entries for stacked tasks, otherwise the single pr_url.
+function reviewableTaskPRTargets(task: Task): Array<{
+  pr_url: string;
+  stackContext?: StackEntryContext;
+}> {
+  if (isStackedTask(task)) {
+    const size = task.stacked_prs.length;
+    return openStackedPRs(task.stacked_prs).map((entry) => ({
+      pr_url: entry.pr_url,
+      stackContext: { entry, size },
+    }));
+  }
+  if (typeof task.pr_url !== "string") return [];
+  return [{ pr_url: task.pr_url }];
+}
+
+function stackContextForUrl(
+  task: Task,
+  prUrl: string
+): StackEntryContext | undefined {
+  if (!isStackedTask(task)) return undefined;
+  const entry = task.stacked_prs.find(
+    (candidate) => candidate.pr_url === prUrl
+  );
+  return entry ? { entry, size: task.stacked_prs.length } : undefined;
+}
+
 function taskReviewRequest(
   task: Task & { pr_url: string },
-  headSha: string
+  headSha: string,
+  stackContext?: StackEntryContext
 ): ReviewRequest | undefined {
-  const match = task.pr_url.match(
+  const targetUrl = stackContext?.entry.pr_url ?? task.pr_url;
+  const match = targetUrl.match(
     /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/
   );
   if (!match || !headSha.trim()) return undefined;
@@ -237,15 +302,61 @@ function taskReviewRequest(
     task_title: task.title,
     task_description: task.description,
     task_plan: task.plan,
-    pr_url: task.pr_url,
+    ...(stackContext
+      ? {
+          task_stack_position: stackContext.entry.position,
+          task_stack_size: stackContext.size,
+          task_pr_scope: stackContext.entry.scope || undefined,
+        }
+      : {}),
+    pr_url: targetUrl,
     pr_number: Number(match[3]),
     repo_slug: `${match[1]}/${match[2]}`,
-    title: task.title,
+    title: stackContext
+      ? `${task.title} (stack ${stackContext.entry.position}/${stackContext.size})`
+      : task.title,
     author: "",
     head_sha: headSha.trim(),
     created_at: task.created_at,
     updated_at: task.updated_at,
   };
+}
+
+function shouldDeferBuilderForStoredReviewUrl(
+  task: Task,
+  prUrl: string,
+  stackContext: StackEntryContext | undefined,
+  reviewMap: Record<string, ReviewSummary>,
+  activeReviewPids: Map<string, number>,
+  taskReviewHeads: Map<string, string>
+): boolean {
+  if (activeReviewPids.has(prUrl)) return true;
+  const review = reviewMap[prUrl];
+  if (review?.current_run_pid != null) return true;
+  // A currently unschedulable review must not deadlock explicit implementation
+  // work. Once schedulable, however, a review from another source or older task
+  // context must be rerun before the builder can proceed.
+  const currentHeadSha = taskReviewHeads.get(prUrl);
+  if (!currentHeadSha) return false;
+  if (!stackContext && task.review_migration_head_sha === currentHeadSha) {
+    return false;
+  }
+  const taskContextMatches =
+    review?.source === "task" &&
+    review.task_id === task.id &&
+    review.task_title === task.title &&
+    review.task_description === task.description &&
+    review.task_plan === task.plan &&
+    (!stackContext ||
+      (review.task_stack_position === stackContext.entry.position &&
+        review.task_stack_size === stackContext.size &&
+        review.task_pr_scope === (stackContext.entry.scope || undefined)));
+  if (!taskContextMatches) return true;
+  // A failed review retries independently with backoff, but must not deadlock
+  // explicit implementation work while the reviewer configuration is repaired.
+  if (review.error) return false;
+  if (!review || !review.summary?.trim()) return true;
+  return summaryHeadShaFor(review) !== currentHeadSha;
 }
 
 function shouldDeferBuilderForStoredReview(
@@ -261,27 +372,16 @@ function shouldDeferBuilderForStoredReview(
   ) {
     return false;
   }
-  if (activeReviewPids.has(task.pr_url)) return true;
-  const review = reviewMap[task.pr_url];
-  if (review?.current_run_pid != null) return true;
-  // A currently unschedulable review must not deadlock explicit implementation
-  // work. Once schedulable, however, a review from another source or older task
-  // context must be rerun before the builder can proceed.
-  const currentHeadSha = taskReviewHeads.get(task.pr_url);
-  if (!currentHeadSha) return false;
-  if (task.review_migration_head_sha === currentHeadSha) return false;
-  const taskContextMatches =
-    review?.source === "task" &&
-    review.task_id === task.id &&
-    review.task_title === task.title &&
-    review.task_description === task.description &&
-    review.task_plan === task.plan;
-  if (!taskContextMatches) return true;
-  // A failed review retries independently with backoff, but must not deadlock
-  // explicit implementation work while the reviewer configuration is repaired.
-  if (review.error) return false;
-  if (!review || !review.summary?.trim()) return true;
-  return summaryHeadShaFor(review) !== currentHeadSha;
+  return reviewableTaskPRTargets(task).some((target) =>
+    shouldDeferBuilderForStoredReviewUrl(
+      task,
+      target.pr_url,
+      target.stackContext,
+      reviewMap,
+      activeReviewPids,
+      taskReviewHeads
+    )
+  );
 }
 
 function normalizedReviewProfile(review: ReviewSummary) {
@@ -758,48 +858,49 @@ export async function pollOnce(
   const taskReviewHeads = new Map<string, string>();
   const storedReviewsBeforeHeadResolution = deps.readReviewSummaryMap();
   await Promise.all(
-    tasks
-      .filter(
-        (task): task is Task & { pr_url: string } => {
-          if (
-            task.paused ||
-            task.status !== "in_review" ||
-            typeof task.pr_url !== "string" ||
-            activePids.has(task.id)
-          ) {
-            return false;
-          }
+    tasks.flatMap((task) => {
+      if (
+        task.paused ||
+        task.status !== "in_review" ||
+        typeof task.pr_url !== "string" ||
+        activePids.has(task.id)
+      ) {
+        return [];
+      }
+      return reviewableTaskPRTargets(task)
+        .filter((target) => {
           if (isAutomaticReviewEnabled(task)) return true;
-          const storedReview = storedReviewsBeforeHeadResolution[task.pr_url];
+          const storedReview = storedReviewsBeforeHeadResolution[target.pr_url];
           return (
             storedReview?.source === "task" &&
             storedReview.task_id === task.id
           );
-        }
-      )
-      .map(async (task) => {
-        try {
-          const headSha = (await deps.getPRHeadSha?.(task.pr_url))?.trim();
-          if (headSha) {
-            if (
-              task.review_migration_head_sha &&
-              task.review_migration_head_sha !== headSha
-            ) {
-              const updated = await deps.updateTask(task.id, {
-                review_migration_head_sha: undefined,
-              });
-              task.review_migration_head_sha = undefined;
-              task.updated_at = updated.updated_at;
+        })
+        .map(async (target) => {
+          try {
+            const headSha = (await deps.getPRHeadSha?.(target.pr_url))?.trim();
+            if (headSha) {
+              if (
+                !target.stackContext &&
+                task.review_migration_head_sha &&
+                task.review_migration_head_sha !== headSha
+              ) {
+                const updated = await deps.updateTask(task.id, {
+                  review_migration_head_sha: undefined,
+                });
+                task.review_migration_head_sha = undefined;
+                task.updated_at = updated.updated_at;
+              }
+              taskReviewHeads.set(target.pr_url, headSha);
             }
-            taskReviewHeads.set(task.pr_url, headSha);
+          } catch (error) {
+            deps.logger.error(
+              `[worker] Failed to resolve review head for ${task.id}:`,
+              error
+            );
           }
-        } catch (error) {
-          deps.logger.error(
-            `[worker] Failed to resolve review head for ${task.id}:`,
-            error
-          );
-        }
-      })
+        });
+    })
   );
   let availableSlots = config.max_parallel_sessions - activePids.size;
   const storedReviewsBeforeTaskRuns = deps.readReviewSummaryMap();
@@ -880,14 +981,18 @@ export async function pollOnce(
   }
 
   deps.logger.log("[worker] Poll phase: scan in_review tasks");
-  const liveTaskOwners = new Map(
-    tasks
-      .filter(
-        (task): task is Task & { pr_url: string } =>
-          task.status === "in_review" && typeof task.pr_url === "string"
-      )
-      .map((task) => [task.pr_url, task] as const)
-  );
+  // Terminal stack entries are excluded on purpose: their reviews should
+  // finalize (and run retros) as soon as the entry merges, not when the whole
+  // stack completes.
+  const liveTaskOwners = new Map<string, Task & { pr_url: string }>();
+  for (const task of tasks) {
+    if (task.status !== "in_review" || typeof task.pr_url !== "string") continue;
+    const owner = task as Task & { pr_url: string };
+    liveTaskOwners.set(task.pr_url, owner);
+    for (const target of reviewableTaskPRTargets(task)) {
+      liveTaskOwners.set(target.pr_url, owner);
+    }
+  }
   const inReviewTasks = tasks.filter(
     (task): task is Task & { pr_url: string } =>
       !task.paused && task.status === "in_review" && typeof task.pr_url === "string"
@@ -896,9 +1001,149 @@ export async function pollOnce(
   const refreshOnlyTaskReviewRequests: ReviewRequest[] = [];
   const tasksToReview: ReviewRunCandidate[] = [];
 
+  const scanStackedInReviewTask = async (task: Task & { pr_url: string }) => {
+    const hasManualInstruction = Boolean(task.pending_manual_instruction);
+    const stack = task.stacked_prs!.map((entry) => ({ ...entry }));
+    let stackChanged = false;
+
+    for (const entry of stack) {
+      if (entry.state !== "open") continue;
+      const prState = await deps.isPRMergedOrClosed(entry.pr_url);
+      if (prState) {
+        deps.logger.log(
+          `[worker] Stack PR ${prState} for "${task.title}": ${entry.pr_url}`
+        );
+        entry.state = prState;
+        entry.pr_status = undefined;
+        stackChanged = true;
+        // Let the entry's review finalize now instead of at stack completion.
+        liveTaskOwners.delete(entry.pr_url);
+        continue;
+      }
+      const prStatus = await deps.getPRStatus(entry.pr_url);
+      if (prStatus !== "unknown" && prStatus !== entry.pr_status) {
+        entry.pr_status = prStatus;
+        stackChanged = true;
+      }
+    }
+
+    const terminal = stackTerminalStatus(stack);
+    if (terminal) {
+      deps.logger.log(`[worker] PR stack ${terminal} for "${task.title}"`);
+      for (const url of trackedTaskPRUrls(task)) {
+        liveTaskOwners.delete(url);
+      }
+      await deps.updateTask(task.id, {
+        status: terminal,
+        pr_status: undefined,
+        stacked_prs: stack,
+      });
+      return;
+    }
+
+    const taskUpdates: Partial<Task> = {};
+    if (stackChanged) taskUpdates.stacked_prs = stack;
+    const frontier = frontierStackedPR(stack);
+    if (
+      frontier &&
+      (frontier.pr_url !== task.pr_url || frontier.branch_name !== task.branch_name)
+    ) {
+      taskUpdates.pr_url = frontier.pr_url;
+      taskUpdates.branch_name = frontier.branch_name;
+    }
+    const aggregateStatus = aggregateStackPRStatus(stack);
+    if (aggregateStatus !== task.pr_status) {
+      taskUpdates.pr_status = aggregateStatus;
+    }
+    if (Object.keys(taskUpdates).length > 0) {
+      await deps.updateTask(task.id, taskUpdates);
+      Object.assign(task, taskUpdates);
+    }
+
+    if (activePids.has(task.id)) return;
+
+    const automaticReviewEnabled = isAutomaticReviewEnabled(task);
+    const size = stack.length;
+    const openEntries = openStackedPRs(stack);
+    let deferForPendingReview = false;
+    for (const entry of openEntries) {
+      const headSha = taskReviewHeads.get(entry.pr_url) || "";
+      const cached = deps.readReviewSummaryMap()[entry.pr_url];
+      const request = taskReviewRequest(task, headSha, { entry, size });
+      if (automaticReviewEnabled) {
+        if (request) {
+          taskReviewRequests.push(request);
+          const reviewedHeadSha = cached ? summaryHeadShaFor(cached) : undefined;
+          if (cached?.current_run_pid != null) {
+            deferForPendingReview = true;
+          } else if (
+            (!cached?.summary?.trim() || reviewedHeadSha !== request.head_sha) &&
+            !cached?.error
+          ) {
+            deferForPendingReview = true;
+          }
+        }
+      } else if (
+        request &&
+        cached?.source === "task" &&
+        cached.task_id === task.id
+      ) {
+        // Opting out prevents new review runs, but an existing result still
+        // needs the current HEAD so the task UI can show that it is stale.
+        refreshOnlyTaskReviewRequests.push(request);
+      }
+    }
+    if (deferForPendingReview) return;
+
+    const restackRequired = stackRequiresRestack(stack);
+    if (
+      !hasManualInstruction &&
+      !restackRequired &&
+      openEntries.some((entry) => entry.pr_status === "checks_pending")
+    ) {
+      return;
+    }
+
+    const entryHashes: Record<string, string> = {};
+    let anyHash = false;
+    let anyHashChanged = false;
+    for (const entry of openEntries) {
+      const ghState = await deps.getPRStateHash(entry.pr_url);
+      if (!ghState) continue;
+      anyHash = true;
+      entryHashes[entry.pr_url] = ghState;
+      if (ghState !== entry.last_review_gh_state) anyHashChanged = true;
+    }
+    if (!anyHash && !hasManualInstruction && !restackRequired) return;
+
+    const hasConflicts = openEntries.some(
+      (entry) => entry.pr_status === "conflicts"
+    );
+    if (
+      !hasManualInstruction &&
+      !hasConflicts &&
+      !restackRequired &&
+      !anyHashChanged
+    ) {
+      return;
+    }
+
+    tasksToReview.push({
+      task,
+      ghState: "",
+      hasConflicts,
+      entryHashes,
+      restackRequired,
+    });
+  };
+
   await Promise.all(
     inReviewTasks.map(async (task) => {
       try {
+        if (isStackedTask(task)) {
+          await scanStackedInReviewTask(task);
+          return;
+        }
         const hasManualInstruction = Boolean(task.pending_manual_instruction);
         const prState = await deps.isPRMergedOrClosed(task.pr_url);
         if (prState) {
@@ -966,11 +1211,14 @@ export async function pollOnce(
   for (const candidate of tasksToReview) {
     if (availableSlots <= 0) break;
     const task = await deps.getTask(candidate.task.id);
+    const isStackedCandidate = Boolean(candidate.entryHashes);
     if (
       !task ||
       task.status !== "in_review" ||
       typeof task.pr_url !== "string" ||
-      task.pr_url !== candidate.task.pr_url
+      (isStackedCandidate
+        ? !isStackedTask(task)
+        : task.pr_url !== candidate.task.pr_url)
     ) {
       continue;
     }
@@ -988,13 +1236,35 @@ export async function pollOnce(
     ) {
       continue;
     }
-    if (!candidate.ghState && !hasManualInstruction) continue;
-    if (
-      !hasManualInstruction &&
-      !hasConflicts &&
-      candidate.ghState === task.last_review_gh_state
-    ) {
-      continue;
+    if (isStackedCandidate) {
+      // Re-check the per-entry trigger against the freshest task state so a
+      // concurrent hash update does not double-launch the builder.
+      const stack = task.stacked_prs ?? [];
+      const anyHashChanged = Object.entries(candidate.entryHashes || {}).some(
+        ([url, hash]) => {
+          const entry = stack.find((candidateEntry) => candidateEntry.pr_url === url);
+          return !entry || entry.last_review_gh_state !== hash;
+        }
+      );
+      const restackRequired =
+        Boolean(candidate.restackRequired) || stackRequiresRestack(stack);
+      if (
+        !hasManualInstruction &&
+        !hasConflicts &&
+        !restackRequired &&
+        !anyHashChanged
+      ) {
+        continue;
+      }
+    } else {
+      if (!candidate.ghState && !hasManualInstruction) continue;
+      if (
+        !hasManualInstruction &&
+        !hasConflicts &&
+        candidate.ghState === task.last_review_gh_state
+      ) {
+        continue;
+      }
     }
 
     deps.logger.log(`[worker] Picking up task "${task.title}" (${task.id}) [review]`);
@@ -1028,6 +1298,9 @@ function prFieldsFromRequest(request: ReviewRequest) {
     task_title: request.task_title,
     task_description: request.task_description,
     task_plan: request.task_plan,
+    task_stack_position: request.task_stack_position,
+    task_stack_size: request.task_stack_size,
+    task_pr_scope: request.task_pr_scope,
     label_only: request.label_only,
     self_authored: request.self_authored,
     pr_url: request.pr_url,
@@ -1147,13 +1420,14 @@ async function runReviewPhases(
       !task ||
       task.status !== "in_review" ||
       typeof task.pr_url !== "string" ||
-      task.pr_url !== prUrl
+      !trackedTaskPRUrls(task).includes(prUrl)
     ) {
       continue;
     }
     const request = taskReviewRequest(
       { ...task, pr_url: task.pr_url },
-      inboundRequestsByUrl.get(prUrl)?.head_sha || cached.head_sha
+      inboundRequestsByUrl.get(prUrl)?.head_sha || cached.head_sha,
+      stackContextForUrl(task, prUrl)
     );
     if (!request) continue;
     // The live task owns this URL even when its scheduling guards prevent a
@@ -1187,7 +1461,10 @@ async function runReviewPhases(
         current.task_id !== pr.task_id ||
         current.task_title !== pr.task_title ||
         current.task_description !== pr.task_description ||
-        current.task_plan !== pr.task_plan;
+        current.task_plan !== pr.task_plan ||
+        current.task_stack_position !== pr.task_stack_position ||
+        current.task_stack_size !== pr.task_stack_size ||
+        current.task_pr_scope !== pr.task_pr_scope;
       if (current.head_sha !== pr.head_sha) {
         return {
           ...current,
@@ -1277,7 +1554,7 @@ async function runReviewPhases(
           !task ||
           task.paused ||
           task.status !== "in_review" ||
-          task.pr_url !== pr.pr_url ||
+          !trackedTaskPRUrls(task).includes(pr.pr_url) ||
           task.current_run_pid != null ||
           !isAutomaticReviewEnabled(task)
         ) {
@@ -1319,7 +1596,7 @@ async function runReviewPhases(
                 task &&
                 !task.paused &&
                 task.status === "in_review" &&
-                task.pr_url === summary.pr_url &&
+                trackedTaskPRUrls(task).includes(summary.pr_url) &&
                 isAutomaticReviewEnabled(task)
               ) {
                 await deps.updateTask(task.id, {

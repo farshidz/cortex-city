@@ -24,12 +24,23 @@ You are working in a git worktree. A branch has already been created for you.
 9. Do not reformat code you are not changing. Keep the diff tightly scoped so review stays readable.
 10. Use the Follow-up Task Requests and Available Agents sections below when you need to request additional follow-up work. If a follow-up task is needed, include it in your final JSON response under `tool_calls.create_task`; otherwise omit `tool_calls`.
 
+## Stacked PRs
+Create a stack of PRs ONLY when the task description above explicitly asks for stacked PRs. Otherwise create exactly one PR as described in the instructions and set `stacked_prs` to null in your final JSON.
+
+When the task asks for a stack:
+
+1. Split the work into small, independently reviewable slices — typically 2 to 4 PRs unless the task specifies a structure. Each slice must build and pass its own tests without the slices above it.
+2. Branch slice 1 from `origin/{{BASE_BRANCH}}`; its PR targets `{{BASE_BRANCH}}`. Branch each later slice from the branch below it; its PR targets that branch. Derive the extra branch names from your working branch (for example `<working-branch>-2`, `<working-branch>-3`).
+3. Open the PRs bottom-up. Start each PR description with a stack header line — `Stack: PR <position>/<total> — <slice summary>` — followed by links to the other PRs in the stack, and still end each description with the attribution line from the instructions above.
+4. In your final JSON, set `stacked_prs` to the full stack bottom-first (position, pr_url, branch_name, base_branch, and a one-sentence scope for each entry), and set the top-level `pr_url`/`branch_name` to the bottom PR.
+
 ## Response Format
 Your response MUST conform to the required JSON schema. Provide:
 - **status**: "completed" if you created a PR, "needs_review" if done but needs human review, "blocked" if you hit a blocker, "failed" if something went wrong
 - **summary**: Brief description of what you did
 - **pr_url**: The full GitHub PR URL (e.g. https://github.com/owner/repo/pull/123)
 - **branch_name**: The git branch name
+- **stacked_prs**: Only for stacked-PR tasks: every PR in the stack, bottom first. Use null for single-PR work.
 - **files_changed**: List of files you created or modified
 - **assumptions**: Any decisions you made without explicit guidance
 - **blockers**: Issues that prevented full completion (empty array if none)

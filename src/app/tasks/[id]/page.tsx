@@ -650,6 +650,60 @@ export default function TaskDetailPage({
             </CardContent>
           </Card>
 
+          {(task.stacked_prs?.length ?? 0) > 0 && (
+            <Card>
+              <CardHeader>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <CardTitle className="text-base">PR Stack</CardTitle>
+                  <Badge variant="outline">
+                    {task.stacked_prs!.filter((e) => e.state === "merged").length}
+                    /{task.stacked_prs!.length} merged
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {[...task.stacked_prs!]
+                  .sort((a, b) => a.position - b.position)
+                  .map((entry) => (
+                    <div
+                      key={entry.pr_url}
+                      className="flex flex-wrap items-center gap-2 text-sm"
+                    >
+                      <span className="font-mono text-xs text-muted-foreground">
+                        #{entry.position}
+                      </span>
+                      <a
+                        href={entry.pr_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-medium underline underline-offset-2"
+                      >
+                        {entry.branch_name}
+                      </a>
+                      <span className="text-xs text-muted-foreground">
+                        → {entry.base_branch}
+                      </span>
+                      <Badge
+                        variant={entry.state === "open" ? "outline" : "secondary"}
+                      >
+                        {entry.state}
+                      </Badge>
+                      {entry.state === "open" && entry.pr_status && (
+                        <Badge variant="outline">
+                          {entry.pr_status.replace("_", " ")}
+                        </Badge>
+                      )}
+                      {entry.scope && (
+                        <span className="w-full text-xs text-muted-foreground">
+                          {entry.scope}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+              </CardContent>
+            </Card>
+          )}
+
           {task.automatic_review && (
             <Card>
               <CardHeader>

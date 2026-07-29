@@ -211,6 +211,236 @@ test(
   }
 );
 
+test("handleRunComplete records stacked PRs, mirrors the frontier, and captures per-entry hashes", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      // PR 21 gained a comment (id 30) during the run: its hash must be
+      // skipped so the next poll wakes the task.
+      "farshidz/marqo-cortex-city#21": {
+        state: "open",
+        merged: false,
+        headRefOid: "head-21",
+        reviews: [],
+        comments: [],
+        issueComments: [{ id: 30 }],
+        checks: [{ name: "test", state: "SUCCESS" }],
+      },
+      "farshidz/marqo-cortex-city#22": {
+        state: "open",
+        merged: false,
+        headRefOid: "head-22",
+        reviews: [],
+        comments: [],
+        issueComments: [{ id: 12 }],
+        checks: [{ name: "test", state: "SUCCESS" }],
+      },
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({ agent_runner: "claude", status: "open" }))};
+      await createTask(task);
+      await __testUtils.handleRunComplete(
+        "task-1",
+        0,
+        ${JSON.stringify(
+          JSON.stringify({
+            type: "result",
+            subtype: "print",
+            is_error: false,
+            duration_ms: 10,
+            result: "done",
+            session_id: "claude-session",
+            terminal_reason: "completed",
+            total_cost_usd: 0,
+            num_turns: 1,
+            structured_output: {
+              status: "completed",
+              summary: "Opened a two-PR stack",
+              pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/21",
+              branch_name: "agent/stack",
+              stacked_prs: [
+                {
+                  position: 1,
+                  pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/21",
+                  branch_name: "agent/stack",
+                  base_branch: "main",
+                  scope: "Slice one",
+                },
+                {
+                  position: 2,
+                  pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/22",
+                  branch_name: "agent/stack-2",
+                  base_branch: "agent/stack",
+                  scope: "Slice two",
+                },
+              ],
+              files_changed: [],
+              assumptions: [],
+              blockers: [],
+              next_steps: [],
+              tool_calls: null,
+            },
+            usage: {
+              input_tokens: 5,
+              output_tokens: 2,
+              cache_read_input_tokens: 1,
+            },
+          })
+        )},
+        "",
+        42,
+        { "https://github.com/farshidz/marqo-cortex-city/pull/22": [12] },
+        "claude",
+        "initial"
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  const task = result.tasks[0];
+  assert.equal(task.status, "in_review");
+  assert.equal(task.pr_url, "https://github.com/farshidz/marqo-cortex-city/pull/21");
+  assert.equal(task.branch_name, "agent/stack");
+  assert.equal(task.stacked_prs.length, 2);
+  assert.equal(task.stacked_prs[0].state, "open");
+  assert.equal(task.stacked_prs[0].scope, "Slice one");
+  // PR 21 saw a mid-run comment, so only PR 22 gets a captured hash.
+  assert.equal(task.stacked_prs[0].last_review_gh_state, undefined);
+  assert.match(task.stacked_prs[1].last_review_gh_state, /^[a-f0-9]{16}$/);
+  // Stacked tasks do not use the task-level hash.
+  assert.equal(task.last_review_gh_state, undefined);
+});
+
+test("handleRunComplete keeps worker-owned stack state and re-mirrors after restack", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#22": {
+        state: "open",
+        merged: false,
+        headRefOid: "head-22",
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        checks: [{ name: "test", state: "SUCCESS" }],
+      },
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          agent_runner: "claude",
+          status: "in_review",
+          pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/22",
+          branch_name: "agent/stack-2",
+          stacked_prs: [
+            {
+              position: 1,
+              pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/21",
+              branch_name: "agent/stack",
+              base_branch: "main",
+              scope: "Slice one",
+              state: "merged",
+            },
+            {
+              position: 2,
+              pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/22",
+              branch_name: "agent/stack-2",
+              base_branch: "agent/stack",
+              scope: "Slice two",
+              state: "open",
+            },
+          ],
+        })
+      )};
+      await createTask(task);
+      await __testUtils.handleRunComplete(
+        "task-1",
+        0,
+        ${JSON.stringify(
+          JSON.stringify({
+            type: "result",
+            subtype: "print",
+            is_error: false,
+            duration_ms: 10,
+            result: "restacked",
+            session_id: "claude-session",
+            terminal_reason: "completed",
+            total_cost_usd: 0,
+            num_turns: 1,
+            structured_output: {
+              status: "completed",
+              summary: "Restacked PR 22 onto main",
+              pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/22",
+              branch_name: "agent/stack-2",
+              stacked_prs: [
+                {
+                  position: 1,
+                  pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/21",
+                  branch_name: "agent/stack",
+                  base_branch: "main",
+                  scope: "Slice one",
+                },
+                {
+                  position: 2,
+                  pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/22",
+                  branch_name: "agent/stack-2",
+                  base_branch: "main",
+                  scope: "",
+                },
+              ],
+              files_changed: [],
+              assumptions: [],
+              blockers: [],
+              next_steps: [],
+              tool_calls: null,
+            },
+            usage: {
+              input_tokens: 5,
+              output_tokens: 2,
+              cache_read_input_tokens: 1,
+            },
+          })
+        )},
+        "",
+        42,
+        {},
+        "claude",
+        "review"
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  const task = result.tasks[0];
+  // The merged entry keeps its worker-owned state even though the report
+  // still lists it, and the mirror follows the open frontier entry.
+  assert.equal(task.stacked_prs[0].state, "merged");
+  assert.equal(task.stacked_prs[1].state, "open");
+  assert.equal(task.stacked_prs[1].base_branch, "main");
+  // A blank reported scope falls back to the tracked one.
+  assert.equal(task.stacked_prs[1].scope, "Slice two");
+  assert.equal(task.pr_url, "https://github.com/farshidz/marqo-cortex-city/pull/22");
+  assert.match(task.stacked_prs[1].last_review_gh_state, /^[a-f0-9]{16}$/);
+});
+
 test("handleRunComplete creates Claude follow-up tasks and updates review metadata", () => {
   const { workspace } = setupWorkspace();
   const ghStateFile = path.join(workspace, "gh-state.json");

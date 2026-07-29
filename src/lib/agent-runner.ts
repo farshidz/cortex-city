@@ -32,6 +32,12 @@ import type {
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
 import {
+  frontierStackedPR,
+  isStackedTask,
+  openStackedPRs,
+  reconcileStackedPRs,
+} from "./stacked-prs";
+import {
   buildInterruptedTaskUpdates,
   shouldUseContinuePrompt,
 } from "./orchestrator-runtime";
@@ -61,6 +67,39 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
     branch_name: {
       type: "string",
       description: "Git branch name used for this work",
+    },
+    stacked_prs: {
+      type: ["array", "null"],
+      description:
+        "Only when the task explicitly asked for stacked PRs: every PR in the stack, bottom first. Use null for single-PR work.",
+      items: {
+        type: "object",
+        properties: {
+          position: {
+            type: "integer",
+            description: "1-based stack position; 1 is the bottom PR targeting the base branch",
+          },
+          pr_url: {
+            type: "string",
+            description: "Full GitHub pull request URL for this stack entry",
+          },
+          branch_name: {
+            type: "string",
+            description: "Git branch this stack entry's PR merges from",
+          },
+          base_branch: {
+            type: "string",
+            description:
+              "Branch this PR currently targets: the repository base branch for position 1, otherwise the branch of the PR below",
+          },
+          scope: {
+            type: "string",
+            description: "One-sentence description of the slice of the task this PR delivers",
+          },
+        },
+        required: ["position", "pr_url", "branch_name", "base_branch", "scope"],
+        additionalProperties: false,
+      },
     },
     files_changed: {
       type: "array",
@@ -120,6 +159,7 @@ const AGENT_REPORT_SCHEMA = JSON.stringify({
     "summary",
     "pr_url",
     "branch_name",
+    "stacked_prs",
     "files_changed",
     "assumptions",
     "blockers",
@@ -534,9 +574,7 @@ export async function spawnAgentSession(
   );
 
   // Capture submitted comment IDs before the run to detect mid-run additions
-  const preRunCommentIds = task.pr_url
-    ? await getSubmittedCommentIds(task.pr_url)
-    : [];
+  const preRunCommentIds = await snapshotPreRunCommentIds(task);
 
   // Stream session output to disk in real-time
   const sessionLog = createSessionLog(task.id);
@@ -1149,6 +1187,40 @@ function parseCodexResult(stdout: string): ClaudeRunResult {
   return buildCodexResult(accumulator, stdout);
 }
 
+// A run can receive feedback on any tracked PR, so comment snapshots are
+// keyed by PR URL. Legacy callers still pass a bare array captured for the
+// task's single pr_url.
+type PreRunCommentSnapshots = number[] | Record<string, number[]>;
+
+function preRunCommentIdsFor(
+  snapshots: PreRunCommentSnapshots,
+  prUrl: string
+): number[] {
+  return Array.isArray(snapshots) ? snapshots : snapshots[prUrl] || [];
+}
+
+function trackedCommentSnapshotUrls(task: Task): string[] {
+  const urls = new Set<string>();
+  if (isStackedTask(task)) {
+    for (const entry of openStackedPRs(task.stacked_prs)) {
+      urls.add(entry.pr_url);
+    }
+  }
+  if (task.pr_url) urls.add(task.pr_url);
+  return [...urls];
+}
+
+async function snapshotPreRunCommentIds(
+  task: Task
+): Promise<Record<string, number[]>> {
+  const entries = await Promise.all(
+    trackedCommentSnapshotUrls(task).map(
+      async (url) => [url, await getSubmittedCommentIds(url)] as const
+    )
+  );
+  return Object.fromEntries(entries);
+}
+
 async function createFollowupTasks(
   parentTask: Task,
   requests: FollowupTaskRequest[]
@@ -1238,7 +1310,7 @@ async function handleRunComplete(
   stdout: string,
   _stderr: string,
   durationMs: number,
-  preRunCommentIds: number[],
+  preRunCommentIds: PreRunCommentSnapshots,
   runtime: AgentRuntime,
   runReason:
     | "initial"
@@ -1294,13 +1366,32 @@ async function handleRunComplete(
         updates.branch_name = report.branch_name;
       }
 
+      // Reconcile stack membership from the report; the frontier (bottom-most
+      // open) entry then overrides the mirror fields so single-PR consumers
+      // keep pointing at the currently mergeable PR.
+      const reconciled =
+        runReason === "cleanup"
+          ? undefined
+          : reconcileStackedPRs(currentTask?.stacked_prs, report.stacked_prs);
+      if (reconciled) {
+        for (const warning of reconciled.warnings) {
+          console.warn(`[agent-runner] Task ${taskId}: ${warning}`);
+        }
+        updates.stacked_prs = reconciled.stack;
+        const frontier = frontierStackedPR(reconciled.stack);
+        if (frontier) {
+          updates.pr_url = frontier.pr_url;
+          updates.branch_name = frontier.branch_name;
+        }
+      }
+
       // Auto-transition status based on agent report
       if (
         shouldApplySuccessSideEffects &&
         runReason !== "cleanup" &&
         (report.status === "completed" || report.status === "needs_review")
       ) {
-        if (report.pr_url) {
+        if (report.pr_url || updates.pr_url) {
           updates.status = "in_review";
         }
       }
@@ -1331,16 +1422,46 @@ async function handleRunComplete(
     }
 
     const prUrl = updates.pr_url || currentTask?.pr_url;
+    const stackAfterRun = updates.stacked_prs ?? currentTask?.stacked_prs;
 
-    // Capture GH state hash AFTER run so we don't re-trigger on our own changes
-    // But if new submitted comments appeared mid-run, skip hash update so next poll picks them up
-    if (
+    // Capture GH state hashes AFTER run so we don't re-trigger on our own
+    // changes. If new submitted comments appeared mid-run, skip that PR's hash
+    // update so the next poll picks them up. Stacked tasks track a hash per
+    // open entry instead of the task-level field.
+    if (stackAfterRun && stackAfterRun.length > 0) {
+      if (shouldApplySuccessSideEffects && runReason !== "manual_instruction") {
+        const entries =
+          updates.stacked_prs ?? stackAfterRun.map((entry) => ({ ...entry }));
+        for (const entry of entries) {
+          if (entry.state !== "open") continue;
+          const postRunCommentIds = await getSubmittedCommentIds(entry.pr_url);
+          const pre = preRunCommentIdsFor(preRunCommentIds, entry.pr_url);
+          const newComments = postRunCommentIds.filter((id) => !pre.includes(id));
+          if (newComments.length > 0) {
+            console.log(
+              `[agent-runner] ${newComments.length} new comment(s) added during run on ${entry.pr_url} for task ${taskId} — skipping hash update`
+            );
+            continue;
+          }
+          const newHash = await getPRStateHash(entry.pr_url);
+          if (newHash) {
+            entry.last_review_gh_state = newHash;
+          }
+        }
+        updates.stacked_prs = entries;
+      } else if (shouldApplySuccessSideEffects) {
+        console.log(
+          `[agent-runner] Skipping review hash update for ${runReason} run on task ${taskId}`
+        );
+      }
+    } else if (
       prUrl &&
       shouldApplySuccessSideEffects &&
       runReason !== "manual_instruction"
     ) {
       const postRunCommentIds = await getSubmittedCommentIds(prUrl);
-      const newComments = postRunCommentIds.filter((id) => !preRunCommentIds.includes(id));
+      const pre = preRunCommentIdsFor(preRunCommentIds, prUrl);
+      const newComments = postRunCommentIds.filter((id) => !pre.includes(id));
       if (newComments.length > 0) {
         console.log(
           `[agent-runner] ${newComments.length} new comment(s) added during run for task ${taskId} — skipping hash update`
@@ -1396,6 +1517,8 @@ export const __testUtils = {
   handleRunTimeout,
   isBranchCheckedOutError,
   parseCodexResult,
+  preRunCommentIdsFor,
+  trackedCommentSnapshotUrls,
   resolveAgentWorkingDirectory,
   sanitizeManagedRepoName,
   shouldClearCompletedRunPid,

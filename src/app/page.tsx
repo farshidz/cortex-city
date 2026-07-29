@@ -210,7 +210,13 @@ export default function TasksPage() {
                       rel="noopener noreferrer"
                     >
                       <Button size="sm" variant="outline">
-                        PR
+                        {(task.stacked_prs?.length ?? 0) > 0
+                          ? `PR ${
+                              task.stacked_prs!.filter(
+                                (entry) => entry.state === "merged"
+                              ).length
+                            }/${task.stacked_prs!.length}`
+                          : "PR"}
                       </Button>
                     </a>
                   )}

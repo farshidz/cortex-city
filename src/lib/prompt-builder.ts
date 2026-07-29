@@ -1,8 +1,9 @@
 import { readFileSync } from "fs";
 import path from "path";
-import type { Task, AgentConfig, OrchestratorConfig } from "./types";
+import type { Task, AgentConfig, OrchestratorConfig, TaskStackedPR } from "./types";
 import { readConfig, readTasks } from "./store";
 import { resolvePromptPath } from "./agent-files";
+import { isStackedTask, stackEntriesRequiringRestack } from "./stacked-prs";
 
 const PROMPTS_DIR = path.join(process.cwd(), "prompts");
 
@@ -148,12 +149,69 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
     .replace("{{AGENT_NAME}}", agentName)
     .replace("{{MERGE_STATUS}}", describeMergeStatus(options?.prStatus || task.pr_status, baseBranch))
     .replace(/\{\{BASE_BRANCH\}\}/g, baseBranch)
+    .replace("{{STACK_SECTION}}", buildStackSection(task, baseBranch))
     .replace(
       "{{REPO_CONTEXT_SECTION}}",
       buildPromptContextSection("Agent Review Context", reviewContext)
     )
     .replace("{{EXISTING_SUBTASKS}}", buildExistingFollowupTasksSection(task))
     .replace("{{AGENT_DIRECTORY}}", agentDirectory);
+}
+
+function describeStackEntry(entry: TaskStackedPR): string {
+  const detail = [
+    `branch \`${entry.branch_name}\``,
+    `base \`${entry.base_branch}\``,
+    `state: ${entry.state}`,
+    entry.state === "open" && entry.pr_status
+      ? `merge status: ${entry.pr_status}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const scope = entry.scope ? `\n  Scope: ${entry.scope}` : "";
+  return `- PR ${entry.position}: ${entry.pr_url} — ${detail}${scope}`;
+}
+
+// Stacked tasks get the whole-stack picture plus the rules that override the
+// single-PR instructions (which branch to sync, when rebasing is allowed).
+function buildStackSection(task: Task, baseBranch: string): string {
+  if (!isStackedTask(task)) return "";
+  const stack = [...task.stacked_prs].sort((a, b) => a.position - b.position);
+  const restackEntries = stackEntriesRequiringRestack(stack);
+
+  const lines = [
+    "## PR Stack",
+    "This task owns a stack of PRs. Current recorded state (bottom first):",
+    "",
+    ...stack.map((entry) => describeStackEntry(entry)),
+    "",
+    "### Stack rules",
+    `- Instruction 1 above (merging \`origin/${baseBranch}\`) applies only to the bottom open PR of the stack. Never merge \`${baseBranch}\` directly into a higher stack branch.`,
+    "- Inspect all three feedback surfaces on EVERY open stack PR, not just the bottom one. Address feedback on the branch of the PR where it was left: check out that branch, commit, and push it.",
+    "- Do not merge a lower stack branch into a higher one just because the lower branch gained commits. GitHub diffs each PR against its merge base, so upper PRs tolerate that drift until restack time.",
+    "- Never open an additional PR or close an existing stack PR unless feedback explicitly asks for it.",
+    "- In your final JSON, report the full current stack under `stacked_prs` (every entry, including merged or closed ones) with each entry's current branch, base, and scope.",
+  ];
+
+  if (restackEntries.length > 0) {
+    lines.push(
+      "",
+      "### Restack required",
+      `These open PRs still target the branch of a merged or closed PR: ${restackEntries
+        .map((entry) => `PR ${entry.position} (${entry.pr_url})`)
+        .join(", ")}.`,
+      "Restack them now, bottom-up, before addressing other feedback:",
+      "1. `git fetch origin` and confirm which stack PRs GitHub reports as merged.",
+      `2. Retarget the affected PR's base to the merged PR's own base (\`gh pr edit <number> --base <new-base>\`) unless GitHub already retargeted it after the old base branch was deleted.`,
+      "3. Rebase the PR's branch onto the new base so the already-merged commits drop out: `git rebase --onto origin/<new-base> <old-base-tip> <branch>`, where `<old-base-tip>` is the last commit of the old base branch (for example `origin/<old-base>` before pruning). Squash merges rewrite merged commits, so the merged content must come from the new base — never keep the old stack commits.",
+      "4. Resolve any rebase conflicts in this session.",
+      "5. Push each restacked branch with `git push --force-with-lease`. This restack is the ONLY situation where rebasing and force-pushing are allowed; the no-rebase rule stays in force everywhere else."
+    );
+  }
+
+  lines.push("");
+  return lines.join("\n");
 }
 
 export function buildCleanupPrompt(task: Task): string {
@@ -209,6 +267,7 @@ function formatAgentDescription(
 
 export const __testUtils = {
   buildPromptContextSection,
+  buildStackSection,
   describeMergeStatus,
   formatAgentDescription,
   buildAgentDirectory,

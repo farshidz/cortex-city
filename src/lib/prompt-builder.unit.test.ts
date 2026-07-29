@@ -6,10 +6,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { __testUtils } from "./prompt-builder";
-import type { AgentConfig, OrchestratorConfig } from "./types";
+import type { AgentConfig, OrchestratorConfig, Task, TaskStackedPR } from "./types";
 
-const { buildPromptContextSection, describeMergeStatus, formatAgentDescription, buildAgentDirectory, loadPromptFile } =
-  __testUtils;
+const {
+  buildPromptContextSection,
+  buildStackSection,
+  describeMergeStatus,
+  formatAgentDescription,
+  buildAgentDirectory,
+  loadPromptFile,
+} = __testUtils;
 
 test("buildPromptContextSection skips empty content and wraps non-empty content", () => {
   assert.equal(buildPromptContextSection("Title"), "");
@@ -109,4 +115,86 @@ test("buildAgentDirectory joins each agent with a leading dash and current marke
 test("loadPromptFile returns undefined for missing or empty files", () => {
   // Definitely missing path on macOS.
   assert.equal(loadPromptFile("/does/not/exist/at-all-prompt.md"), undefined);
+});
+
+function stackedTask(stack: TaskStackedPR[]): Task {
+  return {
+    id: "task-1",
+    title: "Stacked work",
+    description: "",
+    status: "in_review",
+    agent: "cortex-city-swe",
+    created_at: "2026-05-01T00:00:00.000Z",
+    updated_at: "2026-05-01T00:00:00.000Z",
+    stacked_prs: stack,
+  };
+}
+
+test("buildStackSection is empty for non-stacked tasks", () => {
+  assert.equal(buildStackSection(stackedTask([]), "main"), "");
+  assert.equal(
+    buildStackSection({ ...stackedTask([]), stacked_prs: undefined }, "main"),
+    ""
+  );
+});
+
+test("buildStackSection lists entries bottom-first with stack rules", () => {
+  const section = buildStackSection(
+    stackedTask([
+      {
+        position: 2,
+        pr_url: "https://github.com/acme/widget/pull/2",
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        state: "open",
+        pr_status: "clean",
+      },
+      {
+        position: 1,
+        pr_url: "https://github.com/acme/widget/pull/1",
+        branch_name: "b1",
+        base_branch: "main",
+        scope: "Slice one",
+        state: "open",
+      },
+    ]),
+    "main"
+  );
+  assert.match(section, /## PR Stack/);
+  const firstIndex = section.indexOf("PR 1: https://github.com/acme/widget/pull/1");
+  const secondIndex = section.indexOf("PR 2: https://github.com/acme/widget/pull/2");
+  assert.ok(firstIndex >= 0 && secondIndex > firstIndex);
+  assert.match(section, /merge status: clean/);
+  assert.match(section, /Scope: Slice two/);
+  assert.match(section, /origin\/main/);
+  assert.doesNotMatch(section, /Restack required/);
+});
+
+test("buildStackSection flags restack when an open entry bases on a merged branch", () => {
+  const section = buildStackSection(
+    stackedTask([
+      {
+        position: 1,
+        pr_url: "https://github.com/acme/widget/pull/1",
+        branch_name: "b1",
+        base_branch: "main",
+        scope: "Slice one",
+        state: "merged",
+      },
+      {
+        position: 2,
+        pr_url: "https://github.com/acme/widget/pull/2",
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        state: "open",
+      },
+    ]),
+    "main"
+  );
+  assert.match(section, /### Restack required/);
+  assert.match(section, /PR 2 \(https:\/\/github\.com\/acme\/widget\/pull\/2\)/);
+  assert.match(section, /--force-with-lease/);
+  assert.match(section, /rebase --onto/);
 });

@@ -6,6 +6,7 @@ You are addressing feedback on a pull request you previously created.
 ## Merge Status
 {{MERGE_STATUS}}
 
+{{STACK_SECTION}}
 ## Instructions
 1. Immediately run `git fetch origin` and merge `origin/{{BASE_BRANCH}}` into your working branch. Do not rebase. If GitHub reports conflicts, resolve them now before moving on.
 2. Follow this GitHub review protocol exactly. You must inspect all three feedback surfaces separately before deciding there is nothing to do:
@@ -29,6 +30,7 @@ Your response MUST conform to the required JSON schema. Provide:
 - **summary**: What you changed to address the feedback
 - **pr_url**: The existing PR URL
 - **branch_name**: The branch name
+- **stacked_prs**: Only when a PR Stack section appears above: the full current stack, bottom first, including merged or closed entries. Use null for single-PR tasks.
 - **files_changed**: Files modified in this round of changes
 - **assumptions**: Decisions made without explicit guidance
 - **blockers**: Issues preventing full resolution (empty array if none)
