@@ -302,6 +302,9 @@ function effectiveReviewRequest(
       task_title: undefined,
       task_description: undefined,
       task_plan: undefined,
+      task_stack_position: undefined,
+      task_stack_size: undefined,
+      task_pr_scope: undefined,
     };
   }
   return {
@@ -313,10 +316,32 @@ function effectiveReviewRequest(
     task_title: request.task_title ?? cached?.task_title,
     task_description: request.task_description ?? cached?.task_description,
     task_plan: request.task_plan ?? cached?.task_plan,
+    task_stack_position:
+      request.task_stack_position ?? cached?.task_stack_position,
+    task_stack_size: request.task_stack_size ?? cached?.task_stack_size,
+    task_pr_scope: request.task_pr_scope ?? cached?.task_pr_scope,
     // These decisions do not apply to a PR owned by the signed-in user.
     my_approval_sha: undefined,
     my_changes_requested_sha: undefined,
   };
+}
+
+// The single identity check for "is this still the same review?". Every field
+// that changes the reviewer's policy or completeness boundary must be listed
+// here — including the stack-slice fields — and every claim, pre-action, and
+// final-save comparison must go through this helper so a context change at an
+// unchanged HEAD can never publish or persist a stale result.
+function sameReviewContext(a: ReviewRequest, b: ReviewRequest): boolean {
+  return (
+    reviewSourceOf(a) === reviewSourceOf(b) &&
+    a.task_id === b.task_id &&
+    a.task_title === b.task_title &&
+    a.task_description === b.task_description &&
+    a.task_plan === b.task_plan &&
+    a.task_stack_position === b.task_stack_position &&
+    a.task_stack_size === b.task_stack_size &&
+    a.task_pr_scope === b.task_pr_scope
+  );
 }
 
 function reviewRequestSnapshot(review: ReviewRequest): ReviewRequest {
@@ -326,6 +351,9 @@ function reviewRequestSnapshot(review: ReviewRequest): ReviewRequest {
     task_title: review.task_title,
     task_description: review.task_description,
     task_plan: review.task_plan,
+    task_stack_position: review.task_stack_position,
+    task_stack_size: review.task_stack_size,
+    task_pr_scope: review.task_pr_scope,
     label_only: review.label_only,
     self_authored: review.self_authored,
     pr_url: review.pr_url,
@@ -394,6 +422,26 @@ function buildReviewSourceContext(
     request.task_plan?.trim() || "(not provided)",
     "</task_plan>",
   ];
+  if (request.task_stack_position && request.task_stack_size) {
+    context.push(
+      "",
+      "## Stacked PR slice",
+      [
+        `This PR is slice ${request.task_stack_position} of ${request.task_stack_size} in a stack of PRs that`,
+        "together deliver the task above. It targets its stack base branch, so",
+        "the diff contains only this slice.",
+      ].join(" "),
+      "<slice_scope>",
+      request.task_pr_scope?.trim() || "(not recorded)",
+      "</slice_scope>",
+      [
+        "Judge completeness and scope against this slice only. Do not require",
+        "the rest of the task's plan to appear in this diff, and do not flag",
+        "work that belongs to another slice of the stack as missing or out of",
+        "scope.",
+      ].join(" ")
+    );
+  }
   if (taskInstructions?.trim()) {
     context.push(
       "",
@@ -1114,12 +1162,6 @@ export async function spawnReviewSummary(
     );
     assertReviewRunLockHealthy(runLock);
     const claimed = await mutateReviewSummary(target.pr_url, (current) => {
-      const sameReviewContext = (a: ReviewRequest, b: ReviewRequest) =>
-        reviewSourceOf(a) === reviewSourceOf(b) &&
-        a.task_id === b.task_id &&
-        a.task_title === b.task_title &&
-        a.task_description === b.task_description &&
-        a.task_plan === b.task_plan;
       const currentMatchesPreparedState = Boolean(
         current &&
           cachedBefore &&
@@ -1293,11 +1335,7 @@ export async function spawnReviewSummary(
       );
       const actionTargetChanged =
         actionTarget.head_sha !== target.head_sha ||
-        reviewSourceOf(actionTarget) !== reviewSourceOf(target) ||
-        actionTarget.task_id !== target.task_id ||
-        actionTarget.task_title !== target.task_title ||
-        actionTarget.task_description !== target.task_description ||
-        actionTarget.task_plan !== target.task_plan;
+        !sameReviewContext(actionTarget, target);
       const shouldVerifyAutomatedApproval =
         runtimeSuccessful &&
         !actionTargetChanged &&
@@ -1562,12 +1600,10 @@ export async function spawnReviewSummary(
         latestBeforeSave
       );
       const headMovedDuringRun = latestTarget.head_sha !== target.head_sha;
-      const reviewContextChangedDuringRun =
-        reviewSourceOf(latestTarget) !== reviewSourceOf(target) ||
-        latestTarget.task_id !== target.task_id ||
-        latestTarget.task_title !== target.task_title ||
-        latestTarget.task_description !== target.task_description ||
-        latestTarget.task_plan !== target.task_plan;
+      const reviewContextChangedDuringRun = !sameReviewContext(
+        latestTarget,
+        target
+      );
       return {
         // Reconciliation may discover a new HEAD or change review context while
         // the agent is running. Keep the latest identity; a changed context is

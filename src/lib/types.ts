@@ -40,11 +40,43 @@ export interface AgentReport {
   summary: string;
   pr_url?: string;
   branch_name?: string;
+  stacked_prs?: AgentReportStackedPR[];
   files_changed: string[];
   assumptions: string[];
   blockers: string[];
   next_steps: string[];
   tool_calls?: AgentToolCalls;
+}
+
+// Stack membership as the agent reports it. Lifecycle state stays out of the
+// report: the worker owns entry states by polling GitHub directly.
+export interface AgentReportStackedPR {
+  position: number; // 1 = bottom PR targeting the agent's base branch
+  pr_url: string;
+  branch_name: string;
+  base_branch: string;
+  scope: string;
+}
+
+export type TaskStackedPRState = "open" | "merged" | "closed";
+
+export interface TaskStackedPR {
+  position: number; // 1 = bottom of the stack
+  pr_url: string;
+  branch_name: string;
+  base_branch: string;
+  scope: string;
+  state: TaskStackedPRState;
+  pr_status?: PRStatus;
+  // Per-PR analog of Task.last_review_gh_state; stacked tasks track review
+  // wakeup hashes per entry instead of on the task.
+  last_review_gh_state?: string;
+  // Recorded when the worker observes this entry merge (worker-owned).
+  merge_commit_sha?: string;
+  // Merge commits of lower entries whose incorporation into this open entry's
+  // history GitHub has not yet verified. While non-empty the restack stays
+  // required, no matter what base the agent report claims (worker-owned).
+  pending_restack_of?: string[];
 }
 
 export interface AgentToolCalls {
@@ -73,6 +105,10 @@ export interface Task {
   session_id?: string;
   pr_url?: string;
   branch_name?: string;
+  // Present only when the task produced a stack of PRs. pr_url/branch_name
+  // then mirror the bottom-most open entry so single-PR consumers keep
+  // pointing at the currently mergeable PR.
+  stacked_prs?: TaskStackedPR[];
   worktree_path?: string;
   final_cleanup_state?: "running" | "finished";
   current_run_pid?: number;
@@ -96,6 +132,12 @@ export interface Task {
   codex_cumulative_input_tokens?: number;
   codex_cumulative_cached_input_tokens?: number;
   codex_cumulative_output_tokens?: number;
+  // Fingerprint of the broken-stack condition (closed unmerged base) whose
+  // decision run was last launched. The worker stops re-forcing decision runs
+  // only while this matches the current condition AND a blocked report is
+  // recorded, so an unrelated blocker or a different later closure cannot
+  // suppress surfacing.
+  stack_decision_requested?: string;
   // Review tracking
   last_review_gh_state?: string; // hash of PR state captured after each run
   // Rollout marker for a head already covered by the retired task reviewer.
@@ -193,6 +235,12 @@ export interface ReviewRequest {
   task_title?: string;
   task_description?: string;
   task_plan?: string;
+  // Stack slice context, populated only when the reviewed PR belongs to a
+  // task-owned stack. The reviewer judges the PR against its slice scope
+  // instead of the whole task.
+  task_stack_position?: number;
+  task_stack_size?: number;
+  task_pr_scope?: string;
   // True when the label was the only discovery criterion that selected this
   // PR. Removing the label can then retire the review without treating an open
   // PR as a failed final-state lookup.

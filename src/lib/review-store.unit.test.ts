@@ -71,3 +71,35 @@ test("patchReviewSummary returns undefined for unknown pr_urls", async () => {
   const result = await store.patchReviewSummary(missing, { summary: "noop" });
   assert.equal(result, undefined);
 });
+
+test("stack slice fields persist for task reviews and clear for inbound ones", async () => {
+  const taskUrl = `https://github.com/acme/widget/pull/${nanoid(6)}`;
+  const inboundUrl = `https://github.com/acme/widget/pull/${nanoid(6)}`;
+  try {
+    const stored = await store.upsertReviewSummary({
+      ...sample(taskUrl),
+      source: "task",
+      task_id: "task-1",
+      task_stack_position: 2,
+      task_stack_size: 3,
+      task_pr_scope: "Slice two",
+    });
+    assert.equal(stored.task_stack_position, 2);
+    assert.equal(stored.task_stack_size, 3);
+    assert.equal(stored.task_pr_scope, "Slice two");
+
+    const inbound = await store.upsertReviewSummary({
+      ...sample(inboundUrl),
+      source: "inbound",
+      task_stack_position: 2,
+      task_stack_size: 3,
+      task_pr_scope: "Slice two",
+    });
+    assert.equal(inbound.task_stack_position, undefined);
+    assert.equal(inbound.task_stack_size, undefined);
+    assert.equal(inbound.task_pr_scope, undefined);
+  } finally {
+    await store.deleteReviewSummary(taskUrl);
+    await store.deleteReviewSummary(inboundUrl);
+  }
+});

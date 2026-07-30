@@ -65,6 +65,7 @@ function writeTestTemplates(workspace: string) {
       "Status={{MERGE_STATUS}}",
       "Base={{BASE_BRANCH}}",
       "Again={{BASE_BRANCH}}",
+      "Stack={{STACK_SECTION}}",
       "{{REPO_CONTEXT_SECTION}}",
       "Subtasks={{EXISTING_SUBTASKS}}",
       "Directory={{AGENT_DIRECTORY}}",
@@ -362,6 +363,88 @@ test("buildReviewPrompt uses sensible defaults for unknown mergeability", () => 
   assert.match(result, /Base=trunk/);
   assert.doesNotMatch(result, /Agent Review Context/);
   assert.match(result, /Subtasks=None yet/);
+});
+
+test("buildReviewPrompt renders the stack section only for stacked tasks", () => {
+  const workspace = createTempWorkspace();
+  writeTestTemplates(workspace);
+  writeConfig(workspace);
+
+  const stackedResult = runPromptScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/2",
+          stacked_prs: [
+            {
+              position: 1,
+              pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/1",
+              branch_name: "agent/slice",
+              base_branch: "main",
+              scope: "Slice one",
+              state: "merged",
+            },
+            {
+              position: 2,
+              pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/2",
+              branch_name: "agent/slice-2",
+              base_branch: "agent/slice",
+              scope: "Slice two",
+              state: "open",
+              pr_status: "clean",
+            },
+          ],
+        })
+      )};
+      console.log(JSON.stringify(prompts.buildReviewPrompt(task)));
+    `
+  );
+
+  assert.match(stackedResult, /Stack=## PR Stack/);
+  assert.match(
+    stackedResult,
+    /PR 1: https:\/\/github\.com\/farshidz\/marqo-cortex-city\/pull\/1/
+  );
+  assert.match(stackedResult, /state: merged/);
+  assert.match(stackedResult, /Scope: Slice two/);
+  assert.match(stackedResult, /### Restack required/);
+  assert.match(stackedResult, /--force-with-lease/);
+
+  const plainResult = runPromptScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/9",
+        })
+      )};
+      console.log(JSON.stringify(prompts.buildReviewPrompt(task)));
+    `
+  );
+
+  assert.match(plainResult, /Stack=\n/);
+  assert.doesNotMatch(plainResult, /PR Stack/);
+});
+
+test("shared templates cover stacked PR instructions", () => {
+  const initialTemplate = readFileSync(
+    path.join(REPO_ROOT, "prompts", "templates", "initial.md"),
+    "utf-8"
+  );
+  assert.match(initialTemplate, /## Stacked PRs/);
+  assert.match(
+    initialTemplate,
+    /ONLY when the task description above explicitly asks for stacked PRs/
+  );
+  assert.match(initialTemplate, /stacked_prs/);
+
+  const reviewTemplate = readFileSync(
+    path.join(REPO_ROOT, "prompts", "templates", "review.md"),
+    "utf-8"
+  );
+  assert.match(reviewTemplate, /\{\{STACK_SECTION\}\}/);
+  assert.match(reviewTemplate, /stacked_prs/);
 });
 
 test("shared review template includes existing follow-up task context", () => {
