@@ -51,11 +51,14 @@ export function aggregateStackPRStatus(
 }
 
 // A stack needs restacking when an open entry still bases on the branch of a
-// MERGED PR: squash merges rewrite the merged commits, so the open entry must
-// be retargeted and rebased before it can merge cleanly. Rebasing that entry
-// rewrites its own branch too, which invalidates the merge base of every open
-// entry above it — so the restack set is the whole open suffix starting at
-// the first affected entry, not just the entries directly on merged bases.
+// MERGED PR, or still carries an unverified restack obligation
+// (pending_restack_of): squash merges rewrite the merged commits, so the open
+// entry must be retargeted and rebased — and GitHub must confirm the merged
+// commit is an ancestor of the entry's head — before the obligation clears.
+// Rebasing an entry rewrites its own branch too, which invalidates the merge
+// base of every open entry above it — so the restack set is the whole open
+// suffix starting at the first affected entry, not just the entries directly
+// on merged bases.
 export function stackEntriesRequiringRestack(
   stack: TaskStackedPR[]
 ): TaskStackedPR[] {
@@ -65,8 +68,10 @@ export function stackEntriesRequiringRestack(
       .map((entry) => entry.branch_name)
   );
   const open = openStackedPRs(stack);
-  const firstAffected = open.findIndex((entry) =>
-    mergedBranches.has(entry.base_branch)
+  const firstAffected = open.findIndex(
+    (entry) =>
+      mergedBranches.has(entry.base_branch) ||
+      (entry.pending_restack_of?.length ?? 0) > 0
   );
   if (firstAffected === -1) return [];
   return open.slice(firstAffected);
@@ -91,6 +96,20 @@ export function stackEntriesOnClosedBase(
   return openStackedPRs(stack).filter((entry) =>
     closedBranches.has(entry.base_branch)
   );
+}
+
+// Stable identity of the current broken-stack (closed unmerged base)
+// condition. A decision-run acknowledgement is scoped to this exact value so
+// an unrelated blocked report — or an acknowledgement of an earlier, different
+// closure — can never suppress surfacing the current one.
+export function stackClosedBaseFingerprint(
+  stack: TaskStackedPR[]
+): string | undefined {
+  const affected = stackEntriesOnClosedBase(stack)
+    .map((entry) => `${entry.pr_url}<-${entry.base_branch}`)
+    .sort();
+  if (affected.length === 0) return undefined;
+  return `closed_base:${affected.join("|")}`;
 }
 
 // Terminal task status once every entry is terminal: merged only when the
@@ -228,6 +247,8 @@ export function reconcileStackedPRs(
       state: tracked?.state ?? "open",
       pr_status: tracked?.pr_status,
       last_review_gh_state: tracked?.last_review_gh_state,
+      merge_commit_sha: tracked?.merge_commit_sha,
+      pending_restack_of: tracked?.pending_restack_of,
     });
   }
 

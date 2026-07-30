@@ -211,7 +211,8 @@ function buildStackSection(task: Task, baseBranch: string): string {
       `3. For the lowest listed PR: retarget its base to the merged PR's own base (\`gh pr edit <number> --base <new-base>\`) unless GitHub already retargeted it after the old base branch was deleted, then \`git rebase --onto origin/<new-base> <old-base-tip> <branch>\` so the already-merged commits drop out. Squash merges rewrite merged commits, so the merged content must come from the new base — never keep the old stack commits.`,
       "4. For each PR above it, in order: rebase its branch onto the freshly rewritten branch below, using the OLD tip you recorded in step 2 as the `--onto` upstream boundary: `git rebase --onto <rewritten-lower-branch> <old-lower-tip> <branch>`.",
       "5. Resolve any rebase conflicts in this session.",
-      "6. Push each restacked branch with `git push --force-with-lease`. This restack is the ONLY situation where rebasing and force-pushing are allowed; the no-rebase rule stays in force everywhere else."
+      "6. Push each restacked branch with `git push --force-with-lease`. This restack is the ONLY situation where rebasing and force-pushing are allowed; the no-rebase rule stays in force everywhere else.",
+      "7. The worker independently verifies on GitHub that each merged slice's merge commit is an ancestor of every open PR above it, and keeps the restack flagged until that verification passes — so the branches must actually be rewritten and pushed; retargeting the PR base alone does not complete a restack."
     );
   }
 

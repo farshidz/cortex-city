@@ -12,9 +12,11 @@ import {
   deliverReviewerComment,
   getPRBaseBranch,
   getPRHeadSha,
+  getPRMergeCommitSha,
   getPRStateHash,
   getPRStatus,
   getReviewRequestedPRs,
+  isCommitAncestor,
   isStaleReviewerCommentDeliveryError,
   isPRMergedOrClosed,
   reviewerCommentCancellationFromStaleError,
@@ -49,7 +51,7 @@ import {
   frontierStackedPR,
   isStackedTask,
   openStackedPRs,
-  stackEntriesOnClosedBase,
+  stackClosedBaseFingerprint,
   stackRequiresRestack,
   stackTerminalStatus,
 } from "./stacked-prs";
@@ -155,10 +157,12 @@ export interface WorkerRuntimeDeps {
   deleteTask: typeof deleteTask;
   getPRBaseBranch?: typeof getPRBaseBranch;
   getPRHeadSha?: typeof getPRHeadSha;
+  getPRMergeCommitSha?: typeof getPRMergeCommitSha;
   getPRStateHash: typeof getPRStateHash;
   getPRStatus: typeof getPRStatus;
   getReviewRequestedPRs: typeof getReviewRequestedPRs;
   getTask: typeof getTask;
+  isCommitAncestor?: typeof isCommitAncestor;
   isPRMergedOrClosed: typeof isPRMergedOrClosed;
   isPidRunning: (pid: number) => boolean;
   stopLegacyReviewerProcess?: (pid: number) => void;
@@ -186,10 +190,12 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   deleteTask,
   getPRBaseBranch,
   getPRHeadSha,
+  getPRMergeCommitSha,
   getPRStateHash,
   getPRStatus,
   getReviewRequestedPRs,
   getTask,
+  isCommitAncestor,
   isPRMergedOrClosed,
   isPidRunning: (pid) => {
     process.kill(pid, 0);
@@ -236,11 +242,13 @@ interface ReviewRunCandidate {
   // may be forced by a pending restack regardless of hash equality.
   entryHashes?: Record<string, string>;
   restackRequired?: boolean;
-  // Set while a lower PR closed unmerged under an open dependent and the
-  // agent has not yet recorded a blocked decision request: forces a
-  // non-destructive run so the broken stack is surfaced instead of the task
-  // idling in review.
+  // Set while a lower PR closed unmerged under an open dependent and no
+  // blocked decision request has been recorded for exactly this condition:
+  // forces a non-destructive run so the broken stack is surfaced instead of
+  // the task idling in review. The fingerprint identifies the condition the
+  // launched run acknowledges.
   brokenStackNeedsDecision?: boolean;
+  decisionFingerprint?: string;
 }
 
 function isAutomaticReviewEnabled(
@@ -1016,16 +1024,74 @@ export async function pollOnce(
     let stackChanged = false;
 
     for (const entry of stack) {
+      if (entry.state === "closed") {
+        // A closed PR can be reopened; without this check the entry would
+        // stay recorded as closed forever and the broken-stack decision could
+        // never converge on the recovery the prompt itself suggests.
+        try {
+          const currentState = await deps.isPRMergedOrClosed(entry.pr_url);
+          if (currentState === null) {
+            deps.logger.log(
+              `[worker] Stack PR reopened for "${task.title}": ${entry.pr_url}`
+            );
+            entry.state = "open";
+            stackChanged = true;
+          }
+        } catch (error) {
+          deps.logger.error(
+            `[worker] Failed to re-check closed stack PR ${entry.pr_url}:`,
+            error
+          );
+        }
+      }
       if (entry.state !== "open") continue;
       const prState = await deps.isPRMergedOrClosed(entry.pr_url);
-      if (prState) {
+      if (prState === "merged") {
+        // Record the durable restack obligation in the same update that
+        // marks the entry merged: every open entry above must prove (via
+        // ancestry) that it incorporated this merge before restack clears.
+        // If the merge commit cannot be read, leave the entry open and retry
+        // next poll rather than dropping the obligation.
+        let mergeCommitSha = "";
+        if (deps.getPRMergeCommitSha) {
+          try {
+            mergeCommitSha = (await deps.getPRMergeCommitSha(entry.pr_url)).trim();
+          } catch (error) {
+            deps.logger.error(
+              `[worker] Failed to read merge commit for ${entry.pr_url}; retrying next poll:`,
+              error
+            );
+            continue;
+          }
+        }
         deps.logger.log(
-          `[worker] Stack PR ${prState} for "${task.title}": ${entry.pr_url}`
+          `[worker] Stack PR merged for "${task.title}": ${entry.pr_url}`
         );
-        entry.state = prState;
+        entry.state = "merged";
         entry.pr_status = undefined;
+        if (mergeCommitSha) {
+          entry.merge_commit_sha = mergeCommitSha;
+          for (const upper of stack) {
+            if (upper.state !== "open" || upper.position <= entry.position) {
+              continue;
+            }
+            const pending = new Set(upper.pending_restack_of ?? []);
+            pending.add(mergeCommitSha);
+            upper.pending_restack_of = [...pending];
+          }
+        }
         stackChanged = true;
         // Let the entry's review finalize now instead of at stack completion.
+        liveTaskOwners.delete(entry.pr_url);
+        continue;
+      }
+      if (prState === "closed") {
+        deps.logger.log(
+          `[worker] Stack PR closed for "${task.title}": ${entry.pr_url}`
+        );
+        entry.state = "closed";
+        entry.pr_status = undefined;
+        stackChanged = true;
         liveTaskOwners.delete(entry.pr_url);
         continue;
       }
@@ -1048,6 +1114,45 @@ export async function pollOnce(
       }
     }
 
+    // Verify pending restack obligations from GitHub history: a claimed
+    // retarget or rebase counts only once the merged commit is an ancestor of
+    // the open entry's current head. Errors keep the obligation pending.
+    for (const entry of stack) {
+      if (entry.state !== "open") continue;
+      const pending = entry.pending_restack_of ?? [];
+      if (pending.length === 0) continue;
+      const repoSlug = entry.pr_url.match(
+        /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/
+      )?.[1];
+      const headSha =
+        taskReviewHeads.get(entry.pr_url) ||
+        (await deps.getPRHeadSha?.(entry.pr_url))?.trim() ||
+        "";
+      if (!repoSlug || !headSha || !deps.isCommitAncestor) continue;
+      const remaining: string[] = [];
+      for (const mergedSha of pending) {
+        let verified: boolean | null = null;
+        try {
+          verified = await deps.isCommitAncestor(repoSlug, mergedSha, headSha);
+        } catch (error) {
+          deps.logger.error(
+            `[worker] Failed to verify restack of ${entry.pr_url} against ${mergedSha}:`,
+            error
+          );
+        }
+        if (verified !== true) remaining.push(mergedSha);
+      }
+      if (remaining.length !== pending.length) {
+        entry.pending_restack_of = remaining.length > 0 ? remaining : undefined;
+        stackChanged = true;
+        if (remaining.length === 0) {
+          deps.logger.log(
+            `[worker] Restack of ${entry.pr_url} verified against all merged lower slices`
+          );
+        }
+      }
+    }
+
     const terminal = stackTerminalStatus(stack);
     if (terminal) {
       deps.logger.log(`[worker] PR stack ${terminal} for "${task.title}"`);
@@ -1062,8 +1167,15 @@ export async function pollOnce(
       return;
     }
 
+    const closedBaseFingerprint = stackClosedBaseFingerprint(stack);
     const taskUpdates: Partial<Task> = {};
     if (stackChanged) taskUpdates.stacked_prs = stack;
+    if (!closedBaseFingerprint && task.stack_decision_requested) {
+      // The broken-stack condition resolved (reopened, re-planned, or the
+      // stack ended); a stale acknowledgement must not suppress a future,
+      // different closure.
+      taskUpdates.stack_decision_requested = undefined;
+    }
     const frontier = frontierStackedPR(stack);
     if (
       frontier &&
@@ -1121,12 +1233,18 @@ export async function pollOnce(
     // A lower PR closing unmerged under an open dependent breaks the stack
     // without changing any upper-PR hash. Keep forcing a non-destructive run
     // (the prompt forbids rebasing and instructs a `blocked` report naming
-    // the decision needed) until that blocked decision request is recorded,
-    // so the broken stack cannot idle silently in review. Level-based rather
-    // than transition-based so a deferred or crashed run cannot swallow it.
+    // the decision needed) until a blocked report is recorded for EXACTLY the
+    // current condition: the acknowledgement is fingerprint-scoped so an
+    // unrelated pre-existing blocker, or an acknowledgement of an earlier
+    // different closure, cannot suppress surfacing this one. Level-based
+    // rather than transition-based so a deferred or crashed run cannot
+    // swallow it.
     const brokenStackNeedsDecision =
-      stackEntriesOnClosedBase(stack).length > 0 &&
-      task.last_agent_report?.status !== "blocked";
+      Boolean(closedBaseFingerprint) &&
+      !(
+        task.stack_decision_requested === closedBaseFingerprint &&
+        task.last_agent_report?.status === "blocked"
+      );
     if (
       !hasManualInstruction &&
       !restackRequired &&
@@ -1175,6 +1293,7 @@ export async function pollOnce(
       entryHashes,
       restackRequired,
       brokenStackNeedsDecision,
+      decisionFingerprint: closedBaseFingerprint,
     });
   };
 
@@ -1277,6 +1396,7 @@ export async function pollOnce(
     ) {
       continue;
     }
+    let decisionFingerprint: string | undefined;
     if (isStackedCandidate) {
       // Re-check the per-entry trigger against the freshest task state so a
       // concurrent hash update does not double-launch the builder.
@@ -1289,10 +1409,15 @@ export async function pollOnce(
       );
       const restackRequired =
         Boolean(candidate.restackRequired) || stackRequiresRestack(stack);
+      const closedBaseFingerprint =
+        stackClosedBaseFingerprint(stack) ?? candidate.decisionFingerprint;
       const brokenStackNeedsDecision =
-        Boolean(candidate.brokenStackNeedsDecision) ||
-        (stackEntriesOnClosedBase(stack).length > 0 &&
-          task.last_agent_report?.status !== "blocked");
+        Boolean(closedBaseFingerprint) &&
+        !(
+          task.stack_decision_requested === closedBaseFingerprint &&
+          task.last_agent_report?.status === "blocked"
+        );
+      decisionFingerprint = closedBaseFingerprint;
       if (
         !hasManualInstruction &&
         !hasConflicts &&
@@ -1318,6 +1443,11 @@ export async function pollOnce(
       mode: "review",
       postSpawnUpdates: {
         pending_manual_instruction: undefined,
+        // Record which broken-stack condition this run surfaces, so its
+        // blocked report acknowledges exactly this condition and nothing else.
+        ...(decisionFingerprint
+          ? { stack_decision_requested: decisionFingerprint }
+          : {}),
       },
     });
     if (didLaunch) availableSlots--;

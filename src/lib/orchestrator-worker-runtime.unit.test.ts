@@ -558,6 +558,7 @@ test("pollOnce skips paused in_review tasks entirely", async () => {
 
 const STACK_PR_1 = "https://github.com/acme/widget/pull/1";
 const STACK_PR_2 = "https://github.com/acme/widget/pull/2";
+const STACK_PR_3 = "https://github.com/acme/widget/pull/3";
 
 function stackEntry(overrides: Partial<TaskStackedPR> = {}): TaskStackedPR {
   return {
@@ -578,6 +579,9 @@ interface StackedDepsOptions {
   headShas?: Record<string, string>;
   stateHashes?: Record<string, string>;
   baseBranches?: Record<string, string>;
+  mergeCommitShas?: Record<string, string>;
+  // Keyed as "<ancestor>...<descendant>".
+  ancestors?: Record<string, boolean | null>;
   reviewMap?: Record<string, ReviewSummary>;
 }
 
@@ -593,7 +597,10 @@ function makeStackedDeps(options: StackedDepsOptions) {
     deleteTask: async () => {},
     getPRBaseBranch: async (prUrl) => options.baseBranches?.[prUrl] || "",
     getPRHeadSha: async (prUrl) => options.headShas?.[prUrl] || "",
+    getPRMergeCommitSha: async (prUrl) => options.mergeCommitShas?.[prUrl] ?? "",
     getPRStateHash: async (prUrl) => options.stateHashes?.[prUrl] || "",
+    isCommitAncestor: async (_repoSlug, ancestorSha, descendantSha) =>
+      options.ancestors?.[`${ancestorSha}...${descendantSha}`] ?? null,
     getPRStatus: async (prUrl) => options.prStatuses?.[prUrl] || "unknown",
     getReviewRequestedPRs: async () => [],
     getTask: async (id) => tasks.find((task) => task.id === id),
@@ -908,6 +915,312 @@ test("pollOnce surfaces a closed unmerged base with a non-destructive decision r
 
   assert.deepEqual(launched, []);
   assert.equal(tasks[0].status, "in_review");
+});
+
+test("pollOnce records the restack obligation on every open entry above a merge", async () => {
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_1,
+    branch_name: "b1",
+    stacked_prs: [
+      stackEntry({ last_review_gh_state: "hash-1" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        last_review_gh_state: "hash-2",
+      }),
+      stackEntry({
+        position: 3,
+        pr_url: STACK_PR_3,
+        branch_name: "b3",
+        base_branch: "b2",
+        scope: "Slice three",
+        last_review_gh_state: "hash-3",
+      }),
+    ],
+  });
+  const { deps, tasks } = makeStackedDeps({
+    tasks: [task],
+    mergedOrClosed: { [STACK_PR_1]: "merged" },
+    mergeCommitShas: { [STACK_PR_1]: "squash-1" },
+    prStatuses: { [STACK_PR_2]: "clean", [STACK_PR_3]: "clean" },
+    headShas: { [STACK_PR_2]: "head-2", [STACK_PR_3]: "head-3" },
+    stateHashes: { [STACK_PR_2]: "hash-2", [STACK_PR_3]: "hash-3" },
+  });
+
+  await pollOnce(new Map(), deps, new Map());
+
+  const stack = tasks[0].stacked_prs!;
+  assert.equal(stack[0].state, "merged");
+  assert.equal(stack[0].merge_commit_sha, "squash-1");
+  // Both open entries above the merge carry the durable obligation.
+  assert.deepEqual(stack[1].pending_restack_of, ["squash-1"]);
+  assert.deepEqual(stack[2].pending_restack_of, ["squash-1"]);
+});
+
+test("pollOnce keeps the restack forced until GitHub verifies the rewrite", async () => {
+  const currentReview: ReviewSummary = {
+    source: "task",
+    task_id: "task-1",
+    task_title: "t",
+    task_description: "",
+    task_plan: undefined,
+    task_stack_position: 2,
+    task_stack_size: 2,
+    task_pr_scope: "Slice two",
+    pr_url: STACK_PR_2,
+    pr_number: 2,
+    repo_slug: "acme/widget",
+    title: "t (stack 2/2)",
+    author: "",
+    head_sha: "head-2",
+    created_at: "",
+    updated_at: "",
+    summary: "Reviewed and fine",
+    summary_head_sha: "head-2",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    review_status: "up_to_date",
+    review_state: "reviewed",
+  };
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_2,
+    branch_name: "b2",
+    stacked_prs: [
+      stackEntry({ state: "merged", merge_commit_sha: "squash-1" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        // The base was retargeted to main, but the branch was never
+        // rewritten: the pending obligation must keep the restack armed.
+        base_branch: "main",
+        scope: "Slice two",
+        last_review_gh_state: "hash-2",
+        pending_restack_of: ["squash-1"],
+      }),
+    ],
+  });
+  const options: StackedDepsOptions = {
+    tasks: [task],
+    prStatuses: { [STACK_PR_2]: "clean" },
+    headShas: { [STACK_PR_2]: "head-2" },
+    stateHashes: { [STACK_PR_2]: "hash-2" },
+    baseBranches: { [STACK_PR_2]: "main" },
+    ancestors: { "squash-1...head-2": false },
+    reviewMap: { [STACK_PR_2]: currentReview },
+  };
+  const { deps, launched, tasks } = makeStackedDeps(options);
+
+  await pollOnce(new Map(), deps, new Map());
+
+  // Retarget alone does not clear the obligation: the run is still forced.
+  assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
+  assert.deepEqual(tasks[0].stacked_prs?.[1].pending_restack_of, ["squash-1"]);
+
+  // Once GitHub proves the merged commit is an ancestor of the head, the
+  // obligation clears and no further run is forced.
+  tasks[0] = {
+    ...tasks[0],
+    current_run_pid: undefined,
+    current_run_mode: undefined,
+  };
+  options.ancestors = { "squash-1...head-2": true };
+  launched.length = 0;
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(launched, []);
+  assert.equal(tasks[0].stacked_prs?.[1].pending_restack_of, undefined);
+});
+
+test("pollOnce scopes the broken-stack acknowledgement to the exact condition", async () => {
+  const reviewFor = (
+    prUrl: string,
+    position: number,
+    headSha: string,
+    scope: string
+  ): ReviewSummary => ({
+    source: "task",
+    task_id: "task-1",
+    task_title: "t",
+    task_description: "",
+    task_plan: undefined,
+    task_stack_position: position,
+    task_stack_size: 3,
+    task_pr_scope: scope,
+    pr_url: prUrl,
+    pr_number: position,
+    repo_slug: "acme/widget",
+    title: `t (stack ${position}/3)`,
+    author: "",
+    head_sha: headSha,
+    created_at: "",
+    updated_at: "",
+    summary: "Reviewed and fine",
+    summary_head_sha: headSha,
+    generated_at: "2026-05-01T00:00:00.000Z",
+    review_status: "up_to_date",
+    review_state: "reviewed",
+  });
+  // The task was already blocked for an UNRELATED reason before the closure:
+  // that stale report must not suppress surfacing the closed base.
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_2,
+    branch_name: "b2",
+    last_agent_report: {
+      status: "blocked",
+      summary: "Blocked on an unrelated credential problem",
+      files_changed: [],
+      assumptions: [],
+      blockers: ["missing credentials"],
+      next_steps: [],
+    },
+    stacked_prs: [
+      stackEntry({ state: "closed" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        last_review_gh_state: "hash-2",
+        pr_status: "clean",
+      }),
+      stackEntry({
+        position: 3,
+        pr_url: STACK_PR_3,
+        branch_name: "b3",
+        base_branch: "b2",
+        scope: "Slice three",
+        last_review_gh_state: "hash-3",
+        pr_status: "clean",
+      }),
+    ],
+  });
+  const options: StackedDepsOptions = {
+    tasks: [task],
+    mergedOrClosed: { [STACK_PR_1]: "closed" },
+    prStatuses: { [STACK_PR_2]: "clean", [STACK_PR_3]: "clean" },
+    headShas: { [STACK_PR_2]: "head-2", [STACK_PR_3]: "head-3" },
+    stateHashes: { [STACK_PR_2]: "hash-2", [STACK_PR_3]: "hash-3" },
+    reviewMap: {
+      [STACK_PR_2]: reviewFor(STACK_PR_2, 2, "head-2", "Slice two"),
+      [STACK_PR_3]: reviewFor(STACK_PR_3, 3, "head-3", "Slice three"),
+    },
+  };
+  const { deps, launched, tasks } = makeStackedDeps(options);
+
+  await pollOnce(new Map(), deps, new Map());
+
+  // The unrelated blocked report does not count as acknowledgement.
+  assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
+  const firstFingerprint = tasks[0].stack_decision_requested;
+  assert.ok(firstFingerprint?.includes(STACK_PR_2));
+
+  // The decision run records its blocked report for this exact condition:
+  // no more forced runs for the same fingerprint.
+  tasks[0] = {
+    ...tasks[0],
+    current_run_pid: undefined,
+    current_run_mode: undefined,
+    last_agent_report: {
+      status: "blocked",
+      summary: "Stack broken: PR 1 closed without merging",
+      files_changed: [],
+      assumptions: [],
+      blockers: ["PR 1 closed without merging"],
+      next_steps: [],
+    },
+  };
+  launched.length = 0;
+  await pollOnce(new Map(), deps, new Map());
+  assert.deepEqual(launched, []);
+
+  // A second, different closure produces a new fingerprint and is surfaced
+  // again despite the recorded acknowledgement of the first one.
+  options.mergedOrClosed = { [STACK_PR_2]: "closed" };
+  launched.length = 0;
+  await pollOnce(new Map(), deps, new Map());
+  assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
+  assert.notEqual(tasks[0].stack_decision_requested, firstFingerprint);
+  assert.ok(tasks[0].stack_decision_requested?.includes(STACK_PR_3));
+});
+
+test("pollOnce reconciles a reopened stack PR and clears the stale acknowledgement", async () => {
+  const currentReview: ReviewSummary = {
+    source: "task",
+    task_id: "task-1",
+    task_title: "t",
+    task_description: "",
+    task_plan: undefined,
+    task_stack_position: 2,
+    task_stack_size: 2,
+    task_pr_scope: "Slice two",
+    pr_url: STACK_PR_2,
+    pr_number: 2,
+    repo_slug: "acme/widget",
+    title: "t (stack 2/2)",
+    author: "",
+    head_sha: "head-2",
+    created_at: "",
+    updated_at: "",
+    summary: "Reviewed and fine",
+    summary_head_sha: "head-2",
+    generated_at: "2026-05-01T00:00:00.000Z",
+    review_status: "up_to_date",
+    review_state: "reviewed",
+  };
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_2,
+    branch_name: "b2",
+    stack_decision_requested: `closed_base:${STACK_PR_2}<-b1`,
+    last_agent_report: {
+      status: "blocked",
+      summary: "Stack broken: PR 1 closed without merging",
+      files_changed: [],
+      assumptions: [],
+      blockers: ["PR 1 closed without merging"],
+      next_steps: [],
+    },
+    stacked_prs: [
+      stackEntry({ state: "closed", last_review_gh_state: "hash-1" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        last_review_gh_state: "hash-2",
+        pr_status: "clean",
+      }),
+    ],
+  });
+  const { deps, tasks } = makeStackedDeps({
+    tasks: [task],
+    // GitHub reports the closed PR open again (reopened by the human).
+    mergedOrClosed: { [STACK_PR_1]: null, [STACK_PR_2]: null },
+    prStatuses: { [STACK_PR_1]: "clean", [STACK_PR_2]: "clean" },
+    headShas: { [STACK_PR_1]: "head-1", [STACK_PR_2]: "head-2" },
+    stateHashes: { [STACK_PR_1]: "hash-1", [STACK_PR_2]: "hash-2" },
+    reviewMap: { [STACK_PR_2]: currentReview },
+  });
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.equal(tasks[0].stacked_prs?.[0].state, "open");
+  assert.equal(tasks[0].stack_decision_requested, undefined);
+  // The reopened bottom entry becomes the frontier mirror again.
+  assert.equal(tasks[0].pr_url, STACK_PR_1);
 });
 
 test("pollOnce leaves stacked tasks alone when hashes are unchanged and no restack is due", async () => {

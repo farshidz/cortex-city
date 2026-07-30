@@ -351,6 +351,42 @@ export async function getPRBaseBranch(prUrl: string): Promise<string> {
   return data?.baseRefName?.trim() || "";
 }
 
+export async function getPRMergeCommitSha(prUrl: string): Promise<string> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return "";
+
+  const result = await execResult(
+    `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number} --jq '.merge_commit_sha // ""'`
+  );
+  if (!result.ok) {
+    throw new Error(result.error || "Failed to read the PR merge commit.");
+  }
+  return result.output.trim();
+}
+
+// True when `ancestorSha` is reachable from `descendantSha` in the repo's
+// history — GitHub's compare status is "ahead" (or "identical") exactly when
+// the base commit is an ancestor of the head commit. Returns null when GitHub
+// could not answer, so callers keep a pending obligation instead of clearing
+// it on an error.
+export async function isCommitAncestor(
+  repoSlug: string,
+  ancestorSha: string,
+  descendantSha: string
+): Promise<boolean | null> {
+  const slug = repoSlug.trim();
+  if (!slug || !ancestorSha.trim() || !descendantSha.trim()) return null;
+
+  const result = await execResult(
+    `gh api repos/${slug}/compare/${ancestorSha.trim()}...${descendantSha.trim()} --jq .status`
+  );
+  if (!result.ok) return null;
+  const status = result.output.trim();
+  if (status === "ahead" || status === "identical") return true;
+  if (status === "behind" || status === "diverged") return false;
+  return null;
+}
+
 export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return [];

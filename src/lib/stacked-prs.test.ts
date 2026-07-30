@@ -9,6 +9,7 @@ import {
   isStackedTask,
   openStackedPRs,
   reconcileStackedPRs,
+  stackClosedBaseFingerprint,
   stackEntriesOnClosedBase,
   stackEntriesRequiringRestack,
   stackRequiresRestack,
@@ -141,6 +142,63 @@ test("restacking a lower branch pulls every open entry above it into the set", (
   );
 });
 
+test("an unverified restack obligation keeps the restack required after retargeting", () => {
+  const retargetedButUnverified = [
+    entry({ branch_name: "b1", state: "merged", merge_commit_sha: "squash-1" }),
+    entry({
+      position: 2,
+      pr_url: "https://github.com/acme/widget/pull/2",
+      branch_name: "b2",
+      base_branch: "main", // base label already points at main
+      pending_restack_of: ["squash-1"],
+    }),
+  ];
+  assert.equal(stackRequiresRestack(retargetedButUnverified), true);
+  assert.deepEqual(
+    stackEntriesRequiringRestack(retargetedButUnverified).map((e) => e.position),
+    [2]
+  );
+
+  const verified = [
+    entry({ branch_name: "b1", state: "merged", merge_commit_sha: "squash-1" }),
+    entry({
+      position: 2,
+      pr_url: "https://github.com/acme/widget/pull/2",
+      branch_name: "b2",
+      base_branch: "main",
+      pending_restack_of: undefined,
+    }),
+  ];
+  assert.equal(stackRequiresRestack(verified), false);
+});
+
+test("stackClosedBaseFingerprint identifies the exact broken-stack condition", () => {
+  assert.equal(stackClosedBaseFingerprint([entry()]), undefined);
+  const broken = [
+    entry({ branch_name: "b1", state: "closed" }),
+    entry({
+      position: 2,
+      pr_url: "https://github.com/acme/widget/pull/2",
+      branch_name: "b2",
+      base_branch: "b1",
+    }),
+  ];
+  const fingerprint = stackClosedBaseFingerprint(broken);
+  assert.ok(fingerprint?.startsWith("closed_base:"));
+  assert.ok(fingerprint?.includes("https://github.com/acme/widget/pull/2<-b1"));
+  // A different closure produces a different fingerprint.
+  const differentBroken = [
+    entry({ branch_name: "b1", state: "closed" }),
+    entry({
+      position: 2,
+      pr_url: "https://github.com/acme/widget/pull/3",
+      branch_name: "b3",
+      base_branch: "b1",
+    }),
+  ];
+  assert.notEqual(stackClosedBaseFingerprint(differentBroken), fingerprint);
+});
+
 test("a closed unmerged base is a broken stack, not a restack", () => {
   const closedBelow = [
     entry({ branch_name: "b1", state: "closed" }),
@@ -229,6 +287,7 @@ test("reconcileStackedPRs preserves worker-owned fields and keeps dropped entrie
       pr_url: "https://github.com/acme/widget/pull/1",
       branch_name: "b1",
       state: "merged",
+      merge_commit_sha: "squash-1",
     }),
     entry({
       position: 2,
@@ -238,6 +297,7 @@ test("reconcileStackedPRs preserves worker-owned fields and keeps dropped entrie
       scope: "Original scope",
       pr_status: "clean",
       last_review_gh_state: "hash-2",
+      pending_restack_of: ["squash-1"],
     }),
   ];
   const result = reconcileStackedPRs(current, [
@@ -264,6 +324,10 @@ test("reconcileStackedPRs preserves worker-owned fields and keeps dropped entrie
   assert.equal(updated?.state, "open");
   assert.equal(updated?.pr_status, "clean");
   assert.equal(updated?.last_review_gh_state, "hash-2");
+  // Worker-owned restack bookkeeping survives the report: the agent cannot
+  // clear its own obligation by omitting it.
+  assert.deepEqual(updated?.pending_restack_of, ["squash-1"]);
+  assert.equal(kept?.merge_commit_sha, "squash-1");
   // Blank reported scope falls back to the tracked scope.
   assert.equal(updated?.scope, "Original scope");
 });

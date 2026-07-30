@@ -71,6 +71,12 @@ export interface TaskStackedPR {
   // Per-PR analog of Task.last_review_gh_state; stacked tasks track review
   // wakeup hashes per entry instead of on the task.
   last_review_gh_state?: string;
+  // Recorded when the worker observes this entry merge (worker-owned).
+  merge_commit_sha?: string;
+  // Merge commits of lower entries whose incorporation into this open entry's
+  // history GitHub has not yet verified. While non-empty the restack stays
+  // required, no matter what base the agent report claims (worker-owned).
+  pending_restack_of?: string[];
 }
 
 export interface AgentToolCalls {
@@ -126,6 +132,12 @@ export interface Task {
   codex_cumulative_input_tokens?: number;
   codex_cumulative_cached_input_tokens?: number;
   codex_cumulative_output_tokens?: number;
+  // Fingerprint of the broken-stack condition (closed unmerged base) whose
+  // decision run was last launched. The worker stops re-forcing decision runs
+  // only while this matches the current condition AND a blocked report is
+  // recorded, so an unrelated blocker or a different later closure cannot
+  // suppress surfacing.
+  stack_decision_requested?: string;
   // Review tracking
   last_review_gh_state?: string; // hash of PR state captured after each run
   // Rollout marker for a head already covered by the retired task reviewer.
