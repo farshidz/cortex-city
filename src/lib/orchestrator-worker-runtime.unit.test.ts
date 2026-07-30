@@ -669,6 +669,7 @@ test("pollOnce marks a stacked task merged only when every entry merged", async 
       }),
     ],
     mergedOrClosed: { [STACK_PR_2]: "merged" },
+    mergeCommitShas: { [STACK_PR_2]: "squash-2" },
   });
 
   await pollOnce(new Map(), deps, new Map());
@@ -755,6 +756,7 @@ test("pollOnce launches a restack review run when a lower stack PR merges", asyn
   const { deps, launched, tasks } = makeStackedDeps({
     tasks: [task],
     mergedOrClosed: { [STACK_PR_1]: "merged" },
+    mergeCommitShas: { [STACK_PR_1]: "squash-1" },
     prStatuses: { [STACK_PR_2]: "clean" },
     headShas: { [STACK_PR_2]: "head-2" },
     stateHashes: { [STACK_PR_2]: "hash-2" },
@@ -915,6 +917,171 @@ test("pollOnce surfaces a closed unmerged base with a non-destructive decision r
 
   assert.deepEqual(launched, []);
   assert.equal(tasks[0].status, "in_review");
+});
+
+test("pollOnce treats a recorded-closed PR that GitHub reports merged as a merge", async () => {
+  // The PR was reopened AND merged between polls: no intervening poll ever
+  // observed it open. The merge must still capture the merge commit and
+  // stamp the obligation on the open entry above.
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_2,
+    branch_name: "b2",
+    stack_decision_requested: `closed_base:${STACK_PR_2}<-b1`,
+    stacked_prs: [
+      stackEntry({ state: "closed" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        last_review_gh_state: "hash-2",
+      }),
+    ],
+  });
+  const { deps, tasks } = makeStackedDeps({
+    tasks: [task],
+    mergedOrClosed: { [STACK_PR_1]: "merged" },
+    mergeCommitShas: { [STACK_PR_1]: "squash-1" },
+    prStatuses: { [STACK_PR_2]: "clean" },
+    headShas: { [STACK_PR_2]: "head-2" },
+    stateHashes: { [STACK_PR_2]: "hash-2" },
+  });
+
+  await pollOnce(new Map(), deps, new Map());
+
+  const stack = tasks[0].stacked_prs!;
+  assert.equal(stack[0].state, "merged");
+  assert.equal(stack[0].merge_commit_sha, "squash-1");
+  assert.deepEqual(stack[1].pending_restack_of, ["squash-1"]);
+  // The stale broken-stack acknowledgement is cleared with the closure gone.
+  assert.equal(tasks[0].stack_decision_requested, undefined);
+});
+
+test("pollOnce leaves a merged PR open for retry when no merge commit is available", async () => {
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_1,
+    branch_name: "b1",
+    stacked_prs: [
+      stackEntry({ last_review_gh_state: "hash-1" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        last_review_gh_state: "hash-2",
+      }),
+    ],
+  });
+  const { deps, tasks } = makeStackedDeps({
+    tasks: [task],
+    mergedOrClosed: { [STACK_PR_1]: "merged" },
+    // No merge commit available: marking the entry merged anyway would
+    // permanently bypass the ancestry verification.
+    prStatuses: { [STACK_PR_1]: "clean", [STACK_PR_2]: "clean" },
+    headShas: { [STACK_PR_1]: "head-1", [STACK_PR_2]: "head-2" },
+    stateHashes: { [STACK_PR_1]: "hash-1", [STACK_PR_2]: "hash-2" },
+  });
+
+  await pollOnce(new Map(), deps, new Map());
+
+  const stack = tasks[0].stacked_prs!;
+  assert.equal(stack[0].state, "open");
+  assert.equal(stack[0].merge_commit_sha, undefined);
+  assert.equal(stack[1].pending_restack_of, undefined);
+  assert.equal(tasks[0].status, "in_review");
+});
+
+test("pollOnce keeps forcing the decision run when it completes without a blocked report", async () => {
+  const reviewFor = (
+    prUrl: string,
+    position: number,
+    headSha: string
+  ): ReviewSummary => ({
+    source: "task",
+    task_id: "task-1",
+    task_title: "t",
+    task_description: "",
+    task_plan: undefined,
+    task_stack_position: position,
+    task_stack_size: 2,
+    task_pr_scope: "Slice two",
+    pr_url: prUrl,
+    pr_number: position,
+    repo_slug: "acme/widget",
+    title: `t (stack ${position}/2)`,
+    author: "",
+    head_sha: headSha,
+    created_at: "",
+    updated_at: "",
+    summary: "Reviewed and fine",
+    summary_head_sha: headSha,
+    generated_at: "2026-05-01T00:00:00.000Z",
+    review_status: "up_to_date",
+    review_state: "reviewed",
+  });
+  // An unrelated blocked report predates the closure. The decision launch
+  // must disqualify it so a failed run cannot count as acknowledgement.
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_2,
+    branch_name: "b2",
+    last_agent_report: {
+      status: "blocked",
+      summary: "Blocked on an unrelated credential problem",
+      files_changed: [],
+      assumptions: [],
+      blockers: ["missing credentials"],
+      next_steps: [],
+    },
+    stacked_prs: [
+      stackEntry({ state: "closed" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        last_review_gh_state: "hash-2",
+        pr_status: "clean",
+      }),
+    ],
+  });
+  const { deps, launched, tasks } = makeStackedDeps({
+    tasks: [task],
+    mergedOrClosed: { [STACK_PR_1]: "closed" },
+    prStatuses: { [STACK_PR_2]: "clean" },
+    headShas: { [STACK_PR_2]: "head-2" },
+    stateHashes: { [STACK_PR_2]: "hash-2" },
+    reviewMap: { [STACK_PR_2]: reviewFor(STACK_PR_2, 2, "head-2") },
+  });
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
+  // The stale unrelated report was disqualified at launch.
+  assert.equal(tasks[0].last_agent_report, undefined);
+  assert.ok(tasks[0].stack_decision_requested);
+
+  // The run dies without producing a report (error/timeout/no structured
+  // output): the fingerprint alone must not suppress the retry.
+  tasks[0] = {
+    ...tasks[0],
+    current_run_pid: undefined,
+    current_run_mode: undefined,
+    last_run_result: "error",
+  };
+  launched.length = 0;
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
 });
 
 test("pollOnce records the restack obligation on every open entry above a merge", async () => {
@@ -1146,7 +1313,10 @@ test("pollOnce scopes the broken-stack acknowledgement to the exact condition", 
 
   // A second, different closure produces a new fingerprint and is surfaced
   // again despite the recorded acknowledgement of the first one.
-  options.mergedOrClosed = { [STACK_PR_2]: "closed" };
+  options.mergedOrClosed = {
+    [STACK_PR_1]: "closed",
+    [STACK_PR_2]: "closed",
+  };
   launched.length = 0;
   await pollOnce(new Map(), deps, new Map());
   assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);

@@ -1025,14 +1025,18 @@ export async function pollOnce(
 
     for (const entry of stack) {
       if (entry.state === "closed") {
-        // A closed PR can be reopened; without this check the entry would
-        // stay recorded as closed forever and the broken-stack decision could
-        // never converge on the recovery the prompt itself suggests.
+        // A closed PR can be reopened — or reopened AND merged between polls;
+        // without this check the entry would stay recorded as closed forever,
+        // the broken-stack decision could never converge on the recovery the
+        // prompt itself suggests, and a reopen-then-merge would bypass the
+        // merge-commit capture below. Any non-closed answer flips the entry
+        // back to open in-memory so the standard handling below observes the
+        // fresh state (including a merge) through its fail-closed path.
         try {
           const currentState = await deps.isPRMergedOrClosed(entry.pr_url);
-          if (currentState === null) {
+          if (currentState !== "closed") {
             deps.logger.log(
-              `[worker] Stack PR reopened for "${task.title}": ${entry.pr_url}`
+              `[worker] Stack PR no longer closed for "${task.title}": ${entry.pr_url} (${currentState ?? "open"})`
             );
             entry.state = "open";
             stackChanged = true;
@@ -1050,35 +1054,44 @@ export async function pollOnce(
         // Record the durable restack obligation in the same update that
         // marks the entry merged: every open entry above must prove (via
         // ancestry) that it incorporated this merge before restack clears.
-        // If the merge commit cannot be read, leave the entry open and retry
-        // next poll rather than dropping the obligation.
+        // Fail closed: without a non-empty merge commit the entry stays open
+        // and is retried next poll — marking it merged without the obligation
+        // would permanently bypass the ancestry verification.
+        if (!deps.getPRMergeCommitSha) {
+          deps.logger.error(
+            `[worker] Cannot read merge commits; leaving ${entry.pr_url} open to retry`
+          );
+          continue;
+        }
         let mergeCommitSha = "";
-        if (deps.getPRMergeCommitSha) {
-          try {
-            mergeCommitSha = (await deps.getPRMergeCommitSha(entry.pr_url)).trim();
-          } catch (error) {
-            deps.logger.error(
-              `[worker] Failed to read merge commit for ${entry.pr_url}; retrying next poll:`,
-              error
-            );
-            continue;
-          }
+        try {
+          mergeCommitSha = (await deps.getPRMergeCommitSha(entry.pr_url)).trim();
+        } catch (error) {
+          deps.logger.error(
+            `[worker] Failed to read merge commit for ${entry.pr_url}; retrying next poll:`,
+            error
+          );
+          continue;
+        }
+        if (!mergeCommitSha) {
+          deps.logger.error(
+            `[worker] GitHub returned no merge commit for merged PR ${entry.pr_url}; leaving the entry open to retry`
+          );
+          continue;
         }
         deps.logger.log(
           `[worker] Stack PR merged for "${task.title}": ${entry.pr_url}`
         );
         entry.state = "merged";
         entry.pr_status = undefined;
-        if (mergeCommitSha) {
-          entry.merge_commit_sha = mergeCommitSha;
-          for (const upper of stack) {
-            if (upper.state !== "open" || upper.position <= entry.position) {
-              continue;
-            }
-            const pending = new Set(upper.pending_restack_of ?? []);
-            pending.add(mergeCommitSha);
-            upper.pending_restack_of = [...pending];
+        entry.merge_commit_sha = mergeCommitSha;
+        for (const upper of stack) {
+          if (upper.state !== "open" || upper.position <= entry.position) {
+            continue;
           }
+          const pending = new Set(upper.pending_restack_of ?? []);
+          pending.add(mergeCommitSha);
+          upper.pending_restack_of = [...pending];
         }
         stackChanged = true;
         // Let the entry's review finalize now instead of at stack completion.
@@ -1444,9 +1457,17 @@ export async function pollOnce(
       postSpawnUpdates: {
         pending_manual_instruction: undefined,
         // Record which broken-stack condition this run surfaces, so its
-        // blocked report acknowledges exactly this condition and nothing else.
+        // blocked report acknowledges exactly this condition and nothing
+        // else. A pre-existing blocked report is disqualified at launch:
+        // only the report THIS run produces may acknowledge the fingerprint,
+        // so a failed or report-less run keeps the forcing armed.
         ...(decisionFingerprint
-          ? { stack_decision_requested: decisionFingerprint }
+          ? {
+              stack_decision_requested: decisionFingerprint,
+              ...(task.last_agent_report?.status === "blocked"
+                ? { last_agent_report: undefined }
+                : {}),
+            }
           : {}),
       },
     });
