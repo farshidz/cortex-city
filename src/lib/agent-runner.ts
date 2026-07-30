@@ -54,8 +54,9 @@ const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const MAX_RUNTIME_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_STDERR_BYTES = 1 * 1024 * 1024;
 
-interface TaskRunModelProfile {
+interface TaskRunProfile {
   runtime: AgentRuntime;
+  permissionMode: PermissionMode;
   model?: string;
   effort?: TaskEffort;
 }
@@ -488,8 +489,9 @@ export async function spawnAgentSession(
     task.agent_runner || config.default_agent_runner || "claude";
   const permissionMode: PermissionMode =
     task.permission_mode || config.default_permission_mode || "bypassPermissions";
-  const runModelProfile: TaskRunModelProfile = {
+  const runProfile: TaskRunProfile = {
     runtime,
+    permissionMode,
     model: normalizeModel(
       task.model,
       getDefaultModelForRuntime(config, runtime)
@@ -559,8 +561,8 @@ export async function spawnAgentSession(
   args.push(
     ...buildModelArgsWith(
       runtime,
-      runModelProfile.model,
-      runModelProfile.effort
+      runProfile.model,
+      runProfile.effort
     )
   );
 
@@ -740,7 +742,7 @@ export async function spawnAgentSession(
         runReason,
         runtime === "codex" ? buildCodexResult(codexAccumulator) : undefined,
         child.pid,
-        runModelProfile
+        runProfile
       );
     });
   });
@@ -1251,24 +1253,26 @@ async function snapshotPreRunCommentIds(
 async function createFollowupTasks(
   parentTask: Task,
   requests: FollowupTaskRequest[],
-  runModelProfile?: TaskRunModelProfile
+  runProfile?: TaskRunProfile
 ): Promise<void> {
   if (!requests || requests.length === 0) return;
   const config = readConfig();
   const inheritedRunner =
-    runModelProfile?.runtime ||
+    runProfile?.runtime ||
     parentTask.agent_runner ||
     config.default_agent_runner;
   const inheritedPermission =
-    parentTask.permission_mode || config.default_permission_mode;
-  const inheritedModel = runModelProfile
-    ? runModelProfile.model
+    runProfile?.permissionMode ||
+    parentTask.permission_mode ||
+    config.default_permission_mode;
+  const inheritedModel = runProfile
+    ? runProfile.model
     : normalizeModel(
         parentTask.model,
         getDefaultModelForRuntime(config, inheritedRunner)
       );
-  const inheritedEffort = runModelProfile
-    ? runModelProfile.effort
+  const inheritedEffort = runProfile
+    ? runProfile.effort
     : normalizeEffort(inheritedRunner, parentTask.effort, config) ??
       getDefaultEffortForRuntime(config, inheritedRunner);
   for (const req of requests) {
@@ -1354,7 +1358,7 @@ async function handleRunComplete(
     | "resume_after_kill",
   preParsedResult?: ClaudeRunResult,
   completedPid?: number,
-  runModelProfile?: TaskRunModelProfile
+  runProfile?: TaskRunProfile
 ) {
   let currentTask: Task | undefined;
   try {
@@ -1456,7 +1460,7 @@ async function handleRunComplete(
 
       const followups = report?.tool_calls?.create_task;
       if (followups?.length && shouldApplySuccessSideEffects) {
-        await createFollowupTasks(currentTask, followups, runModelProfile);
+        await createFollowupTasks(currentTask, followups, runProfile);
       }
     }
 

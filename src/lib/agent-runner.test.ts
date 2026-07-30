@@ -896,7 +896,7 @@ test("createFollowupTasks trims task data, inherits runtime settings, and skips 
   assert.equal(followupTask.effort, "low");
 });
 
-test("createFollowupTasks inherits the model and effort used by the parent run", () => {
+test("createFollowupTasks inherits the profile used by the parent run", () => {
   const workspace = setupWorkspace();
 
   const result = runAgentRunnerScript(
@@ -904,6 +904,8 @@ test("createFollowupTasks inherits the model and effort used by the parent run",
     `
       const task = ${JSON.stringify(
         sampleTask({
+          agent_runner: "codex",
+          permission_mode: "yolo",
           model: undefined,
           effort: undefined,
           worktree_path: path.join(workspace, "worktree"),
@@ -924,8 +926,9 @@ test("createFollowupTasks inherits the model and effort used by the parent run",
           },
         ],
         {
-          runtime: "codex",
-          model: "gpt-5.6-codex",
+          runtime: "claude",
+          permissionMode: "acceptEdits",
+          model: "claude-opus-4-7",
           effort: "xhigh",
         }
       );
@@ -934,7 +937,9 @@ test("createFollowupTasks inherits the model and effort used by the parent run",
   );
 
   const followupTask = result.tasks[1];
-  assert.equal(followupTask.model, "gpt-5.6-codex");
+  assert.equal(followupTask.agent_runner, "claude");
+  assert.equal(followupTask.permission_mode, "acceptEdits");
+  assert.equal(followupTask.model, "claude-opus-4-7");
   assert.equal(followupTask.effort, "xhigh");
 });
 
