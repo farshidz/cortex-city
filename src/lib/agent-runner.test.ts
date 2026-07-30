@@ -155,7 +155,7 @@ function runAgentRunnerScript(workspace: string, body: string) {
       "--eval",
       [
         `import { spawnAgentSession, __testUtils } from ${JSON.stringify(AGENT_RUNNER_MODULE_URL)};`,
-        `import { createTask, readTasks } from ${JSON.stringify(STORE_MODULE_URL)};`,
+        `import { createTask, readConfig, readTasks, writeConfig } from ${JSON.stringify(STORE_MODULE_URL)};`,
         "(async () => {",
         `  process.env.PATH = ${JSON.stringify(
           path.join(workspace, "bin")
@@ -894,6 +894,48 @@ test("createFollowupTasks trims task data, inherits runtime settings, and skips 
   assert.equal(followupTask.permission_mode, "acceptEdits");
   assert.equal(followupTask.model, "gpt-5.4-mini");
   assert.equal(followupTask.effort, "low");
+});
+
+test("createFollowupTasks inherits the model and effort used by the parent run", () => {
+  const workspace = setupWorkspace();
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(
+        sampleTask({
+          model: undefined,
+          effort: undefined,
+          worktree_path: path.join(workspace, "worktree"),
+        })
+      )};
+      await createTask(task);
+      const config = readConfig();
+      config.default_codex_model = "gpt-current-default";
+      config.default_codex_effort = "high";
+      await writeConfig(config);
+      await __testUtils.createFollowupTasks(
+        task,
+        [
+          {
+            title: "Continue the implementation",
+            description: "Handle the remaining work",
+            agent: "cortex-city-swe",
+          },
+        ],
+        {
+          runtime: "codex",
+          model: "gpt-5.6-codex",
+          effort: "xhigh",
+        }
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `
+  );
+
+  const followupTask = result.tasks[1];
+  assert.equal(followupTask.model, "gpt-5.6-codex");
+  assert.equal(followupTask.effort, "xhigh");
 });
 
 test("appendToBoundedTextBuffer keeps only the latest bytes", () => {

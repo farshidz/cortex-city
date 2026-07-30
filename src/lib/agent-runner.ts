@@ -19,7 +19,12 @@ import {
   normalizeEffort,
   normalizeModel,
 } from "./runtime-config";
-import { buildEnv, buildModelArgs, buildPermissionArgs } from "./runtime-args";
+import {
+  buildEnv,
+  buildModelArgs,
+  buildModelArgsWith,
+  buildPermissionArgs,
+} from "./runtime-args";
 import type {
   Task,
   AgentReport,
@@ -29,6 +34,7 @@ import type {
   FollowupTaskRequest,
   AgentConfig,
   TaskRunMode,
+  TaskEffort,
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
 import {
@@ -47,6 +53,12 @@ const FORCE_KILL_GRACE_MS = 5_000;
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const MAX_RUNTIME_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_STDERR_BYTES = 1 * 1024 * 1024;
+
+interface TaskRunModelProfile {
+  runtime: AgentRuntime;
+  model?: string;
+  effort?: TaskEffort;
+}
 
 const AGENT_REPORT_SCHEMA = JSON.stringify({
   type: "object",
@@ -476,6 +488,14 @@ export async function spawnAgentSession(
     task.agent_runner || config.default_agent_runner || "claude";
   const permissionMode: PermissionMode =
     task.permission_mode || config.default_permission_mode || "bypassPermissions";
+  const runModelProfile: TaskRunModelProfile = {
+    runtime,
+    model: normalizeModel(
+      task.model,
+      getDefaultModelForRuntime(config, runtime)
+    ),
+    effort: normalizeEffort(runtime, task.effort, config),
+  };
   const agentConfig = config.agents[task.agent];
   const activeSessionId = task.session_id;
   const shouldResume = mode !== "cleanup" && Boolean(activeSessionId);
@@ -536,7 +556,13 @@ export async function spawnAgentSession(
     );
   }
   args.push(...buildPermissionArgs(runtime, permissionMode));
-  args.push(...buildModelArgs(runtime, task, config));
+  args.push(
+    ...buildModelArgsWith(
+      runtime,
+      runModelProfile.model,
+      runModelProfile.effort
+    )
+  );
 
   if (runtime === "codex") {
     if (shouldResume && activeSessionId) {
@@ -713,7 +739,8 @@ export async function spawnAgentSession(
         runtime,
         runReason,
         runtime === "codex" ? buildCodexResult(codexAccumulator) : undefined,
-        child.pid
+        child.pid,
+        runModelProfile
       );
     });
   });
@@ -1223,20 +1250,27 @@ async function snapshotPreRunCommentIds(
 
 async function createFollowupTasks(
   parentTask: Task,
-  requests: FollowupTaskRequest[]
+  requests: FollowupTaskRequest[],
+  runModelProfile?: TaskRunModelProfile
 ): Promise<void> {
   if (!requests || requests.length === 0) return;
   const config = readConfig();
-  const inheritedRunner = parentTask.agent_runner || config.default_agent_runner;
+  const inheritedRunner =
+    runModelProfile?.runtime ||
+    parentTask.agent_runner ||
+    config.default_agent_runner;
   const inheritedPermission =
     parentTask.permission_mode || config.default_permission_mode;
-  const inheritedModel = normalizeModel(
-    parentTask.model,
-    getDefaultModelForRuntime(config, inheritedRunner)
-  );
-  const inheritedEffort =
-    normalizeEffort(inheritedRunner, parentTask.effort, config) ||
-    getDefaultEffortForRuntime(config, inheritedRunner);
+  const inheritedModel = runModelProfile
+    ? runModelProfile.model
+    : normalizeModel(
+        parentTask.model,
+        getDefaultModelForRuntime(config, inheritedRunner)
+      );
+  const inheritedEffort = runModelProfile
+    ? runModelProfile.effort
+    : normalizeEffort(inheritedRunner, parentTask.effort, config) ??
+      getDefaultEffortForRuntime(config, inheritedRunner);
   for (const req of requests) {
     const title = (req.title || "").trim();
     const description = (req.description || "").trim();
@@ -1319,7 +1353,8 @@ async function handleRunComplete(
     | "manual_instruction"
     | "resume_after_kill",
   preParsedResult?: ClaudeRunResult,
-  completedPid?: number
+  completedPid?: number,
+  runModelProfile?: TaskRunModelProfile
 ) {
   let currentTask: Task | undefined;
   try {
@@ -1421,7 +1456,7 @@ async function handleRunComplete(
 
       const followups = report?.tool_calls?.create_task;
       if (followups?.length && shouldApplySuccessSideEffects) {
-        await createFollowupTasks(currentTask, followups);
+        await createFollowupTasks(currentTask, followups, runModelProfile);
       }
     }
 
