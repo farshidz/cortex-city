@@ -964,6 +964,14 @@ test("pollOnce rebuilds a crashed human-decision review without duplicating its 
         summary_head_sha: "decision-retry-head",
         generated_at: "2026-05-01T00:10:00.000Z",
         agent_review_status: "ready_for_human_approval",
+        // A distinct inline-comment receipt that happens to share the numeric ID
+        // the recovered conversation comment will get. Recovery must not evict it.
+        reviewer_comment_receipts: [{
+          comment_id: 410,
+          author_login: "me",
+          body_sha256: "a".repeat(64),
+          surface: "review_comment",
+        }],
         pending_reviewer_comment_delivery: ${JSON.stringify({
           action_token: pendingToken,
           kind: "human_decision",
@@ -1032,10 +1040,13 @@ test("pollOnce rebuilds a crashed human-decision review without duplicating its 
   assert.equal(result.review.summary_head_sha, "decision-retry-head");
   assert.equal(result.review.agent_review_status, "needs_human_decision");
   assert.deepEqual(
-    result.review.reviewer_comment_receipts.map(
-      (receipt: { comment_id: number }) => receipt.comment_id
-    ),
-    [410]
+    result.review.reviewer_comment_receipts
+      .map(
+        (receipt: { comment_id: number; surface?: string }) =>
+          `${receipt.surface ?? "issue"}:${receipt.comment_id}`
+      )
+      .sort(),
+    ["issue:410", "review_comment:410"]
   );
   assert.equal(
     result.review.pending_reviewer_comment_delivery,

@@ -35,11 +35,17 @@ export function reviewerCommentBodySha256(body: string): string {
   return createHash("sha256").update(body).digest("hex");
 }
 
-// The reviewer is instructed to open every comment it posts with this prefix.
-// A prefix match alone proves nothing (anyone can copy it), so callers must
-// also require the comment's author to be the signed-in user.
+// The reviewer is instructed to open every comment it posts with this prefix as
+// the first characters of the body, so the match is anchored at position 0 —
+// leading whitespace means a human typed or quoted it.
+//
+// A prefix match alone proves nothing (anyone can copy it), so callers must also
+// require the comment's author to be the signed-in user. That leaves one
+// residual case, documented in README.md: on a self-authored PR the human author
+// and the reviewer share a login, so a human comment that literally starts with
+// this marker is treated as reviewer-authored.
 export function isReviewerAuthoredCommentBody(body?: string | null): boolean {
-  return (body || "").trimStart().startsWith(REVIEWER_GITHUB_COMMENT_PREFIX);
+  return (body || "").startsWith(REVIEWER_GITHUB_COMMENT_PREFIX);
 }
 
 export function reviewerCommentSurfaceOf(

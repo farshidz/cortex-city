@@ -9,6 +9,7 @@ import * as lockfile from "proper-lockfile";
 import {
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
   REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
+  reviewerCommentSurfaceOf,
   reviewerHumanDecisionCommentMarker,
 } from "./review-comments";
 import { withReviewState, withReviewStatus } from "./review-status";
@@ -111,13 +112,20 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
   const receipts = Array.isArray(normalized.reviewer_comment_receipts)
     ? normalized.reviewer_comment_receipts.filter((receipt) => {
         if (!receipt) return false;
-        const surface =
-          receipt.surface === "review_comment" ? "review_comment" : "issue";
+        // Only an absent surface is a legacy issue receipt. An unrecognized
+        // literal is rejected outright: coercing it to "issue" would let a
+        // malformed review-comment receipt suppress the unrelated issue comment
+        // that happens to share its numeric ID.
+        const surfaceIsValid =
+          receipt.surface === undefined ||
+          receipt.surface === "issue" ||
+          receipt.surface === "review_comment";
         // Comment IDs are unique per surface only, so identity is the pair.
-        const key = `${surface}:${receipt.comment_id}`;
+        const key = `${reviewerCommentSurfaceOf(receipt)}:${receipt.comment_id}`;
         const valid = Boolean(
-          (receipt.action_token === undefined ||
-            actionTokenPattern.test(receipt.action_token)) &&
+          surfaceIsValid &&
+            (receipt.action_token === undefined ||
+              actionTokenPattern.test(receipt.action_token)) &&
             Number.isSafeInteger(receipt.comment_id) &&
             receipt.comment_id > 0 &&
             receipt.author_login?.trim() &&

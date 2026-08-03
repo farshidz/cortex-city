@@ -587,6 +587,75 @@ test("getPRStateHash ignores every reviewer-authored comment surface", () => {
   );
 });
 
+test("a copied reviewer prefix only suppresses when the author shares the reviewer login", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const marker = "**🤖[Cortex City Reviewer]**";
+  const hashFor = (
+    issueComments: Array<Record<string, unknown>>,
+    reviewComments: Array<Record<string, unknown>> = [],
+    reviews: Array<Record<string, unknown>> = []
+  ) =>
+    runGithubScript(
+      workspace,
+      {
+        "api user --jq .login": { stdout: "me" },
+        [prViewKey(prUrl)]: {
+          stdout: JSON.stringify({ headRefOid: "abc123", statusCheckRollup: [] }),
+        },
+        [reviewsKey()]: { stdout: JSON.stringify([reviews]) },
+        [reviewCommentsKey()]: { stdout: JSON.stringify([reviewComments]) },
+        [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
+        [checksKey(prUrl)]: { stdout: "" },
+      },
+      `
+        const hash = await getPRStateHash(${JSON.stringify(prUrl)});
+        console.log(JSON.stringify(hash));
+      `
+    );
+
+  const baseline = hashFor([]);
+
+  // Another participant copying the marker is never suppressed, on either
+  // surface or through a wrapping review.
+  for (const copied of [
+    hashFor([{ id: 800, body: `${marker} Copied.`, user: { login: "octocat" } }]),
+    hashFor(
+      [],
+      [
+        {
+          id: 700,
+          pull_request_review_id: 40,
+          body: `${marker} Copied.`,
+          user: { login: "octocat" },
+        },
+      ],
+      [{ id: 40, state: "COMMENTED", body: "", user: { login: "octocat" } }]
+    ),
+  ]) {
+    assert.notEqual(copied, baseline);
+  }
+
+  // Leading whitespace means a human typed or quoted it, so the anchored match
+  // leaves it as conversation even under the reviewer's own login.
+  assert.notEqual(
+    hashFor([{ id: 801, body: `  ${marker} Quoted.`, user: { login: "me" } }]),
+    baseline
+  );
+  assert.notEqual(
+    hashFor([{ id: 802, body: `> ${marker} Quoted.`, user: { login: "me" } }]),
+    baseline
+  );
+
+  // The accepted residual risk, asserted so it is visible rather than implicit:
+  // on a self-authored PR the human author shares the reviewer's login, so a
+  // human comment that literally starts with the marker is suppressed.
+  assert.equal(
+    hashFor([{ id: 803, body: `${marker} Typed by the author.`, user: { login: "me" } }]),
+    baseline
+  );
+});
+
 test("listReviewerAuthoredComments reports the run's own comments per surface", () => {
   const workspace = setupWorkspace();
   const prUrl = "https://github.com/acme/widget/pull/123";

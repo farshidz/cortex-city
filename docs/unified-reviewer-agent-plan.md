@@ -72,10 +72,16 @@ The unified reviewer owns review execution, summaries, verdicts, follow-ups, err
   remains open at the reviewed SHA. Durably cancel an undelivered action after a
   head move, merge, or close; still receipt an exact event GitHub already
   accepted before the state changed.
-- Filter task wakeups and PR-state hashes only by verified receipt IDs. A public
-  prefix or copied hidden marker is never enough to classify participant text
-  as a reviewer event. Reconcile orphaned review ownership and recover pending
-  receipts before evaluating task wakeups.
+- Filter task wakeups and PR-state hashes by receipt IDs, recorded per comment
+  surface. The two application-owned handoff comments are receipted as verified
+  immutable events; comments a reviewer run posted itself are receipted by author
+  plus the public reviewer prefix, which is also the filtering fallback for IDs a
+  run failed to record. A copied prefix or hidden marker from another author is
+  never enough to classify participant text as a reviewer event; on a
+  self-authored PR, where the human shares the reviewer's login, that separation
+  is not available and the suppression risk is accepted (see README.md).
+  Reconcile orphaned review ownership and recover pending receipts before
+  evaluating task wakeups.
 - Keep review scheduling independent of task execution capacity so reviews are not starved when implementation session slots are full.
 
 ### 3. Extend learning and lifecycle handling to task PRs

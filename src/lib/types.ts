@@ -373,8 +373,14 @@ export interface ReviewSummary extends ReviewRequest {
   error?: string;
   error_at?: string;
   agent_review_status?: ReviewAgentStatus;
-  // Verified immutable GitHub events. Only these IDs may be filtered from task
-  // wakeups and PR-state hashes; prefixes and public marker copies are ignored.
+  // Comments the reviewer posted, recorded per surface. These IDs are filtered
+  // from task wakeups and PR-state hashes. Receipts for the two
+  // application-owned handoff comments are verified immutable events, matched by
+  // author and exact body against a durable action token. Receipts the reviewer
+  // run itself produced are matched by author plus the public reviewer prefix,
+  // which is weaker: on a self-authored PR the human author shares the
+  // reviewer's login, so a human comment starting with that prefix is treated as
+  // reviewer-authored. See README.md for that accepted residual risk.
   reviewer_comment_receipts?: ReviewerCommentReceipt[];
   // Terminal records for actions GitHub proved stale before any POST. These
   // tokens must never be retried or treated as delivered timeline events.
