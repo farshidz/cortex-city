@@ -1660,13 +1660,19 @@ export async function spawnReviewSummary(
         effort: opts.effort,
         model: opts.model,
         session_profile: snapshotSessionProfile(opts),
-        // The fresh run's own session id is the only one an interactive Q&A
-        // follow-up should resume. A run that produced none leaves the prior
-        // profile-compatible pointer in place.
+        // The pointer follows the summary being saved, because that is what an
+        // interactive Q&A follow-up resumes into. A successful save publishes
+        // this run's output, so only this run's session may point at it — and a
+        // run that produced no session id leaves no pointer at all rather than
+        // aiming Q&A at the session that reviewed a different head. A failed
+        // save keeps the previous summary, so it keeps the previous pointer,
+        // which is profile-compatible by construction.
         session_id:
           (reviewContextChangedDuringRun
             ? undefined
-            : finalOutput.session_id || compatibleCachedSessionId) || undefined,
+            : successful
+              ? finalOutput.session_id
+              : compatibleCachedSessionId) || undefined,
         duration_ms: finalOutput.duration_ms,
         input_tokens: finalOutput.usage?.input_tokens,
         output_tokens: finalOutput.usage?.output_tokens,
