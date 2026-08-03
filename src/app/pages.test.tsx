@@ -1498,6 +1498,9 @@ test("task detail surfaces task-owned review verdicts without self-approval acti
         status: undefined,
         head_sha: "head-2",
         summary_head_sha: "head-1",
+        // Staleness is a backend decision now: a rebase that preserved the
+        // effective diff moves the head without scheduling another round.
+        covers_head: false,
       },
     };
     const optedOutStaleHtml = await renderPage(

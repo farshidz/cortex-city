@@ -37,7 +37,13 @@ import {
   readReviewSummaryMap,
   upsertReviewSummary,
 } from "./review-store";
+import {
+  REVIEW_DEBOUNCE_DEFAULT_SECONDS,
+  REVIEW_DEBOUNCE_MAX_SECONDS,
+  resolveReviewDebounceMs,
+} from "./review-debounce";
 import { readReviewLearnings } from "./review-learnings-store";
+import { reviewCoversHeadSha } from "./review-status";
 import { spawnReviewRetro } from "./review-learnings-runner";
 import {
   resolveReviewOpts,
@@ -74,7 +80,12 @@ export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 export const DEAD_OWNED_PID_GRACE_MS = 10_000;
 export const FINAL_CLASSIFICATION_RETRY_MS = 15 * 60 * 1000;
 export const REVIEW_ERROR_RETRY_MS = 5 * 60 * 1000;
-export const REVIEW_DEBOUNCE_DEFAULT_SECONDS = 300;
+export {
+  REVIEW_DEBOUNCE_DEFAULT_SECONDS,
+  REVIEW_DEBOUNCE_MAX_SECONDS,
+  resolveReviewDebounceMs,
+};
+
 const REVIEW_DECISION_ACTION_INTERRUPTED_ERROR =
   "The reviewer comment delivery was interrupted before its result was saved.";
 
@@ -387,7 +398,11 @@ function shouldDeferBuilderForStoredReviewUrl(
   // explicit implementation work while the reviewer configuration is repaired.
   if (review.error) return false;
   if (!review || !review.summary?.trim()) return true;
-  return summaryHeadShaFor(review) !== currentHeadSha;
+  // An unchanged rebase leaves `summary_head_sha` at the originally reviewed
+  // commit on purpose, and the scheduler will not run another round for it. A raw
+  // SHA comparison here would defer the builder forever, including for an
+  // explicit manual instruction or a participant-feedback wake.
+  return !reviewCoversHeadSha(review, currentHeadSha);
 }
 
 function shouldDeferBuilderForStoredReview(
@@ -449,16 +464,6 @@ export function shouldRetryErroredReview(
   }
   const failedAt = review.error_at ? new Date(review.error_at).getTime() : NaN;
   return !Number.isFinite(failedAt) || now - failedAt >= REVIEW_ERROR_RETRY_MS;
-}
-
-export function resolveReviewDebounceMs(
-  config: Pick<ReturnType<typeof readConfig>, "review_debounce_seconds">
-): number {
-  const configured = config.review_debounce_seconds;
-  if (typeof configured !== "number" || !Number.isFinite(configured)) {
-    return REVIEW_DEBOUNCE_DEFAULT_SECONDS * 1000;
-  }
-  return Math.max(0, Math.round(configured)) * 1000;
 }
 
 export type ReviewRoundReason =
@@ -1338,11 +1343,11 @@ export async function pollOnce(
       if (automaticReviewEnabled) {
         if (request) {
           taskReviewRequests.push(request);
-          const reviewedHeadSha = cached ? summaryHeadShaFor(cached) : undefined;
           if (cached?.current_run_pid != null) {
             deferForPendingReview = true;
           } else if (
-            (!cached?.summary?.trim() || reviewedHeadSha !== request.head_sha) &&
+            (!cached?.summary?.trim() ||
+              !reviewCoversHeadSha(cached, request.head_sha)) &&
             !cached?.error
           ) {
             deferForPendingReview = true;
@@ -1462,11 +1467,10 @@ export async function pollOnce(
         if (automaticReviewEnabled) {
           if (request) {
             taskReviewRequests.push(request);
-            const reviewedHeadSha = cached ? summaryHeadShaFor(cached) : undefined;
             if (cached?.current_run_pid != null) return;
             if (
               (!cached?.summary?.trim() ||
-                reviewedHeadSha !== request.head_sha) &&
+                !reviewCoversHeadSha(cached, request.head_sha)) &&
               !cached?.error
             ) {
               return;
@@ -1818,13 +1822,24 @@ async function runReviewPhases(
         current.task_pr_scope !== pr.task_pr_scope;
       if (current.head_sha !== pr.head_sha) {
         // A rebase moves the head without changing the effective diff. The
-        // verdict is about the diff, so it survives; only a real change to the
-        // code clears it.
-        const diffUnchanged = Boolean(
+        // verdict is about the diff, so it survives; only a diff that is known to
+        // have changed clears it.
+        //
+        // A row that had an identity and got none this poll is looking at a
+        // transient GitHub failure, not at evidence the diff changed. Clearing
+        // there would lose the verdict permanently: the next successful poll
+        // reads the same hash back, calls the row up to date, and never runs a
+        // round to restore it. A row that never had an identity gets no such
+        // benefit — a head move is then simply new, unreviewed code.
+        const diffKnownUnchanged = Boolean(
           diffHash &&
             current.effective_diff_hash &&
             diffHash === current.effective_diff_hash
         );
+        const diffIdentityUnavailable = Boolean(
+          !diffHash && current.effective_diff_hash
+        );
+        const verdictSurvives = diffKnownUnchanged || diffIdentityUnavailable;
         return {
           ...current,
           ...prFieldsFromRequest(pr),
@@ -1854,7 +1869,7 @@ async function runReviewPhases(
             ? undefined
             : current.session_profile,
           agent_review_status:
-            reviewContextChanged || !diffUnchanged
+            reviewContextChanged || !verdictSurvives
               ? undefined
               : current.agent_review_status,
           error: undefined,

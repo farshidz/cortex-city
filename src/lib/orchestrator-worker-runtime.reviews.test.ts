@@ -342,6 +342,10 @@ test("decideReviewRound waits for the head to settle before a review round", () 
   // Default window is 5 minutes.
   assert.equal(resolveReviewDebounceMs({}), 300_000);
   assert.equal(resolveReviewDebounceMs({ review_debounce_seconds: 30 }), 30_000);
+  // Clamped as well as validated at the write boundary, so a hand-edited
+  // config.json cannot postpone reviews indefinitely.
+  assert.equal(resolveReviewDebounceMs({ review_debounce_seconds: 99_999 }), 3_600_000);
+  assert.equal(resolveReviewDebounceMs({ review_debounce_seconds: -5 }), 0);
   assert.deepEqual(
     decideReviewRound({ ...input, headStableSinceMs: now - 60_000 }),
     { reason: "debouncing" }
@@ -468,6 +472,103 @@ test("pollOnce runs no review round when a rebase preserved the diff", async () 
   assert.equal(stored.agent_review_status, "needs_human_decision");
   // The UI agrees: a preserved diff is not "re-reviewing".
   assert.equal(deriveReviewState(stored), "needs_decision");
+});
+
+test("a transient diff lookup failure does not lose the standing verdict", async () => {
+  const pr = makeRequest({ head_sha: "rebasedSha" });
+  const cached = makeSummary(makeRequest({ head_sha: "oldSha" }), {
+    summary: "reviewed",
+    summary_head_sha: "oldSha",
+    summary_diff_hash: "diff-1",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "oldSha",
+    agent_review_status: "needs_human_decision",
+  });
+
+  // Poll 1: the head moved and GitHub could not identify the new diff.
+  const failing = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: cached },
+    prDiffHashes: {},
+  });
+  await pollOnce(new Map(), failing.deps, failing.activeReviewPids);
+
+  // The verdict is kept: an unavailable identity is not evidence that the diff
+  // changed, and clearing it here would be unrecoverable once the next poll
+  // reads the same hash back and calls the row up to date.
+  const afterFailure = failing.reviews[pr.pr_url];
+  assert.equal(afterFailure.agent_review_status, "needs_human_decision");
+  assert.equal(afterFailure.effective_diff_hash, undefined);
+
+  // Poll 2: the lookup succeeds and reports the same diff as before.
+  const recovering = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: { ...afterFailure, current_run_pid: undefined } },
+    prDiffHashes: { [pr.pr_url]: "diff-1" },
+  });
+  await pollOnce(new Map(), recovering.deps, recovering.activeReviewPids);
+
+  const recovered = recovering.reviews[pr.pr_url];
+  assert.equal(recovered.agent_review_status, "needs_human_decision");
+  assert.equal(recovered.effective_diff_hash, "diff-1");
+  assert.equal(recovered.effective_diff_head_sha, "rebasedSha");
+  assert.equal(
+    deriveReviewState({ ...recovered, current_run_pid: undefined }),
+    "needs_decision"
+  );
+});
+
+test("a row that never had a diff identity still clears its verdict on a head move", async () => {
+  const pr = makeRequest({ head_sha: "newSha" });
+  const cached = makeSummary(makeRequest({ head_sha: "oldSha" }), {
+    summary: "reviewed",
+    summary_head_sha: "oldSha",
+    agent_review_status: "ready_for_human_approval",
+  });
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: cached },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  // Nothing here suggests the diff is unchanged, so a stale clean verdict must
+  // not survive onto unreviewed code.
+  assert.equal(h.reviews[pr.pr_url].agent_review_status, undefined);
+});
+
+test("an unchanged rebase cannot strand a task builder", async () => {
+  const task = makeTask({ pending_manual_instruction: "Address the comment" });
+  const prUrl = task.pr_url!;
+  // The row an unchanged rebase leaves behind: the summary head is the commit
+  // originally reviewed, and the effective diff says nothing changed.
+  const rebased = makeSummary(makeRequest({ head_sha: "rebasedSha" }), {
+    source: "task",
+    task_id: task.id,
+    task_title: task.title,
+    task_description: task.description,
+    task_plan: task.plan,
+    summary: "reviewed",
+    summary_head_sha: "originalSha",
+    summary_diff_hash: "diff-1",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "rebasedSha",
+    agent_review_status: "needs_author_changes",
+  });
+  const h = makeHarness({
+    tasks: [task],
+    prHeadShas: { [prUrl]: "rebasedSha" },
+    reviews: { [prUrl]: rebased },
+    prDiffHashes: { [prUrl]: "diff-1" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  // The scheduler correctly runs no review round, so the builder gates must not
+  // be waiting for one: a raw SHA comparison would defer this forever.
+  assert.deepEqual(h.spawnRounds, []);
+  assert.equal(h.builderCalls.length, 1);
+  assert.equal(h.builderCalls[0].mode, "review");
 });
 
 test("pollOnce reviews again when the effective diff changed", async () => {

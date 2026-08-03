@@ -50,8 +50,9 @@ test("reviewDiffIdentityHash survives a rebase but not a real edit", () => {
     "   return true;",
     "",
   ].join("\n");
-  // Same change after a rebase: new blob hashes, shifted line numbers, a
-  // different hunk header, and different surrounding context.
+  // Same change after a rebase: new blob hashes, shifted line numbers, and a
+  // different hunk header. Only the line numbers are ignored, so the change
+  // itself and its context still decide the identity.
   const rebased = [
     "diff --git a/src/guard.ts b/src/guard.ts",
     "index 3333333..4444444 100644",
@@ -61,16 +62,41 @@ test("reviewDiffIdentityHash survives a rebase but not a real edit", () => {
     "   const limit = 4;",
     "-  if (value > limit) return false;",
     "+  if (value >= limit) return false;",
-    "   log(value);",
+    "   return true;",
+    "\\ No newline at end of file",
     "",
   ].join("\n");
   const edited = original.replace("value >= limit", "value >= limit + 1");
+  // The same textual edit somewhere else in the file. Dropping context lines
+  // made these collide, which silently skipped the review of the second one.
+  const elsewhere = original
+    .replace("const limit = 4;", "const ceiling = 9;")
+    .replace("return true;", "return ok;");
 
   const hash = github.reviewDiffIdentityHash(original);
   assert.match(hash, /^[0-9a-f]{16}$/);
   assert.equal(github.reviewDiffIdentityHash(rebased), hash);
   assert.notEqual(github.reviewDiffIdentityHash(edited), hash);
-  // Renames, mode changes, and binary files are part of the identity.
+  assert.notEqual(github.reviewDiffIdentityHash(elsewhere), hash);
+
+  // A mode change and its reverse are different changes.
+  const modeChange = [
+    "diff --git a/run.sh b/run.sh",
+    "old mode 100644",
+    "new mode 100755",
+  ].join("\n");
+  const reverseModeChange = [
+    "diff --git a/run.sh b/run.sh",
+    "old mode 100755",
+    "new mode 100644",
+  ].join("\n");
+  assert.notEqual(
+    github.reviewDiffIdentityHash(modeChange),
+    github.reviewDiffIdentityHash(reverseModeChange)
+  );
+  assert.notEqual(github.reviewDiffIdentityHash(modeChange), "");
+
+  // Renames are part of the identity.
   assert.notEqual(
     github.reviewDiffIdentityHash(
       [
@@ -81,11 +107,37 @@ test("reviewDiffIdentityHash survives a rebase but not a real edit", () => {
     ),
     ""
   );
-  // No identity for an empty or unreadable diff, so callers fall back to SHAs
-  // instead of treating two unknowns as the same change.
+
+  // No identity where one cannot be computed, so callers fall back to head SHAs
+  // and review again instead of treating two unknowns as the same change. A
+  // binary diff is that case: `gh pr diff` says only that the files differ, so
+  // no revision of a binary is distinguishable from any other.
   assert.equal(github.reviewDiffIdentityHash(""), "");
   assert.equal(
-    github.reviewDiffIdentityHash("@@ -1,2 +1,2 @@\n context only\n"),
+    github.reviewDiffIdentityHash(
+      [
+        "diff --git a/logo.png b/logo.png",
+        "index 1111111..2222222 100644",
+        "Binary files a/logo.png and b/logo.png differ",
+      ].join("\n")
+    ),
+    ""
+  );
+  assert.equal(
+    github.reviewDiffIdentityHash(
+      [
+        "diff --git a/logo.png b/logo.png",
+        "GIT binary patch",
+        "delta 24",
+      ].join("\n")
+    ),
+    ""
+  );
+  // A text change alongside a binary one is unidentifiable as a whole.
+  assert.equal(
+    github.reviewDiffIdentityHash(
+      [original, "diff --git a/logo.png b/logo.png", "Binary files a/logo.png and b/logo.png differ"].join("\n")
+    ),
     ""
   );
 });

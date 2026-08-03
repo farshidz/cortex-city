@@ -20,18 +20,27 @@ export interface ReviewStatusInput {
   head_sha: string;
 }
 
-// Whether the stored summary still describes the code at the current head. A
-// moved head with an unchanged effective diff (a rebase) counts as covered,
-// because scheduling will not run another round for it.
-export function summaryCoversHead(review: ReviewStatusInput): boolean {
-  const summaryHeadSha = review.summary_head_sha || review.head_sha;
-  if (summaryHeadSha === review.head_sha) return true;
+// Whether the stored summary describes the code at `headSha`. A moved head with
+// an unchanged effective diff (a rebase) counts as covered, because scheduling
+// will not run another round for it — so every consumer that gates on "has this
+// head been reviewed?" has to ask through here, or it waits for a round that
+// never comes.
+export function reviewCoversHeadSha(
+  review: ReviewStatusInput,
+  headSha: string
+): boolean {
+  if (!headSha) return false;
+  if ((review.summary_head_sha || review.head_sha) === headSha) return true;
   return Boolean(
     review.summary_diff_hash &&
       review.effective_diff_hash &&
-      review.effective_diff_head_sha === review.head_sha &&
+      review.effective_diff_head_sha === headSha &&
       review.summary_diff_hash === review.effective_diff_hash
   );
+}
+
+export function summaryCoversHead(review: ReviewStatusInput): boolean {
+  return reviewCoversHeadSha(review, review.head_sha);
 }
 
 export interface ReviewStateInput extends ReviewStatusInput {
