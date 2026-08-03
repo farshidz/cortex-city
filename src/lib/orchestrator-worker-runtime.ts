@@ -1775,7 +1775,9 @@ async function runReviewPhases(
       }
       if (!deps.getPRDiffHash) return;
       try {
-        const hash = await deps.getPRDiffHash(pr.pr_url);
+        // The head this identity is about to be recorded against, so a head move
+        // during the read yields no identity instead of the wrong one.
+        const hash = await deps.getPRDiffHash(pr.pr_url, pr.head_sha);
         if (hash) diffHashes.set(pr.pr_url, hash);
       } catch (error) {
         deps.logger.error(

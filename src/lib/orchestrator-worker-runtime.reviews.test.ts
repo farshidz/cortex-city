@@ -38,9 +38,18 @@ interface HarnessOptions {
   foreignCommentAt?: Record<string, string>;
 }
 
+// (pr_url, expectedHeadSha) pairs the worker asked to identify a diff for. The
+// head has to be there: without it the post-read head check in `getPRDiffHash` is
+// bypassed and a head move during the read tags the wrong identity.
+interface DiffHashLookup {
+  pr_url: string;
+  expected_head_sha?: string;
+}
+
 interface Harness {
   deps: WorkerRuntimeDeps;
   reviews: Record<string, ReviewSummary>;
+  diffHashLookups: DiffHashLookup[];
   spawnCalls: ReviewRequest[];
   spawnRounds: Array<{ pr_url: string; round?: string; diff_hash?: string }>;
   retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }>;
@@ -115,6 +124,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 
 function makeHarness(options: HarnessOptions = {}): Harness {
   const reviews: Record<string, ReviewSummary> = { ...(options.reviews || {}) };
+  const diffHashLookups: DiffHashLookup[] = [];
   const spawnCalls: ReviewRequest[] = [];
   const spawnRounds: Array<{
     pr_url: string;
@@ -169,8 +179,13 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     },
     ...(options.prDiffHashes
       ? {
-          getPRDiffHash: async (prUrl: string) =>
-            options.prDiffHashes?.[prUrl] || "",
+          getPRDiffHash: async (prUrl: string, expectedHeadSha?: string) => {
+            diffHashLookups.push({
+              pr_url: prUrl,
+              expected_head_sha: expectedHeadSha,
+            });
+            return options.prDiffHashes?.[prUrl] || "";
+          },
         }
       : {}),
     ...(options.foreignCommentAt
@@ -269,6 +284,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
   return {
     deps,
     reviews,
+    diffHashLookups,
     spawnCalls,
     spawnRounds,
     retroCalls,
@@ -593,6 +609,11 @@ test("pollOnce reviews again when the effective diff changed", async () => {
     { pr_url: pr.pr_url, round: "review", diff_hash: "diff-2" },
   ]);
   assert.equal(h.reviews[pr.pr_url].agent_review_status, undefined);
+  // The identity is bound to the head it is recorded against, so a head move
+  // during the read yields no identity instead of the wrong one.
+  assert.deepEqual(h.diffHashLookups, [
+    { pr_url: pr.pr_url, expected_head_sha: "fixedSha" },
+  ]);
 });
 
 test("pollOnce schedules a reply round for comment-only activity", async () => {
