@@ -602,11 +602,18 @@ export function buildReviewWrapperPrompt(
       "summary, while a wrongly new family restarts the review loop.",
     ].join(" "),
     [
-      "- Once you have reported 3 variants of one family across all rounds, stop",
-      "reporting further variants of it. Post one comment that converts the family",
-      "to residual risk, state the risk that remains, and set",
-      "`needs_human_decision` once for it. Never re-raise a family a human has",
-      "already ruled on.",
+      "- Count a family's variants by round, not by case. Every sibling case you",
+      "report together in one finding counts as one reported variant, so the cap",
+      "below never limits the same-round sibling sweep and never converts a family",
+      "you are reporting for the first time.",
+    ].join(" "),
+    [
+      "- Once three separate rounds have each reported a new variant of one family,",
+      "stop reporting further variants of it and convert the family to residual",
+      "risk: reply on its existing threads to say you are converting it, put the",
+      "risk that remains in the generated `## Human Decision` section, and set",
+      "`needs_human_decision` once for it. Do not post a top-level conversion",
+      "comment yourself. Never re-raise a family a human has already ruled on.",
     ].join(" "),
     [
       "- Report the broken rule, not one example of it. When a finding is an",
@@ -696,9 +703,19 @@ export function buildReviewWrapperPrompt(
         "and review threads on this PR, and enumerate the findings you reported.",
       ].join(" "),
       [
-        "- Verify each enumerated finding at the current head: run the repro or check",
-        "you recorded for it, reply on its thread stating whether it is now fixed,",
-        "and resolve the thread once it is.",
+        "- Verify each enumerated finding at the current head by running the repro or",
+        "check you recorded for it, then report the outcome on the same GitHub",
+        "surface the finding was posted on.",
+      ].join(" "),
+      [
+        "- For a finding on an inline review thread: reply on that thread with what",
+        "you verified and the outcome, and resolve the thread only when the finding",
+        "is fixed at the current head. Leave it unresolved otherwise.",
+      ].join(" "),
+      [
+        "- For a finding in a PR conversation comment, which has no thread and cannot",
+        "be resolved: post a new top-level comment with the outcome. Resolving one is",
+        "never an action you owe, so its absence is not a reason to return `blocked`.",
       ].join(" "),
       [
         "- Limit new discovery to the changes between the previously reviewed head",
