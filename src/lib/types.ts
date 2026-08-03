@@ -304,13 +304,23 @@ export interface ReviewerCommentDelivery {
   body: string;
 }
 
+// Which GitHub comment collection a receipted comment lives in. IDs are only
+// unique per surface, so a receipt is meaningless without it. Legacy receipts
+// predate inline review comments and are all "issue" (PR conversation).
+export type ReviewerCommentSurface = "issue" | "review_comment";
+
 export interface ReviewerCommentReceipt {
-  // A receipt is stored only after GitHub returns a comment whose author and
-  // immutable body match the durable delivery action exactly.
-  action_token: string;
+  // Set only for the two application-owned delivery actions (human decision,
+  // manual-approval handoff). A receipt is stored for those only after GitHub
+  // returns a comment whose author and immutable body match the durable action
+  // exactly. Reviewer-authored comments posted by the run itself have no
+  // action token: they are recognized by author plus the reviewer prefix.
+  action_token?: string;
   comment_id: number;
   author_login: string;
   body_sha256: string;
+  // Defaults to "issue" when absent.
+  surface?: ReviewerCommentSurface;
 }
 
 export interface ReviewerCommentCancellation {

@@ -459,6 +459,145 @@ test("pollOnce scans in-review tasks for merged, closed, pending, conflicts, unc
   assert.equal(taskById["review-unchanged"].last_run_result, undefined);
 });
 
+test("reviewer-authored comments do not wake a builder, but a participant's do", () => {
+  const workspace = setupWorkspace({
+    configOverrides: {
+      max_parallel_sessions: 6,
+      default_agent_runner: "claude",
+    },
+  });
+  const scenarioFile = path.join(workspace, "review-scenario.json");
+  const ghStateFile = path.join(workspace, "review-gh-state.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        type: "result",
+        subtype: "print",
+        is_error: false,
+        duration_ms: 10,
+        result: "woken",
+        session_id: "claude-wake-session",
+        terminal_reason: "completed",
+        total_cost_usd: 0,
+        num_turns: 1,
+      }),
+      sleepMs: 10,
+    },
+  });
+  const reviewerFinding = "**🤖[Cortex City Reviewer]** The guard is inverted.";
+  const openPR = {
+    state: "open",
+    merged: false,
+    mergeable_state: "clean",
+    mergeable: true,
+    headRefOid: "head1",
+    checks: [{ name: "ci", state: "SUCCESS" }],
+  };
+  writeJson(ghStateFile, {
+    prs: {
+      // The baseline: the same PR before the reviewer said anything.
+      "farshidz/marqo-cortex-city#40": {
+        ...openPR,
+        reviews: [],
+        comments: [],
+        issueComments: [],
+      },
+      // Reviewer-only activity: an inline finding, the empty COMMENTED review
+      // GitHub wraps it in, and a conversation summary.
+      "farshidz/marqo-cortex-city#41": {
+        ...openPR,
+        reviews: [{ id: 40, state: "COMMENTED", body: "", user: { login: "me" } }],
+        comments: [
+          {
+            id: 700,
+            pull_request_review_id: 40,
+            body: reviewerFinding,
+            user: { login: "me" },
+          },
+        ],
+        issueComments: [
+          { id: 800, body: reviewerFinding, user: { login: "me" } },
+        ],
+      },
+      // The same, plus a human reply.
+      "farshidz/marqo-cortex-city#42": {
+        ...openPR,
+        reviews: [{ id: 40, state: "COMMENTED", body: "", user: { login: "me" } }],
+        comments: [
+          {
+            id: 700,
+            pull_request_review_id: 40,
+            body: reviewerFinding,
+            user: { login: "me" },
+          },
+        ],
+        issueComments: [
+          { id: 800, body: reviewerFinding, user: { login: "me" } },
+          { id: 801, body: "Not convinced.", user: { login: "octocat" } },
+        ],
+      },
+    },
+  });
+
+  const result = runWorkerScript(
+    workspace,
+    `
+      const activePids = new Map();
+      const baselineHash = await getPRStateHash("https://github.com/farshidz/marqo-cortex-city/pull/40");
+      const reviewerOnlyHash = await getPRStateHash("https://github.com/farshidz/marqo-cortex-city/pull/41");
+      const withReplyHash = await getPRStateHash("https://github.com/farshidz/marqo-cortex-city/pull/42");
+      const tasks = [
+        ${JSON.stringify(sampleTask({
+          id: "reviewer-only",
+          status: "in_review",
+          agent_runner: "claude",
+          pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/41",
+        }))},
+        ${JSON.stringify(sampleTask({
+          id: "participant-reply",
+          status: "in_review",
+          agent_runner: "claude",
+          pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/42",
+        }))},
+      ];
+      // Both tasks last ran against the PR before any reviewer comment existed.
+      for (const task of tasks) {
+        task.last_review_gh_state = baselineHash;
+        task.reviewer_agent_enabled = false;
+        task.worktree_path = ${JSON.stringify(workspace)};
+        await createTask(task);
+      }
+
+      await pollOnce(activePids);
+      for (let i = 0; i < 20; i++) {
+        const current = readTasks();
+        if (current.find((task) => task.id === "participant-reply")?.last_run_result) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      console.log(JSON.stringify({
+        baselineHash,
+        reviewerOnlyHash,
+        withReplyHash,
+        tasks: readTasks(),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.reviewerOnlyHash, result.baselineHash);
+  assert.notEqual(result.withReplyHash, result.baselineHash);
+  const taskById = Object.fromEntries(
+    result.tasks.map((task: Task) => [task.id, task])
+  );
+  assert.equal(taskById["reviewer-only"].last_run_result, undefined);
+  assert.equal(taskById["reviewer-only"].run_count, undefined);
+  assert.equal(taskById["participant-reply"].last_run_result, "success");
+});
+
 test("orphaned review ownership is cleared before decision recovery and task wakeup hashing", () => {
   const workspace = setupWorkspace({
     configOverrides: {

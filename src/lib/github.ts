@@ -5,9 +5,11 @@ import { tmpdir } from "os";
 import path from "path";
 import * as lockfile from "proper-lockfile";
 import {
+  isReviewerAuthoredCommentBody,
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
   REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
   reviewerCommentBodySha256,
+  reviewerCommentSurfaceOf,
   reviewerHumanDecisionCommentMarker,
 } from "./review-comments";
 import { getReviewSummary } from "./review-store";
@@ -16,6 +18,7 @@ import type {
   ReviewerCommentCancellation,
   ReviewerCommentDelivery,
   ReviewerCommentReceipt,
+  ReviewerCommentSurface,
   ReviewRequest,
 } from "./types";
 
@@ -39,18 +42,23 @@ interface StatusCheckRollupItem {
 interface ReviewCommentItem {
   id: number;
   pull_request_review_id: number | null;
+  body?: string | null;
+  user?: { login?: string };
+  created_at?: string;
 }
 
 interface ReviewItem {
   id: number;
   state?: string;
   body?: string | null;
+  user?: { login?: string };
 }
 
 interface IssueCommentItem {
   id: number;
   body?: string | null;
   user?: { login?: string };
+  created_at?: string;
 }
 
 interface ReviewerCommentDeliveryTarget {
@@ -102,13 +110,101 @@ export function reviewerCommentCancellationFromStaleError(
   };
 }
 
-function verifiedReviewerCommentIds(prUrl: string): Set<number> {
+// Everything needed to recognize a comment the reviewer itself posted. A
+// receipted (surface, id) pair is proof; the prefix is the fallback for
+// comments a run failed to record, and it only counts together with the
+// signed-in author so a participant copying the marker cannot hide from the
+// state hash.
+interface ReviewerCommentIdentity {
+  issueIds: Set<number>;
+  reviewCommentIds: Set<number>;
+  authorLogin: string;
+}
+
+function receiptedReviewerCommentIds(
+  prUrl: string
+): Pick<ReviewerCommentIdentity, "issueIds" | "reviewCommentIds"> {
   const review = getReviewSummary(prUrl);
-  return new Set(
-    (review?.reviewer_comment_receipts || []).map(
-      (receipt) => receipt.comment_id
-    )
+  const issueIds = new Set<number>();
+  const reviewCommentIds = new Set<number>();
+  for (const receipt of review?.reviewer_comment_receipts || []) {
+    if (reviewerCommentSurfaceOf(receipt) === "review_comment") {
+      reviewCommentIds.add(receipt.comment_id);
+    } else {
+      issueIds.add(receipt.comment_id);
+    }
+  }
+  return { issueIds, reviewCommentIds };
+}
+
+async function reviewerCommentIdentity(
+  prUrl: string,
+  candidates: Array<{ body?: string | null }>
+): Promise<ReviewerCommentIdentity> {
+  const receipted = receiptedReviewerCommentIds(prUrl);
+  // Resolving the signed-in user costs a GitHub call. Skip it unless some body
+  // actually carries the reviewer prefix and could need the fallback.
+  const needsAuthor = candidates.some((candidate) =>
+    isReviewerAuthoredCommentBody(candidate.body)
   );
+  let authorLogin = "";
+  if (needsAuthor) {
+    try {
+      authorLogin = (await getAuthenticatedUserLogin()).trim();
+    } catch {
+      authorLogin = "";
+    }
+  }
+  return { ...receipted, authorLogin };
+}
+
+function isReviewerAuthoredComment(
+  identity: ReviewerCommentIdentity,
+  surface: ReviewerCommentSurface,
+  comment: { id: number; body?: string | null; user?: { login?: string } }
+): boolean {
+  const receiptedIds =
+    surface === "review_comment"
+      ? identity.reviewCommentIds
+      : identity.issueIds;
+  if (receiptedIds.has(comment.id)) return true;
+  if (!identity.authorLogin) return false;
+  if (comment.user?.login !== identity.authorLogin) return false;
+  return isReviewerAuthoredCommentBody(comment.body);
+}
+
+// A review the reviewer generated as a side effect of commenting: GitHub wraps
+// each inline comment in a COMMENTED review with an empty body. Such a review
+// carries no information the comments themselves do not, so it is excluded once
+// every comment it owns is reviewer-authored. Decisive reviews (APPROVED,
+// CHANGES_REQUESTED, DISMISSED) are never excluded.
+function reviewerAuthoredReviewIds(
+  identity: ReviewerCommentIdentity,
+  reviews: ReviewItem[],
+  comments: ReviewCommentItem[]
+): Set<number> {
+  const excluded = new Set<number>();
+  if (!identity.authorLogin) return excluded;
+  for (const review of reviews) {
+    if (review.user?.login !== identity.authorLogin) continue;
+    if ((review.state || "").toUpperCase() !== "COMMENTED") continue;
+    if ((review.body || "").trim()) {
+      if (isReviewerAuthoredCommentBody(review.body)) excluded.add(review.id);
+      continue;
+    }
+    const owned = comments.filter(
+      (comment) => comment.pull_request_review_id === review.id
+    );
+    if (
+      owned.length > 0 &&
+      owned.every((comment) =>
+        isReviewerAuthoredComment(identity, "review_comment", comment)
+      )
+    ) {
+      excluded.add(review.id);
+    }
+  }
+  return excluded;
 }
 
 function parsePRUrl(url: string): PRInfo | null {
@@ -409,19 +505,92 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
       .map((review) => review.id)
   );
 
+  const identity = await reviewerCommentIdentity(prUrl, [
+    ...comments,
+    ...issueComments,
+  ]);
+
   // `/pulls/{n}/comments` is the inline-review surface. PR conversation
   // comments come from `/issues/{n}/comments`; review-id-null inline comments
   // can be draft review artifacts and must not trigger review runs.
   const reviewCommentIds = comments
-    .filter((comment) => isCommentFromSubmittedReview(comment, submittedIds))
+    .filter(
+      (comment) =>
+        isCommentFromSubmittedReview(comment, submittedIds) &&
+        !isReviewerAuthoredComment(identity, "review_comment", comment)
+    )
     .map((comment) => comment.id);
 
-  const ignoredIssueCommentIds = verifiedReviewerCommentIds(prUrl);
   const issueCommentIds = issueComments
-    .filter((comment) => !ignoredIssueCommentIds.has(comment.id))
+    .filter((comment) => !isReviewerAuthoredComment(identity, "issue", comment))
     .map((comment) => comment.id);
 
   return [...reviewCommentIds, ...issueCommentIds].sort();
+}
+
+// Every comment the signed-in user posted with the reviewer prefix, optionally
+// limited to those created at or after `since`. The reviewer posts through the
+// `gh` CLI inside its own run, so this is how the run's comments become
+// receipts: list them afterwards instead of trying to intercept each POST.
+export async function listReviewerAuthoredComments(
+  prUrl: string,
+  since?: string
+): Promise<ReviewerCommentReceipt[]> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return [];
+
+  let authorLogin = "";
+  try {
+    authorLogin = (await getAuthenticatedUserLogin()).trim();
+  } catch {
+    authorLogin = "";
+  }
+  if (!authorLogin) return [];
+
+  const [comments, issueComments] = await Promise.all([
+    execPaginatedArrayStrict<ReviewCommentItem>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
+    ),
+    execPaginatedArrayStrict<IssueCommentItem>(
+      `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
+    ),
+  ]);
+
+  const sinceMs = since ? new Date(since).getTime() : NaN;
+  const isInWindow = (createdAt?: string): boolean => {
+    if (!Number.isFinite(sinceMs)) return true;
+    const createdMs = createdAt ? new Date(createdAt).getTime() : NaN;
+    // An unparseable timestamp is receipted rather than dropped: the comment
+    // carries the reviewer prefix and the signed-in author either way.
+    return !Number.isFinite(createdMs) || createdMs >= sinceMs;
+  };
+
+  const receipts: ReviewerCommentReceipt[] = [];
+  const collect = (
+    surface: ReviewerCommentSurface,
+    items: Array<{
+      id: number;
+      body?: string | null;
+      user?: { login?: string };
+      created_at?: string;
+    }>
+  ) => {
+    for (const item of items) {
+      if (!Number.isSafeInteger(item.id) || item.id <= 0) continue;
+      if (item.user?.login !== authorLogin) continue;
+      if (!isReviewerAuthoredCommentBody(item.body)) continue;
+      if (!isInWindow(item.created_at)) continue;
+      receipts.push({
+        comment_id: item.id,
+        author_login: authorLogin,
+        body_sha256: reviewerCommentBodySha256(item.body || ""),
+        surface,
+      });
+    }
+  };
+  collect("review_comment", comments || []);
+  collect("issue", issueComments || []);
+  return receipts;
 }
 
 export async function getPRStateHash(prUrl: string): Promise<string> {
@@ -478,22 +647,43 @@ export async function getPRStateHash(prUrl: string): Promise<string> {
       .filter((review) => review.state !== "PENDING")
       .map((review) => review.id)
   );
+  // Reviewer-authored activity must not change the hash: it would wake the
+  // builder for the reviewer's own comment and read as new conversation to the
+  // reviewer itself.
+  const identity = await reviewerCommentIdentity(prUrl, [
+    ...comments,
+    ...issueComments,
+    ...reviews,
+  ]);
   const filteredCommentIds = JSON.stringify(
     comments
-      .filter((comment) => isCommentFromSubmittedReview(comment, submittedIds))
+      .filter(
+        (comment) =>
+          isCommentFromSubmittedReview(comment, submittedIds) &&
+          !isReviewerAuthoredComment(identity, "review_comment", comment)
+      )
       .map((comment) => comment.id)
       .sort()
   );
-  const ignoredIssueCommentIds = verifiedReviewerCommentIds(prUrl);
   const issueCommentIds = JSON.stringify(
     issueComments
-      .filter((comment) => !ignoredIssueCommentIds.has(comment.id))
+      .filter(
+        (comment) => !isReviewerAuthoredComment(identity, "issue", comment)
+      )
       .map((comment) => comment.id)
       .sort()
+  );
+  const reviewerReviewIds = reviewerAuthoredReviewIds(
+    identity,
+    reviews,
+    comments
   );
   const reviewIds = JSON.stringify(
     reviews
-      .filter(isHashSignificantReview)
+      .filter(
+        (review) =>
+          isHashSignificantReview(review) && !reviewerReviewIds.has(review.id)
+      )
       .map((review) => ({ id: review.id, state: review.state ?? "" }))
       .sort((a, b) => a.id - b.id)
   );
@@ -844,6 +1034,7 @@ function verifiedReviewerCommentReceipt(
     comment_id: comment.id,
     author_login: authorLogin,
     body_sha256: reviewerCommentBodySha256(delivery.body),
+    surface: "issue",
   };
 }
 

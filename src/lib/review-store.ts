@@ -107,22 +107,28 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
   const actionTokenPattern =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const seenReceiptTokens = new Set<string>();
-  const seenReceiptIds = new Set<number>();
+  const seenReceiptKeys = new Set<string>();
   const receipts = Array.isArray(normalized.reviewer_comment_receipts)
     ? normalized.reviewer_comment_receipts.filter((receipt) => {
+        if (!receipt) return false;
+        const surface =
+          receipt.surface === "review_comment" ? "review_comment" : "issue";
+        // Comment IDs are unique per surface only, so identity is the pair.
+        const key = `${surface}:${receipt.comment_id}`;
         const valid = Boolean(
-          receipt &&
-            actionTokenPattern.test(receipt.action_token) &&
+          (receipt.action_token === undefined ||
+            actionTokenPattern.test(receipt.action_token)) &&
             Number.isSafeInteger(receipt.comment_id) &&
             receipt.comment_id > 0 &&
             receipt.author_login?.trim() &&
             /^[0-9a-f]{64}$/i.test(receipt.body_sha256) &&
-            !seenReceiptTokens.has(receipt.action_token) &&
-            !seenReceiptIds.has(receipt.comment_id)
+            (receipt.action_token === undefined ||
+              !seenReceiptTokens.has(receipt.action_token)) &&
+            !seenReceiptKeys.has(key)
         );
         if (valid) {
-          seenReceiptTokens.add(receipt.action_token);
-          seenReceiptIds.add(receipt.comment_id);
+          if (receipt.action_token) seenReceiptTokens.add(receipt.action_token);
+          seenReceiptKeys.add(key);
         }
         return valid;
       })
