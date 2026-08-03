@@ -7,8 +7,11 @@ acceptance criteria.
 
 ## Design principles
 
-1. **Prompts set behavior; code sets limits.** Every behavioral instruction gets a
-   mechanical backstop: restricted verdict spaces, scheduling gates, budgets.
+1. **Prompts set behavior; code sets limits.** A behavioral instruction gets a
+   mechanical backstop wherever one exists: restricted verdict spaces, scheduling
+   gates, budgets. The convergence cap in PR 1 is the deliberate exception — it is
+   prompt-only, and the state-backed findings ledger described there is the fallback
+   if it degrades.
 2. **Fail toward escalation.** Any ambiguity in a cheap path (unknown status, timeout,
    uncertainty) resolves to running the expensive path — never to skipping review.
 3. **Builder cooperation is an optimization, never a dependency.** External builders
@@ -48,18 +51,28 @@ findings ledger is the deliberate fallback if that happens, and is out of scope 
      treat it as a variant — novelty is the claim requiring justification. (A wrong
      merge still surfaces in the residual-risk summary; a wrong new family restarts
      the loop.)
-   - After 3 reported variants within one family across rounds, stop reporting new
-     variants; post one summary comment converting the family to residual risk and set
-     `needs_human_decision` once. Never re-raise a family a human has ruled on.
+   - Count variants per round, not per case: sibling cases reported together in one
+     finding are one variant, so the cap never limits the same-round sweep in item 2
+     and never fires on a family's first report.
+   - Once three separate rounds have each reported a new variant of one family, stop
+     reporting further variants; convert the family to residual risk by replying on
+     its existing threads and putting the remaining risk in the generated
+     `## Human Decision` section, and set `needs_human_decision` once. The reviewer
+     posts no top-level conversion comment of its own — Cortex City owns the single
+     receipted human-decision event. Never re-raise a family a human has ruled on.
 2. *Root-invariant initial reports.* Initial reviews must report the broken rule, not
    one example: state the violated invariant, test the obvious sibling cases in the
    same round, list them in one finding, and request the fix at the level of the rule
    plus a regression table.
 3. *Verification-mode follow-ups.* Follow-up block (~L653-676) rewritten: enumerate
    your prior findings from GitHub threads, verify each (run the recorded repros at
-   the new head), reply/resolve per thread; new discovery is limited to the delta and
-   gated by rule 1. Restore the instruction removed in #84 (`7c6ea2e`): use GitHub
-   tooling to inspect your prior reviewer comments and review threads.
+   the new head), then report the outcome on the surface the finding was posted on —
+   reply on an inline thread and resolve it only when the finding is fixed at the
+   current head; answer a PR conversation comment, which has no thread and cannot be
+   resolved, with a new top-level comment and owe no resolve for it. New discovery is
+   limited to the delta and gated by rule 1. Restore the instruction removed in #84
+   (`7c6ea2e`): use GitHub tooling to inspect your prior reviewer comments and review
+   threads.
 4. *Human-decision hygiene.* Before raising `needs_human_decision`, check whether the
    same question was already asked on this PR (search your own prior comments); if
    answered, treat the answer as binding scope.
