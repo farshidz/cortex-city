@@ -35,6 +35,7 @@ import {
   applyReviewerRuntime,
   applyReviewerTier,
   buildConfigUpdate,
+  clearInheritedTierProfiles,
   reviewerTierConfig,
   reviewerTierRuntime,
 } from "./reviewer-config";
@@ -87,14 +88,17 @@ export default function SettingsPage() {
     )
       ? form.default_permission_mode
       : (getPermissionOptions(value)[0].value as PermissionMode);
-    setForm({
+    const next: OrchestratorConfig = {
       ...form,
       default_agent_runner: value,
       default_permission_mode: nextPermission,
       ...(reviewerRuntimeChanges
         ? { review_effort: undefined, review_model: undefined }
         : {}),
-    });
+    };
+    // A tier that inherits its runtime inherits it from here too, so its
+    // runtime-specific model and effort go with the switch.
+    setForm(clearInheritedTierProfiles(next, form));
   }
 
   function handleReviewRunnerChange(value: string) {
@@ -118,16 +122,23 @@ export default function SettingsPage() {
         <div className="space-y-2">
           <Label>Runtime</Label>
           <Select
-            value={runtime}
+            value={tierConfig.runtime || UNSET_VALUE}
             onValueChange={(v) =>
-              (v === "claude" || v === "codex") &&
-              patchTier({ runtime: v as AgentRuntime })
+              patchTier({
+                // Clearing the pin is what lets tier 1 be emptied, which is how
+                // tiering is switched off.
+                runtime:
+                  v === UNSET_VALUE ? null : (v as AgentRuntime),
+              })
             }
           >
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={UNSET_VALUE}>
+                Reviewer default ({runtime === "codex" ? "Codex" : "Claude Code"})
+              </SelectItem>
               <SelectItem value="claude">Claude Code</SelectItem>
               <SelectItem value="codex">Codex</SelectItem>
             </SelectContent>

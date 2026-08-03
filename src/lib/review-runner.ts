@@ -840,7 +840,10 @@ export function buildReviewWrapperPrompt(
 export function buildReviewReplyPrompt(
   config: OrchestratorConfig,
   request: ReviewRequest,
-  cached?: ReviewSummary
+  cached?: ReviewSummary,
+  // A cheap-tier reply round hands anything material to a full review round
+  // instead of raising the decision itself, so it must not promise otherwise.
+  cheapTier = false
 ): string {
   const target = effectiveReviewRequest(request, cached);
   const source = reviewSourceOf(target);
@@ -913,9 +916,18 @@ export function buildReviewReplyPrompt(
     [
       "- If your final status is `needs_human_decision`, add a `## Human Decision`",
       "section with the decision the human needs to make. Do not post that comment",
-      "yourself and do not invent a comment ID: Cortex City creates exactly one",
-      `top-level comment from that section, prefixes it with`,
-      `\`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\`, and records the receipt.`,
+      "yourself and do not invent a comment ID.",
+      cheapTier
+        ? [
+            "This round runs on the cheap verification configuration, so it hands",
+            "anything material to a full review round, which decides how to raise",
+            "it. Report it and stop there.",
+          ].join(" ")
+        : [
+            "Cortex City creates exactly one top-level comment from that section,",
+            `prefixes it with \`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\`, and`,
+            "records the receipt.",
+          ].join(" "),
     ].join(" "),
     "",
     `Reply on this PR: ${target.pr_url}`,
@@ -975,8 +987,20 @@ export function buildReviewTier1Prompt(
       "check it records, and decide at the current head whether it is fixed.",
     ].join(" "),
     [
-      "- Reply on each thread stating what you verified and the outcome, and resolve",
-      "the thread when the finding is fixed.",
+      "- Report the outcome on the surface the finding was posted on. For an inline",
+      "review thread: reply on that thread with what you verified, and resolve it",
+      "only when the finding is fixed at the current head. For a PR conversation",
+      "comment, which has no thread and cannot be resolved: post a new top-level",
+      "comment with the outcome, and owe no resolve for it.",
+    ].join(" "),
+    // The cheap tier inherits the scope gate, or it would enforce requests the
+    // full reviewer would have withdrawn.
+    [
+      "- Your earlier comments are not requirements. If a finding asked for work",
+      "beyond this PR's scope — a new mechanism, durable state, a cross-component",
+      "guarantee, or a generalized abstraction where a small local correction was",
+      "enough — withdraw it on its thread instead of reporting it unfixed. If you",
+      "cannot settle whether a finding is in scope, use `escalate`.",
     ].join(" "),
     [
       `- Start every GitHub comment you post with \`${REVIEWER_GITHUB_COMMENT_PREFIX}\``,
@@ -1502,13 +1526,18 @@ export async function spawnReviewSummary(
     ? cachedBefore?.session_id
     : undefined;
   const replyRound = options.round === "reply";
-  const tier1Round = !replyRound && tier === 1;
+  // Two independent axes. The prompt depends on the round; the escalation
+  // contract depends on the tier. A reply round at tier 1 is a cheap round, so
+  // its ambiguity and its material discoveries both escalate to tier 2 rather
+  // than becoming a terminal verdict or an error.
+  const cheapTierRound = tier === 1;
+  const tier1VerificationRound = !replyRound && tier === 1;
   // A tier-1 round and a reply round both leave the stored review of the code
   // untouched: neither reviewed it.
-  const verificationRound = replyRound || tier1Round;
+  const verificationRound = replyRound || tier1VerificationRound;
   const prompt = replyRound
-    ? buildReviewReplyPrompt(config, target, cachedBefore)
-    : tier1Round
+    ? buildReviewReplyPrompt(config, target, cachedBefore, cheapTierRound)
+    : tier1VerificationRound
       ? buildReviewTier1Prompt(
           config,
           target,
@@ -1526,6 +1555,7 @@ export async function spawnReviewSummary(
     head_first_seen_at: cachedBefore?.head_first_seen_at,
     last_conversation_seen_at: cachedBefore?.last_conversation_seen_at,
     last_round_diff_hash: cachedBefore?.last_round_diff_hash,
+    last_round_head_sha: cachedBefore?.last_round_head_sha,
     pending_tier2_reason: cachedBefore?.pending_tier2_reason,
     generated_at: cachedBefore?.generated_at ?? "",
     runtime: opts.runtime,
@@ -1676,11 +1706,17 @@ export async function spawnReviewSummary(
     const replyStatus = replyRound
       ? parseReviewReplyStatus(finalOutput.result_text)
       : undefined;
-    // An unrecognized or blocked reply status is recorded as a failure rather
-    // than guessed at: the error backoff then schedules a full review round,
-    // which is the expensive-but-correct path.
+    // Infrastructure failures (low disk) stay errors on any tier: they are not a
+    // review signal, and retrying the same tier is the right response.
+    const cheapTierInfrastructureFailure =
+      cheapTierRound && finalOutput.termination_reason === "low_disk";
+    // On the cheap tier, an unrecognized or blocked reply is an escalation, not
+    // an error: the error path would re-run the cheap tier, and the point is to
+    // hand an unresolved cheap round to tier 2. Without tiering there is no
+    // cheaper tier to escalate from, so the error backoff is what schedules the
+    // full review round instead.
     const replyRoundError =
-      replyRound && !finalOutput.error
+      replyRound && !cheapTierRound && !finalOutput.error
         ? !replyStatus
           ? REVIEW_REPLY_STATUS_MISSING_ERROR
           : replyStatus === "blocked"
@@ -1690,26 +1726,30 @@ export async function spawnReviewSummary(
     // Every tier-1 ambiguity resolves to `escalate`, which schedules a tier-2
     // round. A tier-1 run that timed out or aborted escalates too rather than
     // taking the error-retry path, so the expensive tier gets the PR either way.
-    // Infrastructure failures (low disk) stay errors: they are not a review
-    // signal, and retrying the same tier is the right response.
-    const tier1InfrastructureFailure =
-      tier1Round && finalOutput.termination_reason === "low_disk";
-    const tier1Status: ReviewTier1Status | undefined = tier1Round
-      ? tier1InfrastructureFailure
+    const tier1Status: ReviewTier1Status | undefined = tier1VerificationRound
+      ? cheapTierInfrastructureFailure
         ? undefined
         : parseReviewTier1Status(finalOutput.result_text) || "escalate"
       : undefined;
-    const runtimeSuccessful = tier1Round
-      ? !tier1InfrastructureFailure
+    // A cheap reply round never publishes a terminal verdict. Anything material
+    // it found, and any ambiguity in what it reported, becomes an escalation for
+    // the tier-2 round to resolve and to own the human-decision event.
+    const cheapReplyEscalates =
+      replyRound &&
+      cheapTierRound &&
+      !cheapTierInfrastructureFailure &&
+      replyStatus !== "replied";
+    const runtimeSuccessful = cheapTierRound
+      ? !cheapTierInfrastructureFailure
       : !finalOutput.error && !replyRoundError;
     const agentReviewStatus = !runtimeSuccessful
       ? undefined
-      : tier1Round
+      : tier1VerificationRound
         ? tier1Status === "needs_author_changes"
           ? "needs_author_changes"
           : undefined
         : replyRound
-          ? replyStatus === "needs_human_decision"
+          ? !cheapReplyEscalates && replyStatus === "needs_human_decision"
             ? "needs_human_decision"
             : undefined
           : parseReviewAgentStatus(finalOutput.result_text);
@@ -2000,11 +2040,11 @@ export async function spawnReviewSummary(
     }
     const successful =
       runtimeSuccessful && !reviewActionError && !approvalVerificationError;
-    // A tier-1 runtime failure is an escalation, not a recorded error: the
+    // A cheap-tier runtime failure is an escalation, not a recorded error: the
     // error-retry path would re-run the cheap tier, and the whole point is to
     // hand an unresolved cheap round to tier 2.
-    const roundError = tier1Round
-      ? (tier1InfrastructureFailure ? finalOutput.error : undefined) ||
+    const roundError = cheapTierRound
+      ? (cheapTierInfrastructureFailure ? finalOutput.error : undefined) ||
         reviewActionError ||
         approvalVerificationError
       : finalOutput.error ||
@@ -2028,21 +2068,31 @@ export async function spawnReviewSummary(
       // the stored summary and the diff it covers exactly as they were.
       const rewritesSummary = successful && !verificationRound;
       // A tier-1 round still advances the covered diff, so the same diff is not
-      // verified twice, and records why tier 2 has to follow.
-      const coveredDiffHash =
-        successful && !replyRound && !headMovedDuringRun
-          ? options.diff_hash || undefined
-          : latestBeforeSave.last_round_diff_hash;
-      const pendingTier2Reason =
-        tier1Round && successful
+      // verified twice, and records why tier 2 has to follow. The head is
+      // recorded alongside it as the fallback for a PR whose diff GitHub could
+      // not identify — without it a tier-1 result would never count as covering
+      // anything and the round would repeat every poll.
+      const roundCoveredThisHead =
+        successful && !replyRound && !headMovedDuringRun;
+      const coveredDiffHash = roundCoveredThisHead
+        ? options.diff_hash || undefined
+        : latestBeforeSave.last_round_diff_hash;
+      const coveredHeadSha = roundCoveredThisHead
+        ? target.head_sha
+        : latestBeforeSave.last_round_head_sha;
+      const pendingTier2Reason = !successful
+        ? latestBeforeSave.pending_tier2_reason
+        : tier1VerificationRound
           ? tier1Status === "fixes_verified"
             ? ("fixes_verified" as const)
             : tier1Status === "escalate"
               ? ("escalate" as const)
               : undefined
-          : replyRound || !successful
-            ? latestBeforeSave.pending_tier2_reason
-            : undefined;
+          : cheapReplyEscalates
+            ? ("escalate" as const)
+            : replyRound
+              ? latestBeforeSave.pending_tier2_reason
+              : undefined;
       return {
         // Reconciliation may discover a new HEAD or change review context while
         // the agent is running. Keep the latest identity; a changed context is
@@ -2078,6 +2128,9 @@ export async function spawnReviewSummary(
         last_round_diff_hash: reviewContextChangedDuringRun
           ? undefined
           : coveredDiffHash,
+        last_round_head_sha: reviewContextChangedDuringRun
+          ? undefined
+          : coveredHeadSha,
         pending_tier2_reason: reviewContextChangedDuringRun
           ? undefined
           : pendingTier2Reason,

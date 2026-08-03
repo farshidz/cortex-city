@@ -417,6 +417,10 @@ export interface ReviewSummary extends ReviewRequest {
   // verification round advances this without rewriting the summary, so the same
   // diff is not verified twice.
   last_round_diff_hash?: string;
+  // Head that round covered. Used only when no diff identity is available, so a
+  // tier-1 round at a PR whose diff GitHub could not identify still counts as
+  // covering the current head instead of repeating forever.
+  last_round_head_sha?: string;
   // Set by a tier-1 round that cannot conclude on its own. The next round is a
   // tier-2 pass at the same diff; a terminal verdict never comes from tier 1.
   pending_tier2_reason?: "fixes_verified" | "escalate";

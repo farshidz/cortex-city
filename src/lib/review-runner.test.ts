@@ -798,6 +798,40 @@ test("parseReviewTier1Status accepts only the tier-1 status space", () => {
   );
 });
 
+test("buildReviewTier1Prompt carries the scope gate and both comment surfaces", () => {
+  const cached = {
+    ...sampleRequest({ head_sha: "old-head" }),
+    summary: "## Summary\nPreviously reviewed.",
+    summary_head_sha: "old-head",
+    generated_at: "2026-05-01T00:10:00.000Z",
+    review_status: "new_commits",
+    review_state: "re_reviewing",
+  } satisfies ReviewSummary;
+  const prompt = buildReviewTier1Prompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest({ head_sha: "new-head" }),
+    cached
+  );
+
+  // A top-level PR comment has no resolvable thread, so the cheap tier needs the
+  // same surface branching the full follow-up prompt has.
+  assert.match(prompt, /Report the outcome on the surface the finding was posted on/i);
+  assert.match(
+    prompt,
+    /inline review thread: reply on that thread with what you verified, and resolve it only when the finding is fixed/i
+  );
+  assert.match(
+    prompt,
+    /PR conversation comment, which has no thread and cannot be resolved: post a new top-level comment/i
+  );
+  assert.match(prompt, /owe no resolve for it/i);
+  // And the scope gate, or it would enforce a request the full reviewer would
+  // have withdrawn.
+  assert.match(prompt, /Your earlier comments are not requirements/i);
+  assert.match(prompt, /withdraw it on its thread instead of reporting it unfixed/i);
+  assert.match(prompt, /cannot settle whether a finding is in scope, use `escalate`/i);
+});
+
 test("buildReviewReplyPrompt answers conversation without re-reviewing", () => {
   const cached = {
     ...sampleRequest(),
@@ -1448,6 +1482,29 @@ test("a tier-1 request runs tier 2 while tiering is disabled", () => {
   assert.equal(result.persisted.session_profile.tier, undefined);
 });
 
+test("buildReviewReplyPrompt promises the decision event only off the cheap tier", () => {
+  const args = [
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest(),
+    undefined,
+  ] as const;
+
+  const full = buildReviewReplyPrompt(...args, false);
+  assert.match(
+    full,
+    /Cortex City creates exactly one top-level comment from that section/
+  );
+  assert.doesNotMatch(full, /cheap verification configuration/i);
+
+  const cheap = buildReviewReplyPrompt(...args, true);
+  assert.match(cheap, /runs on the cheap verification configuration/i);
+  assert.match(cheap, /hands anything material to a full review round/i);
+  assert.doesNotMatch(
+    cheap,
+    /Cortex City creates exactly one top-level comment from that section/
+  );
+});
+
 test("a reply round answers conversation without touching the stored review", () => {
   const workspace = setupRunnerWorkspace("review-runner-reply-round-");
   const scenarioFile = path.join(workspace, "scenario.json");
@@ -1529,6 +1586,196 @@ test("a reply round answers conversation without touching the stored review", ()
     new Date(result.persisted.last_conversation_seen_at).getTime() >
       Date.parse("2026-05-01T00:00:00.000Z")
   );
+});
+
+// A reply round on the cheap tier: same round, different escalation contract.
+function runCheapReplyRound(
+  prefix: string,
+  claudeStdout: Record<string, unknown>,
+  claudeExtra: Record<string, unknown> = {}
+) {
+  const workspace = setupRunnerWorkspace(prefix, TIER1_CONFIG);
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "abc123",
+        issueComments: [],
+        nextIssueCommentId: 9200,
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: { stdout: JSON.stringify(claudeStdout), ...claudeExtra },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  return runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "## Summary\\nThe standing review.",
+        summary_head_sha: "abc123",
+        summary_diff_hash: "diff-1",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        agent_review_status: "needs_author_changes",
+        last_conversation_seen_at: "2026-05-01T00:00:00.000Z",
+      });
+      await summarizePR(
+        ${JSON.stringify(request)},
+        { round: "reply", tier: 1, diff_hash: "diff-1" }
+      );
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+        ghState: JSON.parse(require("node:fs").readFileSync(${JSON.stringify(ghStateFile)}, "utf-8")),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+}
+
+test("a cheap reply round escalates instead of raising the decision itself", () => {
+  const material = runCheapReplyRound("review-runner-cheap-reply-material-", {
+    session_id: "claude-cheap-reply",
+    result: [
+      "Replied on the thread.",
+      "## Agent Status",
+      "Agent status: `needs_human_decision`",
+      "## Human Decision",
+      "We disagree on whether the retry belongs in this PR.",
+    ].join("\n"),
+    is_error: false,
+  });
+
+  // No terminal verdict and no durable decision comment from the cheap tier:
+  // the queued tier-2 round owns both.
+  assert.equal(material.persisted.pending_tier2_reason, "escalate");
+  assert.equal(
+    material.persisted.agent_review_status,
+    "needs_author_changes"
+  );
+  assert.equal(
+    material.ghState.prs["acme/widget#1"].issueComments.length,
+    0
+  );
+  assert.equal(material.persisted.error, undefined);
+  assert.equal(material.persisted.summary, "## Summary\nThe standing review.");
+
+  // An unrecognized status escalates rather than recording an error, which would
+  // only re-run the cheap tier.
+  const unparseable = runCheapReplyRound(
+    "review-runner-cheap-reply-unparseable-",
+    { session_id: "s", result: "I replied to everyone.", is_error: false }
+  );
+  assert.equal(unparseable.persisted.pending_tier2_reason, "escalate");
+  assert.equal(unparseable.persisted.error, undefined);
+
+  // So does a run that failed outright.
+  const crashed = runCheapReplyRound(
+    "review-runner-cheap-reply-crash-",
+    { result: "" },
+    { exitCode: 1, stderr: "claude exploded" }
+  );
+  assert.equal(crashed.persisted.pending_tier2_reason, "escalate");
+  assert.equal(crashed.persisted.error, undefined);
+
+  // `replied` leaves the standing verdict alone and queues nothing.
+  const replied = runCheapReplyRound("review-runner-cheap-reply-done-", {
+    session_id: "s",
+    result: "Answered.\n\n## Agent Status\nAgent status: `replied`",
+    is_error: false,
+  });
+  assert.equal(replied.persisted.pending_tier2_reason, undefined);
+  assert.equal(
+    replied.persisted.agent_review_status,
+    "needs_author_changes"
+  );
+  assert.ok(
+    new Date(replied.persisted.last_conversation_seen_at).getTime() >
+      Date.parse("2026-05-01T00:00:00.000Z")
+  );
+});
+
+test("a tier-1 round covers the head when the diff cannot be identified", () => {
+  const workspace = setupRunnerWorkspace(
+    "review-runner-tier1-no-diff-",
+    TIER1_CONFIG
+  );
+  const scenarioFile = path.join(workspace, "scenario.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-tier1-no-diff",
+        result:
+          "The second finding still reproduces.\n\n## Agent Status\nAgent status: `needs_author_changes`",
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({
+    source: "task",
+    task_id: "task-1",
+    head_sha: "new-head",
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+      `import { summaryCoversHead } from ${JSON.stringify(moduleUrl("src/lib/review-status.ts"))};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        head_sha: "new-head",
+        summary: "## Summary\\nThe standing review.",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:10:00.000Z",
+      });
+      // No diff_hash: GitHub could not identify this PR's effective diff.
+      await summarizePR(
+        ${JSON.stringify(request)},
+        { round: "review", tier: 1 }
+      );
+      const persisted = readReviewSummaryMap()[${JSON.stringify(request.pr_url)}];
+      console.log(JSON.stringify({
+        persisted,
+        coversHead: summaryCoversHead(persisted),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  // Without a head watermark the verification result would cover nothing: the
+  // builder wake would be skipped, the UI would stay `re_reviewing`, and the
+  // same round would be scheduled again every poll.
+  assert.equal(result.persisted.last_round_diff_hash, undefined);
+  assert.equal(result.persisted.last_round_head_sha, "new-head");
+  assert.equal(result.coversHead, true);
+  assert.equal(
+    result.persisted.agent_review_status,
+    "needs_author_changes"
+  );
+  assert.equal(result.persisted.summary_head_sha, "old-head");
 });
 
 test("a reply round escalates a material discovery to a human decision", () => {

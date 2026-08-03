@@ -519,6 +519,10 @@ function roundCoversDiff(review: ReviewSummary, diffHash?: string): boolean {
     const covered = review.last_round_diff_hash || review.summary_diff_hash;
     if (covered) return covered === diffHash;
   }
+  // No usable diff identity: the head the last completed round covered stands in
+  // for it. Without this a tier-1 round, which does not move the summary head,
+  // would be rescheduled at the same head every poll.
+  if (review.last_round_head_sha === review.head_sha) return true;
   return summaryHeadShaFor(review) === review.head_sha;
 }
 

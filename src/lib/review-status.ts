@@ -12,6 +12,7 @@ export interface ReviewStatusInput {
   summary_head_sha?: string;
   summary_diff_hash?: string;
   last_round_diff_hash?: string;
+  last_round_head_sha?: string;
   effective_diff_hash?: string;
   effective_diff_head_sha?: string;
   error?: string;
@@ -37,7 +38,10 @@ export function reviewCoversHeadSha(
     !review.effective_diff_hash ||
     review.effective_diff_head_sha !== headSha
   ) {
-    return false;
+    // No usable diff identity: fall back to the head the last completed round
+    // covered, so a round at a PR whose diff GitHub could not identify still
+    // counts.
+    return review.last_round_head_sha === headSha;
   }
   return (
     review.summary_diff_hash === review.effective_diff_hash ||

@@ -11,7 +11,11 @@ import {
   shouldRetryErroredReview,
   type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
-import { deriveReviewState, withReviewStatus } from "./review-status";
+import {
+  deriveReviewState,
+  summaryCoversHead,
+  withReviewStatus,
+} from "./review-status";
 import type {
   OrchestratorConfig,
   ReviewRequest,
@@ -619,6 +623,71 @@ test("pollOnce runs a tier-1 verification round seeded with its open threads", a
   assert.equal(h.spawnRounds[0].round, "review");
   assert.equal(h.spawnRounds[0].tier, 1);
   assert.deepEqual(h.spawnRounds[0].unresolved_threads, threads);
+});
+
+test("a tier-1 result with no diff identity is actionable and not repeated", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  // What the runner persists after a tier-1 `needs_author_changes` at a PR whose
+  // effective diff GitHub could not identify: the summary still describes the
+  // old head, and only the head watermark says this round covered the new one.
+  const verified = makeTaskReviewRow({
+    head_sha: "fixedSha",
+    summary_diff_hash: undefined,
+    last_round_diff_hash: undefined,
+    last_round_head_sha: "fixedSha",
+    effective_diff_hash: undefined,
+    effective_diff_head_sha: undefined,
+    agent_review_status: "needs_author_changes",
+  });
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } } },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: { [prUrl]: verified },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  // No round is scheduled: the diff is covered as far as anything can tell, so
+  // the same verification is not repeated every poll.
+  assert.deepEqual(h.spawnRounds, []);
+  // And the verdict reads as current rather than as a pending re-review.
+  assert.equal(summaryCoversHead(h.reviews[prUrl]), true);
+  assert.equal(deriveReviewState(h.reviews[prUrl]), "needs_author_changes");
+});
+
+test("a tier-1 verdict with no diff identity still wakes the builder", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } } },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: { [prUrl]: makeTaskReviewRow({ summary_diff_hash: undefined }) },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 1);
+  assert.equal(h.spawnRounds[0].tier, 1);
+  assert.equal(h.reviewCompletions.length, 1);
+
+  // The tier-1 shape: the summary still describes the old head, and only the
+  // head watermark records that this round covered the current one.
+  await h.reviewCompletions[0](
+    makeSummary(h.spawnCalls[0], {
+      source: "task",
+      task_id: task.id,
+      summary: "reviewed",
+      summary_head_sha: "oldSha",
+      last_round_head_sha: "fixedSha",
+      agent_review_status: "needs_author_changes",
+      current_run_pid: undefined,
+    })
+  );
+
+  assert.equal(h.tasks[0].resume_requested, true);
+  assert.equal(h.tasks[0].resume_run_mode, "review");
 });
 
 test("pollOnce confirms a tier-1 verification with a tier-2 pass", async () => {

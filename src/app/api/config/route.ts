@@ -139,6 +139,24 @@ export async function PUT(request: NextRequest) {
   ) {
     delete updated.review_effort;
   }
+  if (
+    currentReviewRuntime !== updatedReviewRuntime &&
+    !hasOwn("reviewer_tiers") &&
+    updated.reviewer_tiers
+  ) {
+    // A tier with no runtime of its own inherits the reviewer runtime, so a
+    // partial update that changes it must not carry that tier's now-incompatible
+    // model and effort. A tier that pins its own runtime is untouched.
+    const tiers: ReviewerTiers = {};
+    for (const key of ["tier1", "tier2"] as const) {
+      const tier = updated.reviewer_tiers[key];
+      if (!tier) continue;
+      tiers[key] = tier.runtime ? tier : {};
+    }
+    const retained = normalizeReviewerTiers(tiers);
+    if (retained) updated.reviewer_tiers = retained;
+    else delete updated.reviewer_tiers;
+  }
 
   await writeConfig(updated);
   return NextResponse.json(updated);
