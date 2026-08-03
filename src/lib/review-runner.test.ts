@@ -13,11 +13,13 @@ import {
 import path from "node:path";
 
 import {
+  buildReviewReplyPrompt,
   buildReviewWrapperPrompt,
   DEFAULT_REVIEW_PROMPT,
   isReviewSessionCompatible,
   parseReviewAgentStatus,
   parseReviewerHumanDecisionBody,
+  parseReviewReplyStatus,
   resolveReviewOpts,
   resolveReviewPrompt,
   spawnRuntime,
@@ -666,6 +668,67 @@ test("buildReviewWrapperPrompt sweeps sibling cases on initial reviews", () => {
   assert.doesNotMatch(prompt, /Verify each enumerated finding/i);
 });
 
+test("buildReviewReplyPrompt answers conversation without re-reviewing", () => {
+  const cached = {
+    ...sampleRequest(),
+    summary: "## Summary\nPreviously reviewed.",
+    summary_head_sha: "abc123",
+    generated_at: "2026-05-01T00:10:00.000Z",
+    review_status: "up_to_date",
+    review_state: "reviewed",
+  } satisfies ReviewSummary;
+  const prompt = buildReviewReplyPrompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest(),
+    cached
+  );
+
+  assert.match(prompt, /answering conversation on a pull request you already reviewed/i);
+  assert.match(prompt, /effective diff has not changed since your last round/i);
+  assert.match(prompt, /do not re-review the diff/i);
+  assert.match(prompt, /do not raise new findings/i);
+  assert.match(
+    prompt,
+    /<previous_review>\n## Summary\nPreviously reviewed\.\n<\/previous_review>/
+  );
+  assert.match(prompt, /reply on the existing thread each one belongs to/i);
+  assert.match(prompt, /withdraw any earlier request of yours/i);
+  assert.match(prompt, /must be one of: replied, needs_human_decision, blocked/);
+  assert.match(prompt, /leaves the standing review verdict as it is/i);
+  assert.match(prompt, /Do not approve, request changes, or submit any review decision/i);
+  assert.match(prompt, /## Human Decision/);
+  // A reply round has no summary to write and no approval to give.
+  assert.doesNotMatch(prompt, /ready_for_human_approval/);
+  assert.doesNotMatch(prompt, /Start the generated review with `## Summary`/);
+});
+
+test("parseReviewReplyStatus reads only the reply round's own status line", () => {
+  assert.equal(
+    parseReviewReplyStatus("## Agent Status\nAgent status: `replied`"),
+    "replied"
+  );
+  assert.equal(
+    parseReviewReplyStatus("Agent status: needs_human_decision"),
+    "needs_human_decision"
+  );
+  assert.equal(parseReviewReplyStatus("Agent status: blocked"), "blocked");
+  // A quoted finding in the prose is not a status.
+  assert.equal(
+    parseReviewReplyStatus(
+      "I withdrew my earlier needs_author_changes request.\nAgent status: replied"
+    ),
+    "replied"
+  );
+  assert.equal(
+    parseReviewReplyStatus("I still think this is needs_author_changes."),
+    undefined
+  );
+  assert.equal(
+    parseReviewReplyStatus("Agent status: ready_for_human_approval"),
+    undefined
+  );
+});
+
 test("isReviewSessionCompatible requires the same source, runtime, model, and effort", () => {
   const request = sampleRequest({ source: "inbound" });
   const cached = {
@@ -1029,6 +1092,227 @@ test("summarizePR receipts the comments its run posted on every surface", () => 
       .update("abc123|[]|[801]|[]|")
       .digest("hex")
       .slice(0, 16)
+  );
+});
+
+test("a reply round answers conversation without touching the stored review", () => {
+  const workspace = setupRunnerWorkspace("review-runner-reply-round-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const argsFile = path.join(workspace, "agent-args.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "abc123",
+        issueComments: [],
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-reply-session",
+        result:
+          "Answered the thread; my earlier request was out of scope.\n\n## Agent Status\nAgent status: `replied`",
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "## Summary\\nThe standing review.",
+        summary_head_sha: "abc123",
+        summary_diff_hash: "diff-1",
+        effective_diff_hash: "diff-1",
+        effective_diff_head_sha: "abc123",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        agent_review_status: "needs_author_changes",
+        last_conversation_seen_at: "2026-05-01T00:00:00.000Z",
+      });
+      const summary = await summarizePR(
+        ${JSON.stringify(request)},
+        { runtime: "claude", round: "reply", diff_hash: "diff-1" }
+      );
+      const args = JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8"));
+      console.log(JSON.stringify({
+        summary,
+        args,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_AGENT_ARGS_FILE: argsFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  const prompt = result.args.args.join("\n");
+  assert.match(prompt, /Cortex City reply round protocol/);
+  assert.doesNotMatch(prompt, /Cortex City review protocol/);
+  // The reply round leaves the review of the code exactly as it was.
+  assert.equal(result.persisted.summary, "## Summary\nThe standing review.");
+  assert.equal(result.persisted.generated_at, "2026-05-01T00:10:00.000Z");
+  assert.equal(result.persisted.summary_diff_hash, "diff-1");
+  assert.equal(result.persisted.agent_review_status, "needs_author_changes");
+  assert.equal(result.persisted.error, undefined);
+  // ...and clears the trigger that scheduled it.
+  assert.ok(
+    new Date(result.persisted.last_conversation_seen_at).getTime() >
+      Date.parse("2026-05-01T00:00:00.000Z")
+  );
+});
+
+test("a reply round escalates a material discovery to a human decision", () => {
+  const workspace = setupRunnerWorkspace("review-runner-reply-escalate-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "abc123",
+        issueComments: [],
+        nextIssueCommentId: 9100,
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-reply-escalation",
+        result: [
+          "Replied on the thread.",
+          "## Agent Status",
+          "Agent status: `needs_human_decision`",
+          "## Human Decision",
+          "The author and I disagree on whether the retry belongs in this PR.",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "## Summary\\nThe standing review.",
+        summary_head_sha: "abc123",
+        summary_diff_hash: "diff-1",
+        generated_at: "2026-05-01T00:10:00.000Z",
+      });
+      await summarizePR(
+        ${JSON.stringify(request)},
+        { runtime: "claude", round: "reply", diff_hash: "diff-1" }
+      );
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+        ghState: JSON.parse(require("node:fs").readFileSync(${JSON.stringify(ghStateFile)}, "utf-8")),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(
+    result.persisted.agent_review_status,
+    "needs_human_decision"
+  );
+  assert.equal(result.persisted.summary, "## Summary\nThe standing review.");
+  const posted = result.ghState.prs["acme/widget#1"].issueComments;
+  assert.equal(posted.length, 1);
+  assert.match(
+    posted[0].body,
+    /Human decision needed:[^]*retry belongs in this PR/
+  );
+  assert.deepEqual(
+    result.persisted.reviewer_comment_receipts.map(
+      (receipt: ReviewerCommentReceipt) => receipt.comment_id
+    ),
+    [9100]
+  );
+});
+
+test("a reply round with no recognized status fails toward a review round", () => {
+  const workspace = setupRunnerWorkspace("review-runner-reply-unparseable-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-reply-unparseable",
+        result: "I replied to everyone.",
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "## Summary\\nThe standing review.",
+        summary_head_sha: "abc123",
+        summary_diff_hash: "diff-1",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        agent_review_status: "needs_author_changes",
+        last_conversation_seen_at: "2026-05-01T00:00:00.000Z",
+      });
+      await summarizePR(
+        ${JSON.stringify(request)},
+        { runtime: "claude", round: "reply", diff_hash: "diff-1" }
+      );
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  assert.match(result.persisted.error, /did not report a recognized status/);
+  assert.equal(result.persisted.summary, "## Summary\nThe standing review.");
+  assert.equal(result.persisted.agent_review_status, "needs_author_changes");
+  // The trigger is not cleared, so the conversation is still owed an answer.
+  assert.equal(
+    result.persisted.last_conversation_seen_at,
+    "2026-05-01T00:00:00.000Z"
   );
 });
 

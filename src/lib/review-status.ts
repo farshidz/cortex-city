@@ -10,11 +10,28 @@ export interface ReviewStatusInput {
   self_authored?: boolean;
   summary?: string;
   summary_head_sha?: string;
+  summary_diff_hash?: string;
+  effective_diff_hash?: string;
+  effective_diff_head_sha?: string;
   error?: string;
   current_run_pid?: number;
   final_at?: string;
   my_last_review_sha?: string;
   head_sha: string;
+}
+
+// Whether the stored summary still describes the code at the current head. A
+// moved head with an unchanged effective diff (a rebase) counts as covered,
+// because scheduling will not run another round for it.
+export function summaryCoversHead(review: ReviewStatusInput): boolean {
+  const summaryHeadSha = review.summary_head_sha || review.head_sha;
+  if (summaryHeadSha === review.head_sha) return true;
+  return Boolean(
+    review.summary_diff_hash &&
+      review.effective_diff_hash &&
+      review.effective_diff_head_sha === review.head_sha &&
+      review.summary_diff_hash === review.effective_diff_hash
+  );
 }
 
 export interface ReviewStateInput extends ReviewStatusInput {
@@ -56,8 +73,7 @@ export function deriveReviewStatus(review: ReviewStatusInput): ReviewStatus {
   if (review.error) return "summary_error";
   if (!hasSummary) return "pending_summary";
   if (review.source === "task") {
-    const summaryHeadSha = review.summary_head_sha || review.head_sha;
-    return summaryHeadSha === review.head_sha ? "up_to_date" : "new_commits";
+    return summaryCoversHead(review) ? "up_to_date" : "new_commits";
   }
   if (!review.my_last_review_sha) return "needs_review";
   if (review.my_last_review_sha !== review.head_sha) return "new_commits";
@@ -90,9 +106,9 @@ export function deriveReviewState(review: ReviewStateInput): ReviewState {
   if (review.error) return "generation_failed";
   if (!hasSummary) return "queued";
 
-  // Summary present: a stale summary means HEAD moved (verdict already cleared).
-  const summaryHeadSha = review.summary_head_sha || review.head_sha;
-  if (summaryHeadSha !== review.head_sha) return "re_reviewing";
+  // Summary present: a stale summary means the diff moved on (verdict already
+  // cleared). A rebase that preserved the diff is not stale.
+  if (!summaryCoversHead(review)) return "re_reviewing";
 
   if (
     review.source !== "task" &&

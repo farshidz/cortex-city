@@ -411,6 +411,29 @@ export default function SettingsPage() {
               }
             />
           </div>
+          <div className="space-y-2">
+            <Label>Review Debounce (seconds)</Label>
+            <Input
+              type="number"
+              min={0}
+              max={3600}
+              value={form.review_debounce_seconds ?? 300}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  review_debounce_seconds: Math.max(
+                    0,
+                    parseInt(e.target.value) || 0
+                  ),
+                })
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              How long a pull request head must sit still before a changed diff
+              starts a review round. Pull requests in the same stack share the
+              window. 0 reviews immediately.
+            </p>
+          </div>
           <div className="flex items-center gap-2">
             <Switch
               checked={form.review_learning_enabled !== false}

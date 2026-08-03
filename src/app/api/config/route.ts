@@ -49,6 +49,23 @@ export async function PUT(request: NextRequest) {
     else delete mutableUpdated[key];
   }
 
+  const optionalCountKeys = ["review_debounce_seconds"] as const;
+  for (const key of optionalCountKeys) {
+    if (!hasOwn(key)) continue;
+    const raw: unknown = body[key];
+    const value =
+      typeof raw === "number"
+        ? raw
+        : typeof raw === "string" && raw.trim()
+          ? Number(raw)
+          : NaN;
+    if (Number.isFinite(value) && value >= 0) {
+      mutableUpdated[key] = Math.round(value);
+    } else {
+      delete mutableUpdated[key];
+    }
+  }
+
   const currentReviewRuntime =
     current.review_runtime || current.default_agent_runner;
   const updatedReviewRuntime =

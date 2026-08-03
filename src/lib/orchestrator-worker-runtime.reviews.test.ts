@@ -5,7 +5,9 @@ import {
   FINAL_CLASSIFICATION_RETRY_MS,
   PRUNE_AGE_MS,
   REVIEW_ERROR_RETRY_MS,
+  decideReviewRound,
   pollOnce,
+  resolveReviewDebounceMs,
   shouldRetryErroredReview,
   type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
@@ -30,12 +32,17 @@ interface HarnessOptions {
   prHeadShas?: Record<string, string>;
   getReviewRequestedPRs?: () => Promise<ReviewRequest[]>;
   reviewWorkspaceCleanupResults?: Record<string, boolean>;
+  // Providing either map installs the corresponding worker dep. Omitting it
+  // leaves the dep absent, which is the "GitHub cannot answer" fallback.
+  prDiffHashes?: Record<string, string>;
+  foreignCommentAt?: Record<string, string>;
 }
 
 interface Harness {
   deps: WorkerRuntimeDeps;
   reviews: Record<string, ReviewSummary>;
   spawnCalls: ReviewRequest[];
+  spawnRounds: Array<{ pr_url: string; round?: string; diff_hash?: string }>;
   retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }>;
   deletedPrUrls: string[];
   removedReviewWorkspaceUrls: string[];
@@ -57,6 +64,9 @@ function makeConfig(
     default_agent_runner: "claude",
     agents: {},
     max_parallel_reviews: 2,
+    // Most scheduling fixtures are about which round runs, not about waiting for
+    // a head to settle. Debounce tests set their own window.
+    review_debounce_seconds: 0,
     ...overrides,
   };
 }
@@ -106,6 +116,11 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 function makeHarness(options: HarnessOptions = {}): Harness {
   const reviews: Record<string, ReviewSummary> = { ...(options.reviews || {}) };
   const spawnCalls: ReviewRequest[] = [];
+  const spawnRounds: Array<{
+    pr_url: string;
+    round?: string;
+    diff_hash?: string;
+  }> = [];
   const retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }> = [];
   const deletedPrUrls: string[] = [];
   const removedReviewWorkspaceUrls: string[] = [];
@@ -152,8 +167,25 @@ function makeHarness(options: HarnessOptions = {}): Harness {
       builderCalls.push({ task, mode });
       return { pid: spawnPid(), child: {} as never };
     },
+    ...(options.prDiffHashes
+      ? {
+          getPRDiffHash: async (prUrl: string) =>
+            options.prDiffHashes?.[prUrl] || "",
+        }
+      : {}),
+    ...(options.foreignCommentAt
+      ? {
+          getLatestForeignCommentAt: async (prUrl: string) =>
+            options.foreignCommentAt?.[prUrl] || "",
+        }
+      : {}),
     spawnReviewSummary: async (request, _opts, onComplete) => {
       spawnCalls.push(request);
+      spawnRounds.push({
+        pr_url: request.pr_url,
+        round: _opts?.round,
+        diff_hash: _opts?.diff_hash,
+      });
       const pid = spawnPid();
       reviews[request.pr_url] = {
         ...withReviewStatus({
@@ -238,6 +270,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     deps,
     reviews,
     spawnCalls,
+    spawnRounds,
     retroCalls,
     deletedPrUrls,
     removedReviewWorkspaceUrls,
@@ -249,6 +282,241 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     tasks,
   };
 }
+
+test("decideReviewRound schedules on the effective diff, not the head SHA", () => {
+  const config = makeConfig();
+  const reviewed = makeSummary(makeRequest({ head_sha: "rebased" }), {
+    summary: "reviewed",
+    summary_head_sha: "original",
+    summary_diff_hash: "diff-1",
+  });
+
+  // A rebase: the head moved, the change did not.
+  assert.deepEqual(
+    decideReviewRound({ review: reviewed, diffHash: "diff-1", config }),
+    { reason: "up_to_date" }
+  );
+  // A real edit.
+  assert.deepEqual(
+    decideReviewRound({ review: reviewed, diffHash: "diff-2", config }),
+    { round: "review", reason: "diff_changed" }
+  );
+  // GitHub could not identify the diff, so the head SHA decides and an unknown
+  // resolves to reviewing.
+  assert.deepEqual(decideReviewRound({ review: reviewed, config }), {
+    round: "review",
+    reason: "diff_changed",
+  });
+  // A row that predates diff identities has no stored diff to compare.
+  assert.deepEqual(
+    decideReviewRound({
+      review: makeSummary(makeRequest({ head_sha: "abc123" }), {
+        summary: "reviewed",
+        summary_head_sha: "abc123",
+      }),
+      diffHash: "diff-9",
+      config,
+    }),
+    { reason: "up_to_date" }
+  );
+  assert.deepEqual(decideReviewRound({ config }), {
+    round: "review",
+    reason: "initial",
+  });
+});
+
+test("decideReviewRound waits for the head to settle before a review round", () => {
+  const now = Date.parse("2026-05-01T01:00:00.000Z");
+  const review = makeSummary(makeRequest({ head_sha: "newSha" }), {
+    summary: "reviewed",
+    summary_head_sha: "oldSha",
+    summary_diff_hash: "diff-1",
+  });
+  const input = {
+    review,
+    diffHash: "diff-2",
+    config: makeConfig({ review_debounce_seconds: undefined }),
+    now,
+  };
+
+  // Default window is 5 minutes.
+  assert.equal(resolveReviewDebounceMs({}), 300_000);
+  assert.equal(resolveReviewDebounceMs({ review_debounce_seconds: 30 }), 30_000);
+  assert.deepEqual(
+    decideReviewRound({ ...input, headStableSinceMs: now - 60_000 }),
+    { reason: "debouncing" }
+  );
+  assert.deepEqual(
+    decideReviewRound({ ...input, headStableSinceMs: now - 301_000 }),
+    { round: "review", reason: "diff_changed" }
+  );
+  // An unknown anchor never delays indefinitely.
+  assert.deepEqual(decideReviewRound(input), {
+    round: "review",
+    reason: "diff_changed",
+  });
+  assert.deepEqual(
+    decideReviewRound({
+      ...input,
+      config: makeConfig({ review_debounce_seconds: 0 }),
+      headStableSinceMs: now - 1_000,
+    }),
+    { round: "review", reason: "diff_changed" }
+  );
+});
+
+test("decideReviewRound answers conversation only at an unchanged diff", () => {
+  const config = makeConfig();
+  const review = makeSummary(makeRequest({ head_sha: "abc123" }), {
+    summary: "reviewed",
+    summary_head_sha: "abc123",
+    summary_diff_hash: "diff-1",
+    last_conversation_seen_at: "2026-05-01T00:00:00.000Z",
+  });
+
+  assert.deepEqual(
+    decideReviewRound({
+      review,
+      diffHash: "diff-1",
+      latestConversationAt: "2026-05-01T00:30:00.000Z",
+      config,
+    }),
+    { round: "reply", reason: "conversation" }
+  );
+  assert.deepEqual(
+    decideReviewRound({
+      review,
+      diffHash: "diff-1",
+      latestConversationAt: "2026-04-30T23:00:00.000Z",
+      config,
+    }),
+    { reason: "up_to_date" }
+  );
+  // A changed diff is a review round; the conversation comes with it.
+  assert.deepEqual(
+    decideReviewRound({
+      review,
+      diffHash: "diff-2",
+      latestConversationAt: "2026-05-01T00:30:00.000Z",
+      config,
+    }),
+    { round: "review", reason: "diff_changed" }
+  );
+  // Never seen before means unanswered.
+  assert.deepEqual(
+    decideReviewRound({
+      review: { ...review, last_conversation_seen_at: undefined },
+      diffHash: "diff-1",
+      latestConversationAt: "2026-05-01T00:30:00.000Z",
+      config,
+    }),
+    { round: "reply", reason: "conversation" }
+  );
+  // An errored row takes the expensive path instead of replying: here the
+  // stored reviewer profile is unknown, so the retry is immediate.
+  assert.deepEqual(
+    decideReviewRound({
+      review: { ...review, error: "boom", error_at: "2026-05-01T00:59:00.000Z" },
+      diffHash: "diff-1",
+      latestConversationAt: "2026-05-01T00:30:00.000Z",
+      config,
+      now: Date.parse("2026-05-01T01:00:00.000Z"),
+    }),
+    { round: "review", reason: "error_retry" }
+  );
+  // Still no reply round once the same failure is inside its backoff window.
+  assert.deepEqual(
+    decideReviewRound({
+      review: {
+        ...review,
+        error: "boom",
+        error_at: "2026-05-01T00:59:00.000Z",
+        session_profile: { runtime: "claude" },
+      },
+      diffHash: "diff-1",
+      latestConversationAt: "2026-05-01T00:30:00.000Z",
+      config,
+      now: Date.parse("2026-05-01T01:00:00.000Z"),
+    }),
+    { reason: "error_backoff" }
+  );
+});
+
+test("pollOnce runs no review round when a rebase preserved the diff", async () => {
+  const pr = makeRequest({ head_sha: "rebasedSha" });
+  const cached = makeSummary(makeRequest({ head_sha: "oldSha" }), {
+    summary: "reviewed",
+    summary_head_sha: "oldSha",
+    summary_diff_hash: "diff-1",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "oldSha",
+    agent_review_status: "needs_human_decision",
+  });
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: cached },
+    prDiffHashes: { [pr.pr_url]: "diff-1" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[pr.pr_url];
+  assert.equal(h.spawnCalls.length, 0);
+  assert.equal(stored.head_sha, "rebasedSha");
+  assert.equal(stored.effective_diff_head_sha, "rebasedSha");
+  // The verdict is about the diff, so a rebase does not clear it.
+  assert.equal(stored.agent_review_status, "needs_human_decision");
+  // The UI agrees: a preserved diff is not "re-reviewing".
+  assert.equal(deriveReviewState(stored), "needs_decision");
+});
+
+test("pollOnce reviews again when the effective diff changed", async () => {
+  const pr = makeRequest({ head_sha: "fixedSha" });
+  const cached = makeSummary(makeRequest({ head_sha: "oldSha" }), {
+    summary: "reviewed",
+    summary_head_sha: "oldSha",
+    summary_diff_hash: "diff-1",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "oldSha",
+    agent_review_status: "needs_author_changes",
+  });
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: cached },
+    prDiffHashes: { [pr.pr_url]: "diff-2" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.spawnRounds, [
+    { pr_url: pr.pr_url, round: "review", diff_hash: "diff-2" },
+  ]);
+  assert.equal(h.reviews[pr.pr_url].agent_review_status, undefined);
+});
+
+test("pollOnce schedules a reply round for comment-only activity", async () => {
+  const pr = makeRequest({ head_sha: "abc123" });
+  const cached = makeSummary(pr, {
+    summary: "reviewed",
+    summary_head_sha: "abc123",
+    summary_diff_hash: "diff-1",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "abc123",
+    last_conversation_seen_at: "2026-05-01T00:00:00.000Z",
+  });
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: cached },
+    prDiffHashes: { [pr.pr_url]: "diff-1" },
+    foreignCommentAt: { [pr.pr_url]: "2026-05-01T00:30:00.000Z" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.spawnRounds, [
+    { pr_url: pr.pr_url, round: "reply", diff_hash: "diff-1" },
+  ]);
+});
 
 test("pollOnce upserts a brand-new PR and spawns a summary", async () => {
   const pr = makeRequest({ my_last_review_sha: undefined });

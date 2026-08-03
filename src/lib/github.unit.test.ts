@@ -18,8 +18,12 @@ test("github exports are reachable via module namespace", () => {
   assert.equal(typeof github.getAuthenticatedUserLogin, "function");
   assert.equal(typeof github.getCIStatus, "function");
   assert.equal(typeof github.getMyLastReviewSha, "function");
+  assert.equal(typeof github.getLatestForeignCommentAt, "function");
+  assert.equal(typeof github.getPRDiffHash, "function");
   assert.equal(typeof github.getPRHeadSha, "function");
   assert.equal(typeof github.getPRStateHash, "function");
+  assert.equal(typeof github.listReviewerAuthoredComments, "function");
+  assert.equal(typeof github.reviewDiffIdentityHash, "function");
   assert.equal(typeof github.getPRStatus, "function");
   assert.equal(typeof github.getReviewLifecycleState, "function");
   assert.equal(typeof github.getReviewRequestedPRs, "function");
@@ -31,6 +35,59 @@ test("github exports are reachable via module namespace", () => {
   assert.equal(typeof github.submitPRReview, "function");
   assert.equal(typeof github.updatePRBranch, "function");
   assert.equal(typeof github.__testUtils, "object");
+});
+
+test("reviewDiffIdentityHash survives a rebase but not a real edit", () => {
+  const original = [
+    "diff --git a/src/guard.ts b/src/guard.ts",
+    "index 1111111..2222222 100644",
+    "--- a/src/guard.ts",
+    "+++ b/src/guard.ts",
+    "@@ -10,6 +10,7 @@ export function guard() {",
+    "   const limit = 4;",
+    "-  if (value > limit) return false;",
+    "+  if (value >= limit) return false;",
+    "   return true;",
+    "",
+  ].join("\n");
+  // Same change after a rebase: new blob hashes, shifted line numbers, a
+  // different hunk header, and different surrounding context.
+  const rebased = [
+    "diff --git a/src/guard.ts b/src/guard.ts",
+    "index 3333333..4444444 100644",
+    "--- a/src/guard.ts",
+    "+++ b/src/guard.ts",
+    "@@ -87,6 +92,7 @@ export function guard(input: Input) {",
+    "   const limit = 4;",
+    "-  if (value > limit) return false;",
+    "+  if (value >= limit) return false;",
+    "   log(value);",
+    "",
+  ].join("\n");
+  const edited = original.replace("value >= limit", "value >= limit + 1");
+
+  const hash = github.reviewDiffIdentityHash(original);
+  assert.match(hash, /^[0-9a-f]{16}$/);
+  assert.equal(github.reviewDiffIdentityHash(rebased), hash);
+  assert.notEqual(github.reviewDiffIdentityHash(edited), hash);
+  // Renames, mode changes, and binary files are part of the identity.
+  assert.notEqual(
+    github.reviewDiffIdentityHash(
+      [
+        "diff --git a/src/guard.ts b/src/shield.ts",
+        "rename from src/guard.ts",
+        "rename to src/shield.ts",
+      ].join("\n")
+    ),
+    ""
+  );
+  // No identity for an empty or unreadable diff, so callers fall back to SHAs
+  // instead of treating two unknowns as the same change.
+  assert.equal(github.reviewDiffIdentityHash(""), "");
+  assert.equal(
+    github.reviewDiffIdentityHash("@@ -1,2 +1,2 @@\n context only\n"),
+    ""
+  );
 });
 
 test("parsePRUrl extracts owner/repo/number from canonical URLs", () => {

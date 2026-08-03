@@ -367,6 +367,102 @@ export async function updatePRBranch(prUrl: string): Promise<void> {
   );
 }
 
+// Reduce a unified diff to the content that decides whether it is the same
+// change: file identity plus added and removed lines, with whitespace, blob
+// hashes, hunk headers, and context lines dropped. This is `git patch-id
+// --stable` semantics, and it is what makes the identity survive a rebase —
+// rebasing moves line numbers and context but not the change itself.
+function normalizedDiffIdentity(diff: string): string {
+  const parts: string[] = [];
+  for (const line of diff.split(/\r?\n/)) {
+    if (
+      line.startsWith("diff --git ") ||
+      line.startsWith("new file mode ") ||
+      line.startsWith("deleted file mode ") ||
+      line.startsWith("rename from ") ||
+      line.startsWith("rename to ") ||
+      line.startsWith("Binary files ")
+    ) {
+      parts.push(line.trim());
+      continue;
+    }
+    if (
+      line.startsWith("index ") ||
+      line.startsWith("--- ") ||
+      line.startsWith("+++ ") ||
+      line.startsWith("@@")
+    ) {
+      continue;
+    }
+    if (line.startsWith("+") || line.startsWith("-")) {
+      parts.push(`${line[0]}${line.slice(1).replace(/\s+/g, "")}`);
+    }
+  }
+  return parts.join("\n");
+}
+
+// Empty means "no identity" — an empty diff and a failed diff read are both
+// reported this way, so callers fall back to head SHAs rather than treating two
+// unknowns as equal.
+export function reviewDiffIdentityHash(diff: string): string {
+  const normalized = normalizedDiffIdentity(diff);
+  if (!normalized) return "";
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+export async function getPRDiffHash(prUrl: string): Promise<string> {
+  if (!parsePRUrl(prUrl)) return "";
+  const result = await execFileResult("gh", ["pr", "diff", prUrl]);
+  if (!result.ok) return "";
+  return reviewDiffIdentityHash(result.stdout);
+}
+
+// The newest comment on either surface that the reviewer did not author, or ""
+// when there is none and when GitHub could not answer. Drives the reply-round
+// trigger, so a reviewer comment never counts as someone talking to it.
+export async function getLatestForeignCommentAt(prUrl: string): Promise<string> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return "";
+
+  const [comments, issueComments] = await Promise.all([
+    execPaginatedArrayStrict<ReviewCommentItem>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
+    ),
+    execPaginatedArrayStrict<IssueCommentItem>(
+      `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
+    ),
+  ]);
+  if (!comments || !issueComments) return "";
+
+  const identity = await reviewerCommentIdentity(prUrl, [
+    ...comments,
+    ...issueComments,
+  ]);
+  let latest = "";
+  let latestMs = -Infinity;
+  const consider = (
+    surface: ReviewerCommentSurface,
+    items: Array<{
+      id: number;
+      body?: string | null;
+      user?: { login?: string };
+      created_at?: string;
+    }>
+  ) => {
+    for (const item of items) {
+      if (isReviewerAuthoredComment(identity, surface, item)) continue;
+      const createdAt = (item.created_at || "").trim();
+      const createdMs = createdAt ? new Date(createdAt).getTime() : NaN;
+      if (!Number.isFinite(createdMs) || createdMs <= latestMs) continue;
+      latest = createdAt;
+      latestMs = createdMs;
+    }
+  };
+  consider("review_comment", comments);
+  consider("issue", issueComments);
+  return latest;
+}
+
 export async function getPRStatus(prUrl: string): Promise<PRStatus> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return "unknown";

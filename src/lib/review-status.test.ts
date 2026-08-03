@@ -308,6 +308,51 @@ test("task-owned reviews use summary freshness and ignore human decision signals
   );
 });
 
+test("a rebase that preserved the effective diff is not stale", () => {
+  const rebased = {
+    ...stateBase,
+    source: "task" as const,
+    head_sha: "rebased-sha",
+    summary_head_sha: "original-sha",
+    summary_diff_hash: "diff-1",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "rebased-sha",
+  };
+
+  assert.equal(deriveReviewStatus(rebased), "up_to_date");
+  assert.equal(
+    deriveReviewState({
+      ...rebased,
+      agent_review_status: "needs_human_decision",
+    }),
+    "needs_decision"
+  );
+  // The identity has to belong to the current head to mean anything.
+  assert.equal(
+    deriveReviewStatus({ ...rebased, effective_diff_head_sha: "some-older-sha" }),
+    "new_commits"
+  );
+  // A changed diff is stale again.
+  assert.equal(
+    deriveReviewStatus({ ...rebased, effective_diff_hash: "diff-2" }),
+    "new_commits"
+  );
+  assert.equal(
+    deriveReviewState({ ...rebased, effective_diff_hash: "diff-2" }),
+    "re_reviewing"
+  );
+  // Rows with no stored diff identity keep comparing head SHAs.
+  assert.equal(
+    deriveReviewStatus({
+      ...rebased,
+      summary_diff_hash: undefined,
+      effective_diff_hash: undefined,
+      effective_diff_head_sha: undefined,
+    }),
+    "new_commits"
+  );
+});
+
 test("withReviewStatus recomputes the legacy status", () => {
   assert.equal(
     withReviewStatus({

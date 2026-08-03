@@ -210,6 +210,10 @@ export interface OrchestratorConfig {
   review_model?: string;
   max_parallel_reviews?: number;
   review_learning_enabled?: boolean;
+  // How long a PR head must sit still before a changed effective diff schedules
+  // a review round. Absent falls back to REVIEW_DEBOUNCE_DEFAULT_SECONDS; 0
+  // disables the wait.
+  review_debounce_seconds?: number;
   worktree_roots?: string[];
 }
 
@@ -357,6 +361,22 @@ export type ReviewState =
 export interface ReviewSummary extends ReviewRequest {
   summary: string;
   summary_head_sha?: string;
+  // Identity of the effective diff (base...head) the stored summary reviewed.
+  // Scheduling compares this against `effective_diff_hash`, so a rebase that
+  // leaves the diff intact is not a new review round.
+  summary_diff_hash?: string;
+  // Identity of the effective diff at `effective_diff_head_sha`, which is the
+  // head it was computed from. Both are absent when GitHub could not answer,
+  // and scheduling then falls back to comparing head SHAs.
+  effective_diff_hash?: string;
+  effective_diff_head_sha?: string;
+  // When the worker first observed the current `head_sha`. Anchors the review
+  // debounce window; stacked PRs share the newest value in their stack.
+  head_first_seen_at?: string;
+  // Everything a completed round had already seen: comments by anyone other
+  // than the reviewer created at or before this instant do not trigger a reply
+  // round.
+  last_conversation_seen_at?: string;
   generated_at: string;
   review_status: ReviewStatus;
   review_state: ReviewState;

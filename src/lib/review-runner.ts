@@ -168,6 +168,29 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
   "blocked",
 ];
 
+// A reply round answers conversation at an unchanged diff. It may not produce a
+// terminal verdict, so its status space is separate and small: `replied` leaves
+// the standing verdict alone, and only a material discovery escalates.
+export const REVIEW_REPLY_STATUSES = [
+  "replied",
+  "needs_human_decision",
+  "blocked",
+] as const;
+
+export type ReviewReplyStatus = (typeof REVIEW_REPLY_STATUSES)[number];
+
+export type ReviewRoundKind = "review" | "reply";
+
+export const REVIEW_REPLY_STATUS_MISSING_ERROR =
+  "The reply round did not report a recognized status.";
+export const REVIEW_REPLY_BLOCKED_ERROR =
+  "The reply round reported blocked before answering the conversation.";
+
+// A reply round's own comments are what it produced; anything created before it
+// started was visible to it. The margin absorbs clock skew between this host
+// and GitHub's comment timestamps, at the cost of at most one extra reply round.
+const REVIEW_CONVERSATION_SEEN_SKEW_MS = 60_000;
+
 const REVIEWER_SEPARATE_FOLLOWUP_COMMENT_PREFIX =
   `${REVIEWER_GITHUB_COMMENT_PREFIX} **Separate follow-up suggested (non-blocking):**`;
 const REVIEW_GITHUB_TOOL_INSTRUCTION =
@@ -774,6 +797,108 @@ export function buildReviewWrapperPrompt(
   return sections.join("\n");
 }
 
+export function buildReviewReplyPrompt(
+  config: OrchestratorConfig,
+  request: ReviewRequest,
+  cached?: ReviewSummary
+): string {
+  const target = effectiveReviewRequest(request, cached);
+  const source = reviewSourceOf(target);
+  const sections = [
+    [
+      "You are Cortex City's review agent, answering conversation on a pull",
+      "request you already reviewed.",
+    ].join(" "),
+    "",
+    "Cortex City reply round protocol:",
+    REVIEW_GITHUB_TOOL_INSTRUCTION,
+    ...buildReviewSourceContext(
+      target,
+      source === "task" ? config.reviewer_agent_prompt : undefined
+    ),
+    "",
+    `Current head SHA: ${target.head_sha}`,
+    [
+      "The effective diff has not changed since your last round. This is not a",
+      "review round: do not re-review the diff, do not audit unchanged code, and",
+      "do not raise new findings.",
+    ].join(" "),
+    [
+      "This session is fresh and has no memory of the earlier rounds. The review",
+      "you produced last, below, plus the PR's own GitHub history are your context.",
+    ].join(" "),
+    "<previous_review>",
+    cached?.summary?.trim() || "(not recorded)",
+    "</previous_review>",
+    [
+      "- Read the comments and review threads added since your last round, and",
+      "reply on the existing thread each one belongs to.",
+    ].join(" "),
+    [
+      "- Answer questions directly, and withdraw any earlier request of yours that",
+      "the conversation shows was wrong or out of scope.",
+    ].join(" "),
+    [
+      "- Resolve a thread only when the conversation settles it and the code",
+      "already satisfies it.",
+    ].join(" "),
+    [
+      `- Start every GitHub comment you post with \`${REVIEWER_GITHUB_COMMENT_PREFIX}\``,
+      "as the first characters of the comment body.",
+    ].join(" "),
+    [
+      "- Treat every GitHub comment authored by the reviewer as immutable timeline",
+      "history. Never edit or delete an earlier reviewer comment; post a new",
+      "follow-up comment instead.",
+    ].join(" "),
+    [
+      "- Do not approve, request changes, or submit any review decision on GitHub.",
+    ].join(" "),
+    "- Include `## Agent Status` with one exact line: `Agent status: <status>`.",
+    `- The status must be one of: ${REVIEW_REPLY_STATUSES.join(", ")}.`,
+    [
+      "- Use `replied` when you answered the conversation and it surfaced nothing",
+      "material. This leaves the standing review verdict as it is.",
+    ].join(" "),
+    [
+      "- Use `needs_human_decision` when the conversation surfaced something",
+      "material that needs human judgment: a disagreement you cannot settle within",
+      "this PR's scope, or a risk whose smallest correct fix would materially",
+      "expand the PR. Describe it; do not prescribe the larger design.",
+    ].join(" "),
+    [
+      "- Use `blocked` when you could not complete the round, including when you",
+      "could not post a reply you owed.",
+    ].join(" "),
+    [
+      "- If your final status is `needs_human_decision`, add a `## Human Decision`",
+      "section with the decision the human needs to make. Do not post that comment",
+      "yourself and do not invent a comment ID: Cortex City creates exactly one",
+      `top-level comment from that section, prefixes it with`,
+      `\`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\`, and records the receipt.`,
+    ].join(" "),
+    "",
+    `Reply on this PR: ${target.pr_url}`,
+  ];
+  return sections.join("\n");
+}
+
+export function parseReviewReplyStatus(
+  text: string
+): ReviewReplyStatus | undefined {
+  // Deliberately stricter than the review-round parser: a reply round's prose
+  // quotes findings and statuses, so only the dedicated status line counts.
+  const statusLine = text.match(
+    /\bagent\s+(?:status|readiness|verdict)\b\s*[:\-]\s*`?([a-zA-Z0-9 _-]+)`?/i
+  );
+  if (!statusLine) return undefined;
+  const normalized = statusLine[1]
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_")
+    .replace(/[^a-z_]/g, "");
+  return REVIEW_REPLY_STATUSES.find((status) => normalized.includes(status));
+}
+
 export function parseReviewAgentStatus(
   text: string
 ): ReviewAgentStatus | undefined {
@@ -1179,7 +1304,15 @@ export function spawnRuntime(
   return { pid: child.pid!, child, done };
 }
 
-export type SpawnReviewSummaryOptions = Partial<SpawnOpts>;
+export interface SpawnReviewSummaryOptions extends Partial<SpawnOpts> {
+  // Defaults to a full review round. A reply round answers conversation at an
+  // unchanged effective diff and never rewrites the stored summary.
+  round?: ReviewRoundKind;
+  // Identity of the effective diff this round is reviewing, as the scheduler
+  // computed it. Persisted with the summary so a later rebase that preserves
+  // the diff is not a new round.
+  diff_hash?: string;
+}
 
 export interface SpawnedReview {
   pid: number;
@@ -1212,11 +1345,19 @@ export async function spawnReviewSummary(
   )
     ? cachedBefore?.session_id
     : undefined;
-  const prompt = buildReviewWrapperPrompt(config, target, cachedBefore);
+  const replyRound = options.round === "reply";
+  const prompt = replyRound
+    ? buildReviewReplyPrompt(config, target, cachedBefore)
+    : buildReviewWrapperPrompt(config, target, cachedBefore);
   const baseEntry = {
     ...target,
     summary: cachedBefore?.summary ?? "",
     summary_head_sha: cachedSummaryHeadSha,
+    summary_diff_hash: cachedBefore?.summary_diff_hash,
+    effective_diff_hash: cachedBefore?.effective_diff_hash,
+    effective_diff_head_sha: cachedBefore?.effective_diff_head_sha,
+    head_first_seen_at: cachedBefore?.head_first_seen_at,
+    last_conversation_seen_at: cachedBefore?.last_conversation_seen_at,
     generated_at: cachedBefore?.generated_at ?? "",
     runtime: opts.runtime,
     effort: opts.effort,
@@ -1226,7 +1367,9 @@ export async function spawnReviewSummary(
     duration_ms: cachedBefore?.duration_ms,
     input_tokens: cachedBefore?.input_tokens,
     output_tokens: cachedBefore?.output_tokens,
-    agent_review_status: followupReview
+    // A reply round runs at an unchanged diff, so the standing verdict is still
+    // about the code in front of it and must survive the round.
+    agent_review_status: followupReview && !replyRound
       ? undefined
       : cachedBefore?.agent_review_status,
     reviewer_comment_receipts: cachedBefore?.reviewer_comment_receipts,
@@ -1361,10 +1504,28 @@ export async function spawnReviewSummary(
   const completion = done.then(async (output) => {
     const finalOutput = output;
     const generatedAt = new Date().toISOString();
-    const runtimeSuccessful = !finalOutput.error;
-    const agentReviewStatus = runtimeSuccessful
-      ? parseReviewAgentStatus(finalOutput.result_text)
+    const replyStatus = replyRound
+      ? parseReviewReplyStatus(finalOutput.result_text)
       : undefined;
+    // An unrecognized or blocked reply status is recorded as a failure rather
+    // than guessed at: the error backoff then schedules a full review round,
+    // which is the expensive-but-correct path.
+    const replyRoundError =
+      replyRound && !finalOutput.error
+        ? !replyStatus
+          ? REVIEW_REPLY_STATUS_MISSING_ERROR
+          : replyStatus === "blocked"
+            ? REVIEW_REPLY_BLOCKED_ERROR
+            : undefined
+        : undefined;
+    const runtimeSuccessful = !finalOutput.error && !replyRoundError;
+    const agentReviewStatus = !runtimeSuccessful
+      ? undefined
+      : replyRound
+        ? replyStatus === "needs_human_decision"
+          ? "needs_human_decision"
+          : undefined
+        : parseReviewAgentStatus(finalOutput.result_text);
     const reviewerHumanDecisionBody = parseReviewerHumanDecisionBody(
       finalOutput.result_text
     );
@@ -1665,6 +1826,9 @@ export async function spawnReviewSummary(
         latestTarget,
         target
       );
+      // A reply round produced no review of the code, so it must leave the
+      // stored summary and the diff it covers exactly as they were.
+      const rewritesSummary = successful && !replyRound;
       return {
         // Reconciliation may discover a new HEAD or change review context while
         // the agent is running. Keep the latest identity; a changed context is
@@ -1672,17 +1836,43 @@ export async function spawnReviewSummary(
         ...latestTarget,
         summary: reviewContextChangedDuringRun
           ? ""
-          : successful
+          : rewritesSummary
             ? finalOutput.result_text.trim()
             : latestBeforeSave.summary,
         summary_head_sha: reviewContextChangedDuringRun
           ? undefined
-          : successful
+          : rewritesSummary
             ? target.head_sha
             : summaryHeadShaFor(latestBeforeSave),
+        // A head move mid-run leaves the reviewed diff identity unknown for the
+        // new head, so it is dropped: scheduling then falls back to head SHAs
+        // and runs another round rather than trusting this one.
+        summary_diff_hash: reviewContextChangedDuringRun
+          ? undefined
+          : rewritesSummary
+            ? headMovedDuringRun
+              ? undefined
+              : options.diff_hash || undefined
+            : latestBeforeSave.summary_diff_hash,
+        effective_diff_hash: reviewContextChangedDuringRun
+          ? undefined
+          : latestBeforeSave.effective_diff_hash,
+        effective_diff_head_sha: reviewContextChangedDuringRun
+          ? undefined
+          : latestBeforeSave.effective_diff_head_sha,
+        head_first_seen_at: latestBeforeSave.head_first_seen_at,
+        // Every completed round read the conversation that existed when it
+        // started, so it clears the reply-round trigger up to that instant.
+        last_conversation_seen_at:
+          reviewContextChangedDuringRun || !successful
+            ? latestBeforeSave.last_conversation_seen_at
+            : new Date(
+                new Date(runStartedAt).getTime() -
+                  REVIEW_CONVERSATION_SEEN_SKEW_MS
+              ).toISOString(),
         generated_at: reviewContextChangedDuringRun
           ? ""
-          : successful
+          : rewritesSummary
             ? generatedAt
             : latestBeforeSave.generated_at,
         runtime: opts.runtime,
@@ -1707,13 +1897,19 @@ export async function spawnReviewSummary(
         output_tokens: finalOutput.usage?.output_tokens,
         error: reviewContextChangedDuringRun
           ? undefined
-          : finalOutput.error || reviewActionError || approvalVerificationError,
+          : finalOutput.error ||
+            replyRoundError ||
+            reviewActionError ||
+            approvalVerificationError,
         error_at:
           reviewContextChangedDuringRun || successful ? undefined : generatedAt,
+        // A reply round only ever raises a verdict; `replied` leaves the
+        // standing one alone.
         agent_review_status: successful
           ? headMovedDuringRun || reviewContextChangedDuringRun
             ? undefined
-            : agentReviewStatus
+            : agentReviewStatus ||
+              (replyRound ? latestBeforeSave.agent_review_status : undefined)
           : latestBeforeSave.agent_review_status,
         reviewer_comment_receipts: appendReviewerCommentReceipts(
           latestBeforeSave.reviewer_comment_receipts,
@@ -1729,7 +1925,8 @@ export async function spawnReviewSummary(
           : undefined,
         followups: reviewContextChangedDuringRun
           ? []
-          : followupReview ||
+          : replyRound ||
+              followupReview ||
               finalOutput.error ||
               reviewActionError ||
               approvalVerificationError
