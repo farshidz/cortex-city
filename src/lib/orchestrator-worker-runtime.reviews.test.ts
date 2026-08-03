@@ -696,6 +696,57 @@ test("a recovered diff identity does not strand a head-only coverage watermark",
   );
 });
 
+test("an identity is reused at an unchanged head and recomputed after a move", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  const lookups: string[] = [];
+  const settled = makeTaskReviewRow({
+    head_sha: "fixedSha",
+    summary_head_sha: "fixedSha",
+    summary_diff_hash: "diff-1",
+    last_round_diff_hash: "diff-1",
+    last_round_head_sha: "fixedSha",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "fixedSha",
+  });
+
+  // At an unchanged head the stored identity is reused, so a converged PR costs
+  // no GitHub calls. This is also why a base move under an unchanged head is not
+  // detected — nothing recomputes the identity to notice it. Wherever a caller
+  // does supply a fresh identity, `reviewCoversHeadSha` refuses coverage on a
+  // mismatch; see its own tests.
+  const unchanged = makeHarness({
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: { [prUrl]: settled },
+    prDiffHashes: { [prUrl]: "diff-2" },
+  });
+  unchanged.deps.getPRDiffHash = async (url: string) => {
+    lookups.push(url);
+    return "diff-2";
+  };
+  await pollOnce(new Map(), unchanged.deps, unchanged.activeReviewPids);
+  assert.equal(lookups.length, 0);
+  assert.deepEqual(unchanged.spawnRounds, []);
+  assert.equal(unchanged.reviews[prUrl].effective_diff_hash, "diff-1");
+
+  // A head move is what triggers a recompute, and a changed identity there is a
+  // review round.
+  const moved = makeHarness({
+    tasks: [task],
+    prHeadShas: { [prUrl]: "movedSha" },
+    reviews: { [prUrl]: settled },
+  });
+  moved.deps.getPRDiffHash = async (url: string) => {
+    lookups.push(url);
+    return "diff-2";
+  };
+  await pollOnce(new Map(), moved.deps, moved.activeReviewPids);
+  assert.deepEqual(lookups, [prUrl]);
+  assert.equal(moved.spawnRounds.length, 1);
+  assert.equal(moved.spawnRounds[0].diff_hash, "diff-2");
+});
+
 test("a tier-1 verdict with no diff identity still wakes the builder", async () => {
   const task = makeTask();
   const prUrl = task.pr_url!;

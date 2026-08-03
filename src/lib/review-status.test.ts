@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   deriveReviewState,
+  reviewCoversHeadSha,
   deriveReviewStatus,
   getReviewStateSortGroup,
   withReviewState,
@@ -350,6 +351,65 @@ test("a rebase that preserved the effective diff is not stale", () => {
       effective_diff_head_sha: undefined,
     }),
     "new_commits"
+  );
+});
+
+test("a base move at an unchanged head is a changed diff", () => {
+  const covered = {
+    ...stateBase,
+    source: "task" as const,
+    head_sha: "head-1",
+    summary_head_sha: "head-1",
+    summary_diff_hash: "diff-1",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "head-1",
+    last_round_diff_hash: "diff-1",
+    last_round_head_sha: "head-1",
+  };
+
+  // Same head, same identity: covered.
+  assert.equal(reviewCoversHeadSha(covered, "head-1", "diff-1"), true);
+  // Same head, an identity the round never covered: the base moved under it, so
+  // the code under review changed even though no commit was pushed. A known
+  // inequality must not be masked by the head watermark.
+  assert.equal(reviewCoversHeadSha(covered, "head-1", "diff-2"), false);
+  assert.equal(
+    reviewCoversHeadSha({ ...covered, summary_diff_hash: undefined }, "head-1", "diff-2"),
+    false
+  );
+
+  // The head-only shape a verification round leaves when the diff could not be
+  // identified converges once an identity appears...
+  const headOnly = {
+    ...stateBase,
+    source: "task" as const,
+    head_sha: "head-1",
+    summary_head_sha: "head-0",
+    summary_diff_hash: undefined,
+    last_round_diff_hash: undefined,
+    last_round_head_sha: "head-1",
+    effective_diff_hash: undefined,
+    effective_diff_head_sha: undefined,
+  };
+  assert.equal(reviewCoversHeadSha(headOnly, "head-1", "diff-2"), true);
+  assert.equal(reviewCoversHeadSha(headOnly, "head-1"), true);
+
+  // ...and that convergence does not permanently mask later base moves: once
+  // `diff-2` is recorded for this head, `diff-3` at the same head is a change.
+  const recovered = {
+    ...headOnly,
+    effective_diff_hash: "diff-2",
+    effective_diff_head_sha: "head-1",
+  };
+  assert.equal(reviewCoversHeadSha(recovered, "head-1", "diff-2"), true);
+  assert.equal(reviewCoversHeadSha(recovered, "head-1", "diff-3"), false);
+  // The drift signal is a freshly computed identity disagreeing with the stored
+  // one. Deriving state from the row alone cannot see it, because a head-only row
+  // records no identity for the round to disagree with — the same blind spot as a
+  // base move under an unchanged head, which nothing recomputes for.
+  assert.equal(
+    deriveReviewState({ ...recovered, effective_diff_hash: "diff-3" }),
+    "needs_review"
   );
 });
 

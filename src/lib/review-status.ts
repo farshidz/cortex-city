@@ -36,29 +36,31 @@ export function reviewCoversHeadSha(
   diffHash?: string
 ): boolean {
   if (!headSha) return false;
-  // A completed round at exactly this head is head-exact evidence, and it is what
-  // a verification round leaves behind when the diff could not be identified. It
-  // is checked before any identity so the two consumers of this predicate cannot
-  // diverge once an identity later becomes available for a head no hash was ever
-  // recorded for.
-  if (review.last_round_head_sha === headSha) return true;
-  const identity =
-    diffHash ||
-    (review.effective_diff_head_sha === headSha
+  const storedIdentity =
+    review.effective_diff_head_sha === headSha
       ? review.effective_diff_hash
-      : undefined);
+      : undefined;
+  // An identity that moved while the head stood still is a base move: the code
+  // under review changed without a commit being pushed. A known inequality is
+  // authoritative and comes first, so no weaker evidence below can mask it.
+  if (diffHash && storedIdentity && diffHash !== storedIdentity) return false;
+  const identity = diffHash || storedIdentity;
   const recorded = review.summary_diff_hash || review.last_round_diff_hash;
   if (identity && recorded) {
-    // With identities on both sides, they decide: the same head can carry a
-    // different effective diff once the base moves under it.
+    // Identities on both sides: they decide.
     return (
       review.summary_diff_hash === identity ||
       review.last_round_diff_hash === identity
     );
   }
   // Nothing to compare — a row from before diff identities, or a PR whose diff
-  // GitHub cannot identify. The head is all there is.
-  return (review.summary_head_sha || review.head_sha) === headSha;
+  // GitHub could not identify when the round ran. The head is all there is, and a
+  // completed round at exactly this head counts for as long as the identity at
+  // that head has not been observed to move.
+  return (
+    review.last_round_head_sha === headSha ||
+    (review.summary_head_sha || review.head_sha) === headSha
+  );
 }
 
 export function summaryCoversHead(review: ReviewStatusInput): boolean {
