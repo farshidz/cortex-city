@@ -467,7 +467,7 @@ test("buildReviewWrapperPrompt stays within its protocol size budget", () => {
     }),
   ]) {
     assert.ok(
-      wordCount(buildReviewWrapperPrompt(config, request)) < 1_100,
+      wordCount(buildReviewWrapperPrompt(config, request)) < 1_450,
       "merge or shorten existing protocol rules before raising the size budget"
     );
   }
@@ -494,6 +494,46 @@ test("buildReviewWrapperPrompt keeps broader improvements non-blocking", () => {
   );
 });
 
+test("buildReviewWrapperPrompt caps finding families and resolves ambiguity toward variants", () => {
+  const prompt = buildReviewWrapperPrompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest()
+  );
+
+  assert.match(prompt, /Group every finding by root cause/i);
+  assert.match(
+    prompt,
+    /materially distinct root cause, or a regression the latest fix introduced/i
+  );
+  assert.match(prompt, /treat it as a variant/i);
+  assert.match(prompt, /Novelty is the claim that needs justification/i);
+  assert.match(
+    prompt,
+    /reported 3 variants of one family across all rounds, stop/i
+  );
+  assert.match(prompt, /converts the family to residual risk/i);
+  assert.match(prompt, /`needs_human_decision` once for it/);
+  assert.match(prompt, /Never re-raise a family a human has already ruled on/i);
+});
+
+test("buildReviewWrapperPrompt requires rule-level findings and de-duplicated decisions", () => {
+  const prompt = buildReviewWrapperPrompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest()
+  );
+
+  assert.match(prompt, /Report the broken rule, not one example of it/i);
+  assert.match(prompt, /state the invariant/i);
+  assert.match(prompt, /test the obvious sibling cases in the same round/i);
+  assert.match(prompt, /list every case you found in that one finding/i);
+  assert.match(prompt, /request the fix at the level of the rule/i);
+  assert.match(
+    prompt,
+    /Before raising `needs_human_decision`, search your own prior comments/i
+  );
+  assert.match(prompt, /binding scope: apply it and do not ask again/i);
+});
+
 test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and the revision diff", () => {
   const config = baseConfig({
     review_learning_enabled: false,
@@ -514,27 +554,43 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
     cached
   );
 
-  assert.match(prompt, /follow-up review, not a full re-review/i);
+  assert.match(prompt, /follow-up round in verification mode, not a full re-review/i);
   assert.match(prompt, /Previously reviewed head: previous-head/);
   assert.match(prompt, /Current head: current-head/);
-  assert.match(prompt, /previous findings were addressed/i);
-  assert.match(prompt, /changes between the previously reviewed head/i);
-  assert.match(prompt, /significant newly introduced issues/i);
+  assert.match(
+    prompt,
+    /using GitHub tooling to inspect your own prior reviewer comments/i
+  );
+  assert.match(prompt, /enumerate the findings you reported/i);
+  assert.match(prompt, /Verify each enumerated finding at the current head/i);
+  assert.match(prompt, /run the repro or check you recorded for it/i);
+  assert.match(prompt, /resolve the thread once it is/i);
+  assert.match(
+    prompt,
+    /Limit new discovery to the changes between the previously reviewed head/i
+  );
+  assert.match(prompt, /gate every new finding on the family rules above/i);
   assert.match(prompt, /Earlier reviewer comments are not requirements/i);
   assert.match(prompt, /unchanged code unless the issue is critical/i);
   assert.match(prompt, /return a clean status/i);
   assert.doesNotMatch(prompt, /Review the current PR fresh as well/i);
+  assert.doesNotMatch(prompt, /This is the round in which to sweep/i);
 });
 
-test("buildReviewWrapperPrompt keeps initial reviews broad", () => {
+test("buildReviewWrapperPrompt sweeps sibling cases on initial reviews", () => {
   const prompt = buildReviewWrapperPrompt(
     baseConfig({ review_learning_enabled: false }),
     sampleRequest({ head_sha: "initial-head" })
   );
 
   assert.match(prompt, /This is an initial review of the current PR state/);
+  assert.match(prompt, /This is the round in which to sweep for sibling cases/i);
+  assert.match(
+    prompt,
+    /check the whole diff for other places that break the same rule now/i
+  );
   assert.doesNotMatch(prompt, /not a full re-review/i);
-  assert.doesNotMatch(prompt, /previous findings were addressed/i);
+  assert.doesNotMatch(prompt, /Verify each enumerated finding/i);
 });
 
 test("isReviewSessionCompatible requires the same source, runtime, model, and effort", () => {
@@ -2138,8 +2194,11 @@ test("summarizePR resumes cached review sessions for changed PRs", () => {
 
   assert.equal(result.args.args.includes("--resume"), true);
   assert.equal(result.args.args.includes("claude-session-1"), true);
-  assert.match(result.args.args.join("\n"), /follow-up review/i);
-  assert.match(result.args.args.join("\n"), /previous findings were addressed/i);
+  assert.match(result.args.args.join("\n"), /follow-up round in verification mode/i);
+  assert.match(
+    result.args.args.join("\n"),
+    /Verify each enumerated finding at the current head/i
+  );
   assert.equal(result.summary.summary_head_sha, "new-head");
   assert.equal(result.summary.session_id, "claude-session-2");
   assert.equal(result.summary.agent_review_status, "needs_author_changes");

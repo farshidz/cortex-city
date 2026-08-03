@@ -585,6 +585,41 @@ export function buildReviewWrapperPrompt(
       "scope gate on each follow-up and explicitly withdraw any that asked for",
       "out-of-scope work.",
     ].join(" "),
+    // Convergence rules. These are prompt-only on purpose: the loop they guard
+    // against (a finding family redefined or re-raised until the PR never
+    // converges) is cheapest to test as instructions before adding a durable
+    // findings ledger.
+    [
+      "- Group every finding by root cause. A family is one root cause; two",
+      "symptoms of the same root cause are variants of one family, not two",
+      "findings. A new blocking finding requires a materially distinct root cause,",
+      "or a regression the latest fix introduced.",
+    ].join(" "),
+    [
+      "- When you are unsure whether a finding is a new family or a variant of one",
+      "you already reported, treat it as a variant. Novelty is the claim that needs",
+      "justification: a wrongly merged variant still surfaces in your residual-risk",
+      "summary, while a wrongly new family restarts the review loop.",
+    ].join(" "),
+    [
+      "- Once you have reported 3 variants of one family across all rounds, stop",
+      "reporting further variants of it. Post one comment that converts the family",
+      "to residual risk, state the risk that remains, and set",
+      "`needs_human_decision` once for it. Never re-raise a family a human has",
+      "already ruled on.",
+    ].join(" "),
+    [
+      "- Report the broken rule, not one example of it. When a finding is an",
+      "instance of a violated invariant, state the invariant, test the obvious",
+      "sibling cases in the same round, list every case you found in that one",
+      "finding, and request the fix at the level of the rule plus a regression test",
+      "covering the listed cases.",
+    ].join(" "),
+    [
+      "- Before raising `needs_human_decision`, search your own prior comments on",
+      "this PR for the same question. If a human already answered it, that answer",
+      "is binding scope: apply it and do not ask again.",
+    ].join(" "),
     [
       "- If a broader improvement is valuable but not required for this PR, you may",
       "leave one explicitly non-blocking top-level GitHub comment that recommends a separate task",
@@ -653,13 +688,21 @@ export function buildReviewWrapperPrompt(
   if (followup) {
     sections.push(
       "",
-      "This is a follow-up review, not a full re-review.",
+      "This is a follow-up round in verification mode, not a full re-review.",
       `Previously reviewed head: ${reviewedHeadSha}`,
       `Current head: ${target.head_sha}`,
       [
-        "Verify whether your previous findings were addressed. Then review the",
-        "changes between the previously reviewed head and the current head for",
-        "significant newly introduced issues.",
+        "- Start by using GitHub tooling to inspect your own prior reviewer comments",
+        "and review threads on this PR, and enumerate the findings you reported.",
+      ].join(" "),
+      [
+        "- Verify each enumerated finding at the current head: run the repro or check",
+        "you recorded for it, reply on its thread stating whether it is now fixed,",
+        "and resolve the thread once it is.",
+      ].join(" "),
+      [
+        "- Limit new discovery to the changes between the previously reviewed head",
+        "and the current head, and gate every new finding on the family rules above.",
       ].join(" "),
       [
         "Do not raise new findings about unchanged code unless the issue is critical.",
@@ -671,7 +714,12 @@ export function buildReviewWrapperPrompt(
     sections.push(
       "",
       "This is an initial review of the current PR state.",
-      `Current head SHA: ${target.head_sha}`
+      `Current head SHA: ${target.head_sha}`,
+      [
+        "This is the round in which to sweep for sibling cases. For every rule you",
+        "find broken, check the whole diff for other places that break the same rule",
+        "now, and report them as one family-level finding.",
+      ].join(" ")
     );
   }
 
