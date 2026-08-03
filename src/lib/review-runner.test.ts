@@ -828,8 +828,15 @@ test("buildReviewTier1Prompt carries the scope gate and both comment surfaces", 
   // And the scope gate, or it would enforce a request the full reviewer would
   // have withdrawn.
   assert.match(prompt, /Your earlier comments are not requirements/i);
-  assert.match(prompt, /withdraw it on its thread instead of reporting it unfixed/i);
   assert.match(prompt, /cannot settle whether a finding is in scope, use `escalate`/i);
+  // Withdrawal has to route through the same surface rule, or the two
+  // instructions contradict each other for an out-of-scope finding that was
+  // posted as a PR conversation comment and has no thread to withdraw on.
+  assert.match(
+    prompt,
+    /withdraw it instead of reporting it unfixed, on the same surface rule as above: a reply on its inline thread, or a new top-level comment when the finding was a PR conversation comment/i
+  );
+  assert.doesNotMatch(prompt, /withdraw it on its thread/i);
 });
 
 test("buildReviewReplyPrompt answers conversation without re-reviewing", () => {
@@ -1285,7 +1292,8 @@ const TIER1_CONFIG = {
 function runTier1Round(
   prefix: string,
   result: string,
-  extraAssertions: string = ""
+  extraAssertions: string = "",
+  claudeExtra: Record<string, unknown> = {}
 ) {
   const workspace = setupRunnerWorkspace(prefix, TIER1_CONFIG);
   const scenarioFile = path.join(workspace, "scenario.json");
@@ -1295,8 +1303,9 @@ function runTier1Round(
       stdout: JSON.stringify({
         session_id: "claude-tier1-session",
         result,
-        is_error: false,
+        is_error: Boolean(claudeExtra.exitCode),
       }),
+      ...claudeExtra,
     },
   });
   const request = sampleRequest({
@@ -1694,6 +1703,25 @@ test("a cheap reply round escalates instead of raising the decision itself", () 
   assert.equal(crashed.persisted.pending_tier2_reason, "escalate");
   assert.equal(crashed.persisted.error, undefined);
 
+  // And a run that failed while its partial output still carried a parseable
+  // `replied` line. The status line is not evidence the round finished, so it
+  // escalates and leaves the conversation owed.
+  const failedButParseable = runCheapReplyRound(
+    "review-runner-cheap-reply-failed-parseable-",
+    {
+      session_id: "s",
+      result: "Answered.\n\n## Agent Status\nAgent status: `replied`",
+      is_error: true,
+    },
+    { exitCode: 1, stderr: "claude timed out" }
+  );
+  assert.equal(failedButParseable.persisted.pending_tier2_reason, "escalate");
+  assert.equal(failedButParseable.persisted.error, undefined);
+  assert.equal(
+    failedButParseable.persisted.last_conversation_seen_at,
+    "2026-05-01T00:00:00.000Z"
+  );
+
   // `replied` leaves the standing verdict alone and queues nothing.
   const replied = runCheapReplyRound("review-runner-cheap-reply-done-", {
     session_id: "s",
@@ -1709,6 +1737,21 @@ test("a cheap reply round escalates instead of raising the decision itself", () 
     new Date(replied.persisted.last_conversation_seen_at).getTime() >
       Date.parse("2026-05-01T00:00:00.000Z")
   );
+});
+
+test("a failed tier-1 run escalates even when its output parses", () => {
+  const result = runTier1Round(
+    "review-runner-tier1-failed-parseable-",
+    "Checked both findings.\n\n## Agent Status\nAgent status: `fixes_verified`",
+    "",
+    { exitCode: 1, stderr: "claude timed out" }
+  );
+
+  // A parseable status line from a run that did not finish is not a verification
+  // result, so it escalates rather than being taken at its word.
+  assert.equal(result.persisted.pending_tier2_reason, "escalate");
+  assert.equal(result.persisted.agent_review_status, undefined);
+  assert.equal(result.persisted.error, undefined);
 });
 
 test("a tier-1 round covers the head when the diff cannot be identified", () => {

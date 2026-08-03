@@ -657,6 +657,45 @@ test("a tier-1 result with no diff identity is actionable and not repeated", asy
   assert.equal(deriveReviewState(h.reviews[prUrl]), "needs_author_changes");
 });
 
+test("a recovered diff identity does not strand a head-only coverage watermark", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  // The row a tier-1 round leaves when the diff could not be identified: only a
+  // head watermark. On the next poll the lookup succeeds, so an identity exists
+  // that neither the summary nor the round ever recorded a hash for.
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } } },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: {
+      [prUrl]: makeTaskReviewRow({
+        head_sha: "fixedSha",
+        summary_diff_hash: undefined,
+        last_round_diff_hash: undefined,
+        last_round_head_sha: "fixedSha",
+        effective_diff_hash: undefined,
+        effective_diff_head_sha: undefined,
+        agent_review_status: "needs_author_changes",
+      }),
+    },
+    prDiffHashes: { [prUrl]: "diff-2" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[prUrl];
+  assert.equal(stored.effective_diff_hash, "diff-2");
+  // Scheduling and the derived state have to agree here. If scheduling says
+  // covered while the state says stale, no round will ever reconcile them,
+  // because scheduling is what runs the rounds.
+  assert.deepEqual(h.spawnRounds, []);
+  assert.equal(summaryCoversHead(stored), true);
+  assert.equal(
+    deriveReviewState({ ...stored, current_run_pid: undefined }),
+    "needs_author_changes"
+  );
+});
+
 test("a tier-1 verdict with no diff identity still wakes the builder", async () => {
   const task = makeTask();
   const prUrl = task.pr_url!;

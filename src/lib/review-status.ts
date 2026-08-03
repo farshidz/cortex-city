@@ -30,23 +30,35 @@ export interface ReviewStatusInput {
 // not rewrite the summary, but it did check the code.
 export function reviewCoversHeadSha(
   review: ReviewStatusInput,
-  headSha: string
+  headSha: string,
+  // The identity the caller just computed, when it has one the row may not carry
+  // yet. Scheduling passes it so it cannot disagree with the derived state.
+  diffHash?: string
 ): boolean {
   if (!headSha) return false;
-  if ((review.summary_head_sha || review.head_sha) === headSha) return true;
-  if (
-    !review.effective_diff_hash ||
-    review.effective_diff_head_sha !== headSha
-  ) {
-    // No usable diff identity: fall back to the head the last completed round
-    // covered, so a round at a PR whose diff GitHub could not identify still
-    // counts.
-    return review.last_round_head_sha === headSha;
+  // A completed round at exactly this head is head-exact evidence, and it is what
+  // a verification round leaves behind when the diff could not be identified. It
+  // is checked before any identity so the two consumers of this predicate cannot
+  // diverge once an identity later becomes available for a head no hash was ever
+  // recorded for.
+  if (review.last_round_head_sha === headSha) return true;
+  const identity =
+    diffHash ||
+    (review.effective_diff_head_sha === headSha
+      ? review.effective_diff_hash
+      : undefined);
+  const recorded = review.summary_diff_hash || review.last_round_diff_hash;
+  if (identity && recorded) {
+    // With identities on both sides, they decide: the same head can carry a
+    // different effective diff once the base moves under it.
+    return (
+      review.summary_diff_hash === identity ||
+      review.last_round_diff_hash === identity
+    );
   }
-  return (
-    review.summary_diff_hash === review.effective_diff_hash ||
-    review.last_round_diff_hash === review.effective_diff_hash
-  );
+  // Nothing to compare — a row from before diff identities, or a PR whose diff
+  // GitHub cannot identify. The head is all there is.
+  return (review.summary_head_sha || review.head_sha) === headSha;
 }
 
 export function summaryCoversHead(review: ReviewStatusInput): boolean {

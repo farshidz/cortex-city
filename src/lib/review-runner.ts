@@ -999,8 +999,10 @@ export function buildReviewTier1Prompt(
       "- Your earlier comments are not requirements. If a finding asked for work",
       "beyond this PR's scope — a new mechanism, durable state, a cross-component",
       "guarantee, or a generalized abstraction where a small local correction was",
-      "enough — withdraw it on its thread instead of reporting it unfixed. If you",
-      "cannot settle whether a finding is in scope, use `escalate`.",
+      "enough — withdraw it instead of reporting it unfixed, on the same surface",
+      "rule as above: a reply on its inline thread, or a new top-level comment when",
+      "the finding was a PR conversation comment. If you cannot settle whether a",
+      "finding is in scope, use `escalate`.",
     ].join(" "),
     [
       `- Start every GitHub comment you post with \`${REVIEWER_GITHUB_COMMENT_PREFIX}\``,
@@ -1723,22 +1725,33 @@ export async function spawnReviewSummary(
             ? REVIEW_REPLY_BLOCKED_ERROR
             : undefined
         : undefined;
+    // A cheap round that did not finish cleanly escalates whatever its text
+    // says. Partial output can carry a parseable status line the run never stood
+    // behind — a timeout or a nonzero exit after the model printed
+    // `Agent status: replied` is not a completed round.
+    const cheapTierRunFailed =
+      cheapTierRound &&
+      !cheapTierInfrastructureFailure &&
+      Boolean(finalOutput.error);
     // Every tier-1 ambiguity resolves to `escalate`, which schedules a tier-2
     // round. A tier-1 run that timed out or aborted escalates too rather than
     // taking the error-retry path, so the expensive tier gets the PR either way.
     const tier1Status: ReviewTier1Status | undefined = tier1VerificationRound
       ? cheapTierInfrastructureFailure
         ? undefined
-        : parseReviewTier1Status(finalOutput.result_text) || "escalate"
+        : cheapTierRunFailed
+          ? "escalate"
+          : parseReviewTier1Status(finalOutput.result_text) || "escalate"
       : undefined;
     // A cheap reply round never publishes a terminal verdict. Anything material
-    // it found, and any ambiguity in what it reported, becomes an escalation for
-    // the tier-2 round to resolve and to own the human-decision event.
+    // it found, any ambiguity in what it reported, and any failure to finish
+    // becomes an escalation for the tier-2 round to resolve and to own the
+    // human-decision event.
     const cheapReplyEscalates =
       replyRound &&
       cheapTierRound &&
       !cheapTierInfrastructureFailure &&
-      replyStatus !== "replied";
+      (cheapTierRunFailed || replyStatus !== "replied");
     const runtimeSuccessful = cheapTierRound
       ? !cheapTierInfrastructureFailure
       : !finalOutput.error && !replyRoundError;
@@ -2134,10 +2147,12 @@ export async function spawnReviewSummary(
         pending_tier2_reason: reviewContextChangedDuringRun
           ? undefined
           : pendingTier2Reason,
-        // Every completed round read the conversation that existed when it
-        // started, so it clears the reply-round trigger up to that instant.
+        // A round that completed read the conversation that existed when it
+        // started, so it clears the reply-round trigger up to that instant. A
+        // cheap round that failed to finish did not, even though it escalates
+        // rather than recording an error, so the conversation stays owed.
         last_conversation_seen_at:
-          reviewContextChangedDuringRun || !successful
+          reviewContextChangedDuringRun || !successful || cheapTierRunFailed
             ? latestBeforeSave.last_conversation_seen_at
             : new Date(
                 new Date(runStartedAt).getTime() -
