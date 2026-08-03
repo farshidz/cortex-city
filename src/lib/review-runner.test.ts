@@ -591,6 +591,7 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
     ...sampleRequest({ head_sha: "previous-head" }),
     summary: "## Summary\nPreviously reviewed.",
     summary_head_sha: "previous-head",
+    session_id: "stored-session",
     generated_at: "2026-05-01T00:10:00.000Z",
     review_status: "needs_review",
     review_state: "needs_review",
@@ -605,6 +606,11 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
   assert.match(prompt, /follow-up round in verification mode, not a full re-review/i);
   assert.match(prompt, /Previously reviewed head: previous-head/);
   assert.match(prompt, /Current head: current-head/);
+  assert.match(prompt, /This session is fresh and has no memory of the earlier rounds/i);
+  assert.match(
+    prompt,
+    /<previous_review>\n## Summary\nPreviously reviewed\.\n<\/previous_review>/
+  );
   assert.match(
     prompt,
     /using GitHub tooling to inspect your own prior reviewer comments/i
@@ -2183,7 +2189,7 @@ test("spawnReviewSummary keeps a mid-flight change request over the run's verdic
   assert.equal(result.persisted.review_state, "changes_requested");
 });
 
-test("summarizePR resumes cached review sessions for changed PRs", () => {
+test("summarizePR starts a fresh session for a scheduled follow-up and seeds the stored summary", () => {
   const workspace = setupRunnerWorkspace("review-runner-stale-resume-");
   const scenarioFile = path.join(workspace, "scenario.json");
   const argsFile = path.join(workspace, "agent-args.json");
@@ -2259,12 +2265,17 @@ test("summarizePR resumes cached review sessions for changed PRs", () => {
     }
   );
 
-  assert.equal(result.args.args.includes("--resume"), true);
-  assert.equal(result.args.args.includes("claude-session-1"), true);
+  assert.equal(result.args.args.includes("--resume"), false);
+  assert.equal(result.args.args.includes("claude-session-1"), false);
   assert.match(result.args.args.join("\n"), /follow-up round in verification mode/i);
   assert.match(
     result.args.args.join("\n"),
     /Verify each enumerated finding at the current head/i
+  );
+  assert.match(result.args.args.join("\n"), /This session is fresh/i);
+  assert.match(
+    result.args.args.join("\n"),
+    /<previous_review>\nold summary\n<\/previous_review>/
   );
   assert.equal(result.summary.summary_head_sha, "new-head");
   assert.equal(result.summary.session_id, "claude-session-2");

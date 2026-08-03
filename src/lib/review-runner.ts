@@ -272,6 +272,10 @@ function savedSessionProfile(
   };
 }
 
+// Answers one question: may a Q&A follow-up resume the stored CLI session?
+// Scheduled review rounds never resume (they always start a fresh session and
+// reconstruct context from the stored summary and GitHub), so a stored
+// `session_id` is only ever a pointer for interactive follow-up questions.
 export function isReviewSessionCompatible(
   request: ReviewRequest,
   cached: ReviewSummary | undefined,
@@ -698,6 +702,16 @@ export function buildReviewWrapperPrompt(
       "This is a follow-up round in verification mode, not a full re-review.",
       `Previously reviewed head: ${reviewedHeadSha}`,
       `Current head: ${target.head_sha}`,
+      // Scheduled rounds always run in a fresh CLI session, so the stored
+      // summary plus the PR's own GitHub history are the only carried context.
+      [
+        "This session is fresh and has no memory of the earlier rounds. Reconstruct",
+        "context from the review you produced at the previously reviewed head, from",
+        "GitHub comments and review threads, and from the current PR state.",
+      ].join(" "),
+      "<previous_review>",
+      cached?.summary?.trim() || "(not recorded)",
+      "</previous_review>",
       [
         "- Start by using GitHub tooling to inspect your own prior reviewer comments",
         "and review threads on this PR, and enumerate the findings you reported.",
@@ -1172,19 +1186,19 @@ export async function spawnReviewSummary(
   const target = effectiveReviewRequest(request, cachedBefore);
   const cachedSummaryHeadSha = summaryHeadShaFor(cachedBefore);
   const followupReview = isFollowupReview(target, cachedBefore);
-  const sessionCompatible = isReviewSessionCompatible(
+  // Scheduled review rounds never resume a CLI session: a resumed round starts
+  // cold often enough that the re-warm tax exceeds a fresh session's re-read
+  // cost, and compaction makes the carried memory lossy anyway. The stored
+  // session id survives only so an interactive Q&A follow-up can resume it,
+  // and only while the resolved profile still matches.
+  const compatibleCachedSessionId = isReviewSessionCompatible(
     target,
     cachedBefore,
     opts
-  );
-  const compatibleCachedSessionId = sessionCompatible
+  )
     ? cachedBefore?.session_id
     : undefined;
   const prompt = buildReviewWrapperPrompt(config, target, cachedBefore);
-  const resumeSessionId =
-    followupReview && compatibleCachedSessionId
-      ? compatibleCachedSessionId
-      : undefined;
   const baseEntry = {
     ...target,
     summary: cachedBefore?.summary ?? "",
@@ -1220,7 +1234,7 @@ export async function spawnReviewSummary(
       opts.runtime,
       prompt,
       opts,
-      resumeSessionId,
+      undefined,
       runTimeoutMs,
       {},
       target.pr_url
@@ -1330,54 +1344,7 @@ export async function spawnReviewSummary(
   const { pid, child, done } = spawned;
 
   const completion = done.then(async (output) => {
-    let finalOutput = output;
-    let resumedSessionFailed = false;
-    if (
-      output.error &&
-      resumeSessionId &&
-      output.termination_reason !== "low_disk"
-    ) {
-      resumedSessionFailed = true;
-      const fallbackPrompt = [
-        "The previous review session could not be resumed.",
-        [
-          "Start a fresh session and reconstruct context from GitHub comments,",
-          "review threads, and the current PR state.",
-        ].join(" "),
-        "",
-        prompt,
-      ].join("\n");
-      let fallback: SpawnResult | undefined;
-      try {
-        fallback = spawnRuntime(
-          opts.runtime,
-          fallbackPrompt,
-          opts,
-          undefined,
-          runTimeoutMs,
-          {},
-          target.pr_url
-        );
-      } catch (error) {
-        if (!(error instanceof LowDiskSpaceError)) throw error;
-        finalOutput = {
-          result_text: "",
-          exit_code: null,
-          stderr: "",
-          error: error.message,
-          termination_reason: "low_disk",
-        };
-      }
-      if (fallback) {
-        assertReviewRunLockHealthy(runLock);
-        await patchReviewSummary(target.pr_url, {
-          current_run_pid: fallback.pid,
-          current_run_id: runLock.data.token,
-        });
-        finalOutput = await fallback.done;
-      }
-    }
-
+    const finalOutput = output;
     const generatedAt = new Date().toISOString();
     const runtimeSuccessful = !finalOutput.error;
     const agentReviewStatus = runtimeSuccessful
@@ -1693,15 +1660,13 @@ export async function spawnReviewSummary(
         effort: opts.effort,
         model: opts.model,
         session_profile: snapshotSessionProfile(opts),
+        // The fresh run's own session id is the only one an interactive Q&A
+        // follow-up should resume. A run that produced none leaves the prior
+        // profile-compatible pointer in place.
         session_id:
           (reviewContextChangedDuringRun
             ? undefined
-            : finalOutput.session_id ||
-              (successful
-                ? resumeSessionId
-                : resumedSessionFailed
-                  ? undefined
-                  : compatibleCachedSessionId)) || undefined,
+            : finalOutput.session_id || compatibleCachedSessionId) || undefined,
         duration_ms: finalOutput.duration_ms,
         input_tokens: finalOutput.usage?.input_tokens,
         output_tokens: finalOutput.usage?.output_tokens,
