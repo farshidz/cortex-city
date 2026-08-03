@@ -2039,7 +2039,11 @@ test("spawnReviewSummary publishes nothing when the stack slice scope changes mi
           "## Summary\nReviewed under the old slice scope.\n\n## Agent Status\nAgent status: needs_human_decision",
         is_error: false,
       }),
-      sleepMs: 100,
+      // The scope change is written while this run is in flight, so the run has
+      // to outlast a cross-process store write. 100ms lost that race on a loaded
+      // CI runner and failed the review with the stale result instead of
+      // discarding it.
+      sleepMs: 2_000,
     },
   });
   writeJson(ghStateFile, {
