@@ -955,6 +955,48 @@ test("settings page presents one unified reviewer configuration", () => {
   });
 });
 
+test("settings page exposes both reviewer tiers and the debounce window", () => {
+  const output = runRenderScript(`
+    const tieredConfig = {
+      ...config,
+      review_debounce_seconds: 120,
+      reviewer_tiers: {
+        tier1: { runtime: "codex", model: "gpt-5.4", effort: "low" },
+        tier2: { model: "gpt-5.6-sol" },
+      },
+    };
+    const html = await renderPage(
+      "./src/app/settings/page.tsx",
+      {},
+      [false, tieredConfig]
+    );
+    const handlerCount = await invokeHandlers();
+    console.log(JSON.stringify({
+      handlerCount,
+      hasTierHeading: html.includes("Reviewer tiers"),
+      hasVerificationTier: html.includes("Verification tier (tier 1)"),
+      hasReviewTier: html.includes("Review tier (tier 2)"),
+      hasTier1Model: html.includes("gpt-5.4"),
+      hasTier2Model: html.includes("gpt-5.6-sol"),
+      hasDebounce: html.includes("Review Debounce (seconds)"),
+      hasDebounceValue: html.includes('value="120"'),
+    }));
+  `);
+
+  const rendered = JSON.parse(output[0]);
+  assert.ok(rendered.handlerCount > 0);
+  delete rendered.handlerCount;
+  assert.deepEqual(rendered, {
+    hasTierHeading: true,
+    hasVerificationTier: true,
+    hasReviewTier: true,
+    hasTier1Model: true,
+    hasTier2Model: true,
+    hasDebounce: true,
+    hasDebounceValue: true,
+  });
+});
+
 test("merged review state presentation matches expected labels and classes", () => {
   assert.deepEqual(REVIEW_STATE_LABELS, {
     blocked: "Blocked",

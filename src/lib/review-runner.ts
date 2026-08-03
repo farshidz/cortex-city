@@ -57,11 +57,14 @@ import type {
   ReviewAgentStatus,
   ReviewerCommentDelivery,
   ReviewerCommentReceipt,
+  ReviewerThreadSummary,
   ReviewFollowup,
   ReviewRequest,
   ReviewSessionProfile,
   ReviewSource,
   ReviewSummary,
+  ReviewTier,
+  ReviewTier1Status,
   TaskEffort,
 } from "./types";
 
@@ -179,6 +182,12 @@ export const REVIEW_REPLY_STATUSES = [
 
 export type ReviewReplyStatus = (typeof REVIEW_REPLY_STATUSES)[number];
 
+export const REVIEW_TIER1_STATUSES: ReviewTier1Status[] = [
+  "fixes_verified",
+  "needs_author_changes",
+  "escalate",
+];
+
 export type ReviewRoundKind = "review" | "reply";
 
 export const REVIEW_REPLY_STATUS_MISSING_ERROR =
@@ -210,6 +219,9 @@ export interface SpawnOpts {
   runtime: AgentRuntime;
   effort?: TaskEffort;
   model?: string;
+  // Recorded on the session profile so the UI can tell a cheap verification
+  // round from a full review. It does not affect the CLI invocation.
+  tier?: ReviewTier;
 }
 
 export interface RunOutput {
@@ -246,6 +258,32 @@ export function resolveReviewOpts(
   return { runtime, effort, model };
 }
 
+// Tiering is opt-in and its absence is the safe default: with no `tier1`
+// configured every round runs tier 2, exactly as before tiering existed.
+export function isReviewTieringEnabled(config: OrchestratorConfig): boolean {
+  const tier1 = config.reviewer_tiers?.tier1;
+  if (!tier1) return false;
+  return Boolean(
+    tier1.runtime || tier1.model?.trim() || tier1.effort
+  );
+}
+
+export function resolveReviewTierOpts(
+  config: OrchestratorConfig,
+  tier: ReviewTier,
+  override?: Partial<SpawnOpts>
+): SpawnOpts {
+  const configured =
+    tier === 1 ? config.reviewer_tiers?.tier1 : config.reviewer_tiers?.tier2;
+  // Tier 2 keeps falling back to the single-reviewer settings, so an unset
+  // tier-2 block changes nothing.
+  return resolveReviewOpts(config, {
+    runtime: override?.runtime ?? configured?.runtime,
+    effort: override?.effort ?? configured?.effort,
+    model: override?.model ?? configured?.model,
+  });
+}
+
 export function resolveReviewPrompt(config: OrchestratorConfig): string {
   const configured = config.review_prompt?.trim();
   return configured && configured.length > 0
@@ -274,6 +312,7 @@ function snapshotSessionProfile(opts: SpawnOpts): ReviewSessionProfile {
     runtime: opts.runtime,
     effort: opts.effort,
     model: normalizedModel(opts.model),
+    tier: opts.tier,
   };
 }
 
@@ -286,6 +325,7 @@ function savedSessionProfile(
       runtime: review.session_profile.runtime,
       effort: review.session_profile.effort,
       model: normalizedModel(review.session_profile.model),
+      tier: review.session_profile.tier,
     };
   }
   // Pre-profile records can still be compared conservatively using the
@@ -883,6 +923,108 @@ export function buildReviewReplyPrompt(
   return sections.join("\n");
 }
 
+// Tier 1 gets pointers, not a transcript: the stored summary, the SHA pair, and
+// the list of its own unresolved threads. Everything else — thread bodies, the
+// diff, the code — it pulls itself with full read access.
+export function buildReviewTier1Prompt(
+  config: OrchestratorConfig,
+  request: ReviewRequest,
+  cached?: ReviewSummary,
+  unresolvedThreads: ReviewerThreadSummary[] = []
+): string {
+  const target = effectiveReviewRequest(request, cached);
+  const source = reviewSourceOf(target);
+  const reviewedHeadSha = summaryHeadShaFor(cached);
+  const sections = [
+    [
+      "You are Cortex City's review agent running a verification round on a pull",
+      "request you already reviewed. Your job is to check whether your open",
+      "findings are fixed at the current head — not to review the PR again.",
+    ].join(" "),
+    "",
+    "Cortex City verification round protocol:",
+    REVIEW_GITHUB_TOOL_INSTRUCTION,
+    ...buildReviewSourceContext(
+      target,
+      source === "task" ? config.reviewer_agent_prompt : undefined
+    ),
+    "",
+    `Last reviewed head: ${reviewedHeadSha || "(not recorded)"}`,
+    `Current head: ${target.head_sha}`,
+    [
+      "This session is fresh and has no memory of the earlier rounds. The review",
+      "you produced last, below, and the threads listed after it are your starting",
+      "points; read whatever else you need from GitHub and the code.",
+    ].join(" "),
+    "<previous_review>",
+    cached?.summary?.trim() || "(not recorded)",
+    "</previous_review>",
+    "",
+    "## Your unresolved review threads",
+    unresolvedThreads.length > 0
+      ? unresolvedThreads
+          .map(
+            (thread) =>
+              `- ${thread.thread_id}${thread.url ? ` (${thread.url})` : ""}: ${thread.first_line}`
+          )
+          .join("\n")
+      : "(none listed — reconstruct your open findings from your GitHub comments)",
+    "",
+    [
+      "- Work the list. For each open finding, read its thread, run the repro or",
+      "check it records, and decide at the current head whether it is fixed.",
+    ].join(" "),
+    [
+      "- Reply on each thread stating what you verified and the outcome, and resolve",
+      "the thread when the finding is fixed.",
+    ].join(" "),
+    [
+      `- Start every GitHub comment you post with \`${REVIEWER_GITHUB_COMMENT_PREFIX}\``,
+      "as the first characters of the comment body. Never edit or delete an earlier",
+      "reviewer comment; post a new one instead.",
+    ].join(" "),
+    [
+      "- Do not audit unchanged code, do not open new lines of review, and do not",
+      "approve, request changes, or submit any review decision on GitHub.",
+    ].join(" "),
+    "- Include `## Agent Status` with one exact line: `Agent status: <status>`.",
+    `- The status must be one of: ${REVIEW_TIER1_STATUSES.join(", ")}.`,
+    [
+      "- Use `fixes_verified` when every open finding is resolved at this head. This",
+      "is not an approval: a full review round confirms it afterwards.",
+    ].join(" "),
+    [
+      "- Use `needs_author_changes` when a fix claim failed. Say which findings, and",
+      "what you observed instead.",
+    ].join(" "),
+    [
+      "- Use `escalate` for anything beyond this checklist: a finding you cannot",
+      "verify, a regression the fixes introduced, a question of scope or judgment,",
+      "or a change large enough to need a full review. Escalating is cheap and",
+      "correct; guessing is not.",
+    ].join(" "),
+    "",
+    `Verify this PR: ${target.pr_url}`,
+  ];
+  return sections.join("\n");
+}
+
+export function parseReviewTier1Status(
+  text: string
+): ReviewTier1Status | undefined {
+  // Strict for the same reason as the reply parser: a verification report
+  // quotes finding text and statuses, so only the status line counts.
+  const statusLine = text.match(
+    /\bagent\s+(?:status|readiness|verdict)\b\s*[:\-]\s*`?([a-zA-Z0-9 _-]+)`?/i
+  );
+  if (!statusLine) return undefined;
+  const normalized = statusLine[1]
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_")
+    .replace(/[^a-z_]/g, "");
+  return REVIEW_TIER1_STATUSES.find((status) => normalized.includes(status));
+}
+
 export function parseReviewReplyStatus(
   text: string
 ): ReviewReplyStatus | undefined {
@@ -1312,6 +1454,12 @@ export interface SpawnReviewSummaryOptions extends Partial<SpawnOpts> {
   // computed it. Persisted with the summary so a later rebase that preserves
   // the diff is not a new round.
   diff_hash?: string;
+  // Defaults to tier 2, the full reviewer. Tier 1 runs the cheap verification
+  // contract and cannot produce a terminal verdict.
+  tier?: ReviewTier;
+  // The reviewer's own unresolved review threads, listed by the orchestrator so
+  // a tier-1 round starts from pointers.
+  unresolved_threads?: ReviewerThreadSummary[];
 }
 
 export interface SpawnedReview {
@@ -1326,7 +1474,15 @@ export async function spawnReviewSummary(
   onComplete?: (summary: ReviewSummary) => Promise<void> | void
 ): Promise<SpawnedReview> {
   const config = readConfig();
-  const opts = resolveReviewOpts(config, options);
+  const tieringEnabled = isReviewTieringEnabled(config);
+  // A tier-1 request runs tier 2 when tiering is off, so the rollout flag is a
+  // single check in one place.
+  const tier: ReviewTier =
+    options.tier === 1 && tieringEnabled ? 1 : 2;
+  const opts: SpawnOpts = {
+    ...resolveReviewTierOpts(config, tier, options),
+    tier: tieringEnabled ? tier : undefined,
+  };
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);
 
   const cachedBefore = getReviewSummary(request.pr_url);
@@ -1346,9 +1502,20 @@ export async function spawnReviewSummary(
     ? cachedBefore?.session_id
     : undefined;
   const replyRound = options.round === "reply";
+  const tier1Round = !replyRound && tier === 1;
+  // A tier-1 round and a reply round both leave the stored review of the code
+  // untouched: neither reviewed it.
+  const verificationRound = replyRound || tier1Round;
   const prompt = replyRound
     ? buildReviewReplyPrompt(config, target, cachedBefore)
-    : buildReviewWrapperPrompt(config, target, cachedBefore);
+    : tier1Round
+      ? buildReviewTier1Prompt(
+          config,
+          target,
+          cachedBefore,
+          options.unresolved_threads
+        )
+      : buildReviewWrapperPrompt(config, target, cachedBefore);
   const baseEntry = {
     ...target,
     summary: cachedBefore?.summary ?? "",
@@ -1358,6 +1525,8 @@ export async function spawnReviewSummary(
     effective_diff_head_sha: cachedBefore?.effective_diff_head_sha,
     head_first_seen_at: cachedBefore?.head_first_seen_at,
     last_conversation_seen_at: cachedBefore?.last_conversation_seen_at,
+    last_round_diff_hash: cachedBefore?.last_round_diff_hash,
+    pending_tier2_reason: cachedBefore?.pending_tier2_reason,
     generated_at: cachedBefore?.generated_at ?? "",
     runtime: opts.runtime,
     effort: opts.effort,
@@ -1367,9 +1536,9 @@ export async function spawnReviewSummary(
     duration_ms: cachedBefore?.duration_ms,
     input_tokens: cachedBefore?.input_tokens,
     output_tokens: cachedBefore?.output_tokens,
-    // A reply round runs at an unchanged diff, so the standing verdict is still
-    // about the code in front of it and must survive the round.
-    agent_review_status: followupReview && !replyRound
+    // A verification round runs against a review that already exists, so the
+    // standing verdict must survive the claim and only change on its result.
+    agent_review_status: followupReview && !verificationRound
       ? undefined
       : cachedBefore?.agent_review_status,
     reviewer_comment_receipts: cachedBefore?.reviewer_comment_receipts,
@@ -1518,14 +1687,32 @@ export async function spawnReviewSummary(
             ? REVIEW_REPLY_BLOCKED_ERROR
             : undefined
         : undefined;
-    const runtimeSuccessful = !finalOutput.error && !replyRoundError;
+    // Every tier-1 ambiguity resolves to `escalate`, which schedules a tier-2
+    // round. A tier-1 run that timed out or aborted escalates too rather than
+    // taking the error-retry path, so the expensive tier gets the PR either way.
+    // Infrastructure failures (low disk) stay errors: they are not a review
+    // signal, and retrying the same tier is the right response.
+    const tier1InfrastructureFailure =
+      tier1Round && finalOutput.termination_reason === "low_disk";
+    const tier1Status: ReviewTier1Status | undefined = tier1Round
+      ? tier1InfrastructureFailure
+        ? undefined
+        : parseReviewTier1Status(finalOutput.result_text) || "escalate"
+      : undefined;
+    const runtimeSuccessful = tier1Round
+      ? !tier1InfrastructureFailure
+      : !finalOutput.error && !replyRoundError;
     const agentReviewStatus = !runtimeSuccessful
       ? undefined
-      : replyRound
-        ? replyStatus === "needs_human_decision"
-          ? "needs_human_decision"
+      : tier1Round
+        ? tier1Status === "needs_author_changes"
+          ? "needs_author_changes"
           : undefined
-        : parseReviewAgentStatus(finalOutput.result_text);
+        : replyRound
+          ? replyStatus === "needs_human_decision"
+            ? "needs_human_decision"
+            : undefined
+          : parseReviewAgentStatus(finalOutput.result_text);
     const reviewerHumanDecisionBody = parseReviewerHumanDecisionBody(
       finalOutput.result_text
     );
@@ -1813,6 +2000,17 @@ export async function spawnReviewSummary(
     }
     const successful =
       runtimeSuccessful && !reviewActionError && !approvalVerificationError;
+    // A tier-1 runtime failure is an escalation, not a recorded error: the
+    // error-retry path would re-run the cheap tier, and the whole point is to
+    // hand an unresolved cheap round to tier 2.
+    const roundError = tier1Round
+      ? (tier1InfrastructureFailure ? finalOutput.error : undefined) ||
+        reviewActionError ||
+        approvalVerificationError
+      : finalOutput.error ||
+        replyRoundError ||
+        reviewActionError ||
+        approvalVerificationError;
     const saved = await mutateReviewSummary(target.pr_url, (latestBeforeSave) => {
       if (latestBeforeSave?.current_run_id !== runLock.data.token) {
         return undefined;
@@ -1826,9 +2024,25 @@ export async function spawnReviewSummary(
         latestTarget,
         target
       );
-      // A reply round produced no review of the code, so it must leave the
-      // stored summary and the diff it covers exactly as they were.
-      const rewritesSummary = successful && !replyRound;
+      // A verification round produced no review of the code, so it must leave
+      // the stored summary and the diff it covers exactly as they were.
+      const rewritesSummary = successful && !verificationRound;
+      // A tier-1 round still advances the covered diff, so the same diff is not
+      // verified twice, and records why tier 2 has to follow.
+      const coveredDiffHash =
+        successful && !replyRound && !headMovedDuringRun
+          ? options.diff_hash || undefined
+          : latestBeforeSave.last_round_diff_hash;
+      const pendingTier2Reason =
+        tier1Round && successful
+          ? tier1Status === "fixes_verified"
+            ? ("fixes_verified" as const)
+            : tier1Status === "escalate"
+              ? ("escalate" as const)
+              : undefined
+          : replyRound || !successful
+            ? latestBeforeSave.pending_tier2_reason
+            : undefined;
       return {
         // Reconciliation may discover a new HEAD or change review context while
         // the agent is running. Keep the latest identity; a changed context is
@@ -1861,6 +2075,12 @@ export async function spawnReviewSummary(
           ? undefined
           : latestBeforeSave.effective_diff_head_sha,
         head_first_seen_at: latestBeforeSave.head_first_seen_at,
+        last_round_diff_hash: reviewContextChangedDuringRun
+          ? undefined
+          : coveredDiffHash,
+        pending_tier2_reason: reviewContextChangedDuringRun
+          ? undefined
+          : pendingTier2Reason,
         // Every completed round read the conversation that existed when it
         // started, so it clears the reply-round trigger up to that instant.
         last_conversation_seen_at:
@@ -1895,16 +2115,13 @@ export async function spawnReviewSummary(
         duration_ms: finalOutput.duration_ms,
         input_tokens: finalOutput.usage?.input_tokens,
         output_tokens: finalOutput.usage?.output_tokens,
-        error: reviewContextChangedDuringRun
-          ? undefined
-          : finalOutput.error ||
-            replyRoundError ||
-            reviewActionError ||
-            approvalVerificationError,
+        error: reviewContextChangedDuringRun ? undefined : roundError,
         error_at:
           reviewContextChangedDuringRun || successful ? undefined : generatedAt,
         // A reply round only ever raises a verdict; `replied` leaves the
-        // standing one alone.
+        // standing one alone. A tier-1 round does replace it: `fixes_verified`
+        // and `escalate` both mean the standing verdict no longer describes
+        // this diff, and the queued tier-2 pass owns the next one.
         agent_review_status: successful
           ? headMovedDuringRun || reviewContextChangedDuringRun
             ? undefined
@@ -1925,7 +2142,7 @@ export async function spawnReviewSummary(
           : undefined,
         followups: reviewContextChangedDuringRun
           ? []
-          : replyRound ||
+          : verificationRound ||
               followupReview ||
               finalOutput.error ||
               reviewActionError ||

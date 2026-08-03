@@ -21,6 +21,7 @@ import {
   isCommitAncestor,
   isStaleReviewerCommentDeliveryError,
   isPRMergedOrClosed,
+  listUnresolvedReviewerThreads,
   reviewerCommentCancellationFromStaleError,
 } from "./github";
 import {
@@ -43,9 +44,10 @@ import {
   resolveReviewDebounceMs,
 } from "./review-debounce";
 import { readReviewLearnings } from "./review-learnings-store";
-import { reviewCoversHeadSha } from "./review-status";
+import { reviewCoversHeadSha, summaryCoversHead } from "./review-status";
 import { spawnReviewRetro } from "./review-learnings-runner";
 import {
+  isReviewTieringEnabled,
   resolveReviewOpts,
   spawnReviewSummary,
   type ReviewRoundKind,
@@ -69,8 +71,10 @@ import {
   stackTerminalStatus,
 } from "./stacked-prs";
 import type {
+  ReviewerThreadSummary,
   ReviewRequest,
   ReviewSummary,
+  ReviewTier,
   Task,
   TaskRunMode,
   TaskStackedPR,
@@ -179,6 +183,9 @@ export interface WorkerRuntimeDeps {
   // comparing head SHAs.
   getPRDiffHash?: typeof getPRDiffHash;
   getLatestForeignCommentAt?: typeof getLatestForeignCommentAt;
+  // Absent leaves a tier-1 round to rediscover its open findings from its own
+  // GitHub comments.
+  listUnresolvedReviewerThreads?: typeof listUnresolvedReviewerThreads;
   getPRHeadSha?: typeof getPRHeadSha;
   getPRMergeCommitSha?: typeof getPRMergeCommitSha;
   getPRStateHash: typeof getPRStateHash;
@@ -222,6 +229,7 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   getTask,
   isCommitAncestor,
   isPRMergedOrClosed,
+  listUnresolvedReviewerThreads,
   isPidRunning: (pid) => {
     process.kill(pid, 0);
     return true;
@@ -471,12 +479,16 @@ export type ReviewRoundReason =
   | "error_retry"
   | "diff_changed"
   | "conversation"
+  | "tier1_verified"
+  | "tier1_escalated"
   | "debouncing"
   | "error_backoff"
   | "up_to_date";
 
 export interface ReviewRoundDecision {
   round?: ReviewRoundKind;
+  // Absent exactly when no round runs.
+  tier?: ReviewTier;
   reason: ReviewRoundReason;
 }
 
@@ -493,17 +505,19 @@ export interface ReviewRoundInput {
   latestConversationAt?: string;
   config: Pick<
     ReturnType<typeof readConfig>,
-    "review_debounce_seconds" | "review_runtime" | "review_effort" | "review_model" | "default_agent_runner" | "default_codex_model" | "default_codex_effort" | "default_claude_model" | "default_claude_effort"
+    "review_debounce_seconds" | "reviewer_tiers" | "review_runtime" | "review_effort" | "review_model" | "default_agent_runner" | "default_codex_model" | "default_codex_effort" | "default_claude_model" | "default_claude_effort"
   >;
   now?: number;
 }
 
-// Whether the stored summary already covers the code in front of us. An
-// unavailable diff identity falls back to the head SHA, so an unknown resolves
-// to running a review rather than skipping one.
-function summaryCoversDiff(review: ReviewSummary, diffHash?: string): boolean {
-  if (diffHash && review.summary_diff_hash) {
-    return review.summary_diff_hash === diffHash;
+// Whether a completed round already covers the code in front of us. A tier-1
+// verification round advances the covered diff without rewriting the summary, so
+// it counts here. An unavailable diff identity falls back to the head SHA, so an
+// unknown resolves to running a review rather than skipping one.
+function roundCoversDiff(review: ReviewSummary, diffHash?: string): boolean {
+  if (diffHash) {
+    const covered = review.last_round_diff_hash || review.summary_diff_hash;
+    if (covered) return covered === diffHash;
   }
   return summaryHeadShaFor(review) === review.head_sha;
 }
@@ -530,15 +544,21 @@ export function decideReviewRound(
 ): ReviewRoundDecision {
   const now = input.now ?? Date.now();
   const review = input.review;
-  if (!review) return { round: "review", reason: "initial" };
+  // Tier 2 is the only tier that discovers findings, resolves an escalation, or
+  // may declare a PR ready. Tier 1 only ever verifies a review that exists.
+  const tier1Enabled = isReviewTieringEnabled(
+    input.config as ReturnType<typeof readConfig>
+  );
+  if (!review) return { round: "review", tier: 2, reason: "initial" };
   if (review.error) {
     return shouldRetryErroredReview(review, input.config as ReturnType<typeof readConfig>, now)
-      ? { round: "review", reason: "error_retry" }
+      ? { round: "review", tier: 2, reason: "error_retry" }
       : { reason: "error_backoff" };
   }
 
   const hasSummary = Boolean(review.summary?.trim());
-  if (!hasSummary || !summaryCoversDiff(review, input.diffHash)) {
+  const tier2Pending = Boolean(review.pending_tier2_reason);
+  if (!hasSummary || !roundCoversDiff(review, input.diffHash)) {
     const debounceMs = resolveReviewDebounceMs(input.config);
     const stableSince = input.headStableSinceMs;
     if (
@@ -551,12 +571,26 @@ export function decideReviewRound(
     }
     return {
       round: "review",
+      tier: tier1Enabled && hasSummary && !tier2Pending ? 1 : 2,
       reason: hasSummary ? "diff_changed" : "initial",
     };
   }
 
+  // A tier-1 round handed this diff on. `fixes_verified` still gets the full
+  // pass: `ready_for_human_approval` may only come from tier 2.
+  if (tier2Pending) {
+    return {
+      round: "review",
+      tier: 2,
+      reason:
+        review.pending_tier2_reason === "fixes_verified"
+          ? "tier1_verified"
+          : "tier1_escalated",
+    };
+  }
+
   if (hasUnansweredConversation(review, input.latestConversationAt)) {
-    return { round: "reply", reason: "conversation" };
+    return { round: "reply", tier: tier1Enabled ? 1 : 2, reason: "conversation" };
   }
   return { reason: "up_to_date" };
 }
@@ -2042,17 +2076,40 @@ async function runReviewPhases(
       }
       if (!decision.round) continue;
       const round: ReviewRoundKind = decision.round;
+      const tier: ReviewTier = decision.tier ?? 2;
+      // Tier 1 starts from pointers, so the orchestrator lists the reviewer's
+      // open threads mechanically instead of making the run rediscover them.
+      let unresolvedThreads: ReviewerThreadSummary[] | undefined;
+      if (round === "review" && tier === 1 && deps.listUnresolvedReviewerThreads) {
+        try {
+          unresolvedThreads = await deps.listUnresolvedReviewerThreads(pr.pr_url);
+        } catch (error) {
+          deps.logger.error(
+            `[worker] Failed to list reviewer threads for ${pr.pr_url}:`,
+            error
+          );
+        }
+      }
       try {
         const { pid, done } = await deps.spawnReviewSummary(
           pr,
-          { round, diff_hash: diffHash },
+          {
+            round,
+            tier,
+            diff_hash: diffHash,
+            ...(unresolvedThreads
+              ? { unresolved_threads: unresolvedThreads }
+              : {}),
+          },
           async (summary) => {
             activeReviewPids.delete(pr.pr_url);
             if (
               summary.source === "task" &&
               summary.task_id &&
               summary.agent_review_status === "needs_author_changes" &&
-              summary.summary_head_sha === summary.head_sha
+              // Any tier's round covering the current diff is actionable; a
+              // tier-1 round reports one without rewriting the summary.
+              summaryCoversHead(summary)
             ) {
               const task = await deps.getTask(summary.task_id);
               if (
@@ -2082,7 +2139,7 @@ async function runReviewPhases(
         activeReviewPids.set(pr.pr_url, pid);
         reviewSlots--;
         deps.logger.log(
-          `[worker] Spawned ${round} round for ${pr.pr_url} (${decision.reason})`
+          `[worker] Spawned tier-${tier} ${round} round for ${pr.pr_url} (${decision.reason})`
         );
       } catch (error) {
         deps.logger.error(

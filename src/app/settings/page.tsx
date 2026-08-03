@@ -22,16 +22,21 @@ import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import type {
+  AgentRuntime,
   ClaudeEffort,
   CodexEffort,
   OrchestratorConfig,
   PermissionMode,
+  ReviewTier,
   TaskEffort,
 } from "@/lib/types";
 import { getEffortOptions, getPermissionOptions } from "@/lib/runtime-config";
 import {
   applyReviewerRuntime,
+  applyReviewerTier,
   buildConfigUpdate,
+  reviewerTierConfig,
+  reviewerTierRuntime,
 } from "./reviewer-config";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -96,6 +101,75 @@ export default function SettingsPage() {
     if (!form) return;
     if (value !== "claude" && value !== "codex") return;
     setForm(applyReviewerRuntime(form, value));
+  }
+
+  function renderTierControls(tier: ReviewTier, title: string, help: string) {
+    if (!form) return null;
+    const tierConfig = reviewerTierConfig(form, tier);
+    const runtime = reviewerTierRuntime(form, tier);
+    const patchTier = (patch: Parameters<typeof applyReviewerTier>[2]) =>
+      setForm(applyReviewerTier(form, tier, patch));
+    return (
+      <div className="space-y-3 rounded-md border p-3">
+        <div className="space-y-1">
+          <Label>{title}</Label>
+          <p className="text-xs text-muted-foreground">{help}</p>
+        </div>
+        <div className="space-y-2">
+          <Label>Runtime</Label>
+          <Select
+            value={runtime}
+            onValueChange={(v) =>
+              (v === "claude" || v === "codex") &&
+              patchTier({ runtime: v as AgentRuntime })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="claude">Claude Code</SelectItem>
+              <SelectItem value="codex">Codex</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-2">
+          <Label>Model</Label>
+          <Input
+            value={tierConfig.model ?? ""}
+            placeholder={
+              runtime === "codex"
+                ? form.review_model || form.default_codex_model || "gpt-5.6"
+                : form.review_model || form.default_claude_model || "claude-sonnet-4-6"
+            }
+            onChange={(e) => patchTier({ model: e.target.value || undefined })}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label>Effort</Label>
+          <Select
+            value={tierConfig.effort || UNSET_VALUE}
+            onValueChange={(v) =>
+              patchTier({
+                effort: v === UNSET_VALUE ? undefined : (v as TaskEffort),
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={UNSET_VALUE}>Reviewer default</SelectItem>
+              {getEffortOptions(runtime).map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+    );
   }
 
   async function saveConfig() {
@@ -445,6 +519,25 @@ export default function SettingsPage() {
               }
             />
             <Label>Learning enabled</Label>
+          </div>
+          <div className="space-y-3">
+            <Label>Reviewer tiers</Label>
+            <p className="text-xs text-muted-foreground">
+              Leave the verification tier blank to run every round on the review
+              tier. When it is set, follow-up rounds that only verify open
+              findings, and rounds that only answer conversation, run on it
+              instead. It can never mark a pull request ready.
+            </p>
+            {renderTierControls(
+              1,
+              "Verification tier (tier 1)",
+              "Checks whether open findings are fixed, then hands the pull request to the review tier."
+            )}
+            {renderTierControls(
+              2,
+              "Review tier (tier 2)",
+              "Finds problems, resolves escalations, and owns every terminal verdict."
+            )}
           </div>
           <div className="space-y-2">
             <Label>Task-owned review instructions (optional)</Label>
