@@ -192,6 +192,23 @@ export type PermissionMode =
   | "default"
   | "yolo";
 
+// Which reviewer configuration a round runs on. Tier 2 is the full reviewer:
+// discovery, escalations, and the pass that may declare a PR ready. Tier 1 is
+// the cheap verification configuration and can never produce a terminal
+// verdict. Tiering is off unless `reviewer_tiers.tier1` is configured.
+export type ReviewTier = 1 | 2;
+
+export interface ReviewerTierConfig {
+  runtime?: AgentRuntime;
+  model?: string;
+  effort?: TaskEffort;
+}
+
+export interface ReviewerTiers {
+  tier1?: ReviewerTierConfig;
+  tier2?: ReviewerTierConfig;
+}
+
 export interface OrchestratorConfig {
   max_parallel_sessions: number;
   poll_interval_seconds: number;
@@ -209,6 +226,7 @@ export interface OrchestratorConfig {
   review_effort?: TaskEffort;
   review_model?: string;
   max_parallel_reviews?: number;
+  reviewer_tiers?: ReviewerTiers;
   review_learning_enabled?: boolean;
   // How long a PR head must sit still before a changed effective diff schedules
   // a review round. Absent falls back to REVIEW_DEBOUNCE_DEFAULT_SECONDS; 0
@@ -295,6 +313,24 @@ export interface ReviewSessionProfile {
   runtime: AgentRuntime;
   effort?: TaskEffort;
   model?: string;
+  // The tier this profile was resolved for. Absent on rows written before
+  // tiering, and on runs made while tiering is disabled.
+  tier?: ReviewTier;
+}
+
+// What a tier-1 verification round is allowed to report. `fixes_verified` and
+// `escalate` both hand the PR to a tier-2 round; neither is terminal.
+export type ReviewTier1Status =
+  | "fixes_verified"
+  | "needs_author_changes"
+  | "escalate";
+
+// One unresolved reviewer-authored review thread, listed mechanically by the
+// orchestrator so a tier-1 round starts from pointers instead of a transcript.
+export interface ReviewerThreadSummary {
+  thread_id: string;
+  url?: string;
+  first_line: string;
 }
 
 export type ReviewerCommentKind = "human_decision" | "manual_approval";
@@ -377,6 +413,17 @@ export interface ReviewSummary extends ReviewRequest {
   // than the reviewer created at or before this instant do not trigger a reply
   // round.
   last_conversation_seen_at?: string;
+  // Effective diff the most recent completed round of any tier covered. A tier-1
+  // verification round advances this without rewriting the summary, so the same
+  // diff is not verified twice.
+  last_round_diff_hash?: string;
+  // Head that round covered. Used only when no diff identity is available, so a
+  // tier-1 round at a PR whose diff GitHub could not identify still counts as
+  // covering the current head instead of repeating forever.
+  last_round_head_sha?: string;
+  // Set by a tier-1 round that cannot conclude on its own. The next round is a
+  // tier-2 pass at the same diff; a terminal verdict never comes from tier 1.
+  pending_tier2_reason?: "fixes_verified" | "escalate";
   generated_at: string;
   review_status: ReviewStatus;
   review_state: ReviewState;

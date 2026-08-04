@@ -2,7 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { OrchestratorConfig } from "@/lib/types";
-import { applyReviewerRuntime, buildConfigUpdate } from "./reviewer-config";
+import {
+  applyReviewerRuntime,
+  applyReviewerTier,
+  buildConfigUpdate,
+  reviewerTierConfig,
+  reviewerTierRuntime,
+} from "./reviewer-config";
 
 function config(
   overrides: Partial<OrchestratorConfig> = {}
@@ -67,6 +73,123 @@ test("config updates retain configured reviewer profile values", () => {
   assert.equal(update.reviewer_agent_prompt, "  Check task context.  ");
   assert.equal(update.review_effort, "high");
   assert.equal(update.review_model, "openrouter/custom-model");
+});
+
+test("both reviewer tiers round-trip their runtime, model, and effort", () => {
+  const edited = applyReviewerTier(
+    applyReviewerTier(config({ review_runtime: "codex" }), 1, {
+      runtime: "codex",
+      model: "gpt-5.4",
+      effort: "low",
+    }),
+    2,
+    { model: "gpt-5.6-sol", effort: "high" }
+  );
+
+  assert.deepEqual(edited.reviewer_tiers, {
+    tier1: { runtime: "codex", model: "gpt-5.4", effort: "low" },
+    tier2: { model: "gpt-5.6-sol", effort: "high" },
+  });
+  assert.deepEqual(reviewerTierConfig(edited, 1), {
+    runtime: "codex",
+    model: "gpt-5.4",
+    effort: "low",
+  });
+  // A tier with no runtime of its own follows the reviewer runtime.
+  assert.equal(reviewerTierRuntime(edited, 2), "codex");
+
+  const update = buildConfigUpdate(edited);
+  assert.deepEqual(update.reviewer_tiers, edited.reviewer_tiers);
+});
+
+test("changing a tier's runtime clears its runtime-specific model and effort", () => {
+  const switched = applyReviewerTier(
+    config({
+      review_runtime: "codex",
+      reviewer_tiers: {
+        tier1: { runtime: "codex", model: "gpt-5.4", effort: "low" },
+      },
+    }),
+    1,
+    { runtime: "claude" }
+  );
+
+  assert.deepEqual(switched.reviewer_tiers?.tier1, { runtime: "claude" });
+});
+
+test("a tier runtime can be cleared back to the reviewer default", () => {
+  const pinned = applyReviewerTier(
+    config({ review_runtime: "codex" }),
+    1,
+    { runtime: "claude", model: "claude-cheap", effort: "low" }
+  );
+  assert.deepEqual(pinned.reviewer_tiers?.tier1, { runtime: "claude" });
+
+  // Clearing the pin is the switch that empties tier 1, which is how tiering is
+  // turned off from Settings.
+  const unpinned = applyReviewerTier(pinned, 1, { runtime: null });
+  assert.deepEqual(unpinned.reviewer_tiers?.tier1, {});
+  assert.equal(buildConfigUpdate(unpinned).reviewer_tiers, null);
+  assert.equal(reviewerTierRuntime(unpinned, 1), "codex");
+
+  // Clearing a pin that matched the inherited runtime keeps the tier's profile,
+  // because its effective runtime did not change.
+  const sameRuntime = applyReviewerTier(
+    config({ review_runtime: "codex" }),
+    1,
+    { runtime: "codex", model: "gpt-5.4", effort: "low" }
+  );
+  assert.deepEqual(
+    applyReviewerTier(sameRuntime, 1, { runtime: null }).reviewer_tiers?.tier1,
+    { model: "gpt-5.4", effort: "low" }
+  );
+});
+
+test("switching the parent runtime clears inherited tier profiles only", () => {
+  const before = {
+    ...config({ review_runtime: "codex" }),
+    reviewer_tiers: {
+      tier1: { model: "gpt-cheap", effort: "minimal" as const },
+      tier2: { runtime: "codex" as const, model: "gpt-5.6-sol", effort: "ultra" as const },
+    },
+  };
+
+  const switched = applyReviewerRuntime(before, "claude");
+
+  // tier 1 inherits the reviewer runtime, so its Codex-only model and effort go.
+  assert.deepEqual(switched.reviewer_tiers?.tier1, {});
+  // tier 2 pins Codex, so it is untouched.
+  assert.deepEqual(switched.reviewer_tiers?.tier2, {
+    runtime: "codex",
+    model: "gpt-5.6-sol",
+    effort: "ultra",
+  });
+
+  // Selecting the runtime a tier already resolves to changes nothing.
+  assert.deepEqual(
+    applyReviewerRuntime(before, "codex").reviewer_tiers,
+    before.reviewer_tiers
+  );
+});
+
+test("clearing every tier-1 field turns tiering off in the payload", () => {
+  const cleared = buildConfigUpdate(
+    config({
+      reviewer_tiers: {
+        tier1: { model: "   ", effort: undefined },
+        tier2: { model: "  gpt-5.6-sol  " },
+      },
+    })
+  );
+  assert.deepEqual(cleared.reviewer_tiers, {
+    tier2: { model: "gpt-5.6-sol" },
+  });
+
+  const allCleared = buildConfigUpdate(
+    config({ reviewer_tiers: { tier1: {}, tier2: {} } })
+  );
+  assert.equal(allCleared.reviewer_tiers, null);
+  assert.equal(buildConfigUpdate(config()).reviewer_tiers, null);
 });
 
 test("config updates explicitly clear optional reviewer profile values", () => {

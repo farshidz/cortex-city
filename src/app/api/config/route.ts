@@ -1,7 +1,48 @@
 import { NextRequest, NextResponse } from "next/server";
 import { REVIEW_DEBOUNCE_MAX_SECONDS } from "@/lib/review-debounce";
 import { readConfig, writeConfig } from "@/lib/store";
-import type { OrchestratorConfig } from "@/lib/types";
+import type {
+  AgentRuntime,
+  OrchestratorConfig,
+  ReviewerTierConfig,
+  ReviewerTiers,
+  TaskEffort,
+} from "@/lib/types";
+
+// Reviewer tiers are the one nested config block, and `tier1`'s presence is the
+// tiering rollout flag. An empty tier is dropped rather than stored, so clearing
+// the fields in the UI actually turns tiering off.
+function normalizeReviewerTier(value: unknown): ReviewerTierConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const runtime =
+    raw.runtime === "claude" || raw.runtime === "codex"
+      ? (raw.runtime as AgentRuntime)
+      : undefined;
+  const model =
+    typeof raw.model === "string" && raw.model.trim()
+      ? raw.model.trim()
+      : undefined;
+  const effort =
+    typeof raw.effort === "string" && raw.effort.trim()
+      ? (raw.effort.trim() as TaskEffort)
+      : undefined;
+  const tier: ReviewerTierConfig = {
+    ...(runtime ? { runtime } : {}),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
+  };
+  return Object.keys(tier).length > 0 ? tier : undefined;
+}
+
+function normalizeReviewerTiers(value: unknown): ReviewerTiers | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const tier1 = normalizeReviewerTier(raw.tier1);
+  const tier2 = normalizeReviewerTier(raw.tier2);
+  if (!tier1 && !tier2) return undefined;
+  return { ...(tier1 ? { tier1 } : {}), ...(tier2 ? { tier2 } : {}) };
+}
 
 // Upper bounds the persistence layer enforces, matching the Settings inputs.
 const BOUNDED_COUNT_KEYS: Record<string, number> = {
@@ -55,6 +96,12 @@ export async function PUT(request: NextRequest) {
     else delete mutableUpdated[key];
   }
 
+  if (hasOwn("reviewer_tiers")) {
+    const tiers = normalizeReviewerTiers(body.reviewer_tiers);
+    if (tiers) mutableUpdated.reviewer_tiers = tiers;
+    else delete mutableUpdated.reviewer_tiers;
+  }
+
   // Bounded settings are enforced here, not only by the Settings input: HTML
   // constraints do not reach this route, and an out-of-range debounce would
   // postpone changed-diff reviews for hours. Invalid input is rejected rather
@@ -91,6 +138,24 @@ export async function PUT(request: NextRequest) {
     !hasOwn("review_effort")
   ) {
     delete updated.review_effort;
+  }
+  if (
+    currentReviewRuntime !== updatedReviewRuntime &&
+    !hasOwn("reviewer_tiers") &&
+    updated.reviewer_tiers
+  ) {
+    // A tier with no runtime of its own inherits the reviewer runtime, so a
+    // partial update that changes it must not carry that tier's now-incompatible
+    // model and effort. A tier that pins its own runtime is untouched.
+    const tiers: ReviewerTiers = {};
+    for (const key of ["tier1", "tier2"] as const) {
+      const tier = updated.reviewer_tiers[key];
+      if (!tier) continue;
+      tiers[key] = tier.runtime ? tier : {};
+    }
+    const retained = normalizeReviewerTiers(tiers);
+    if (retained) updated.reviewer_tiers = retained;
+    else delete updated.reviewer_tiers;
   }
 
   await writeConfig(updated);

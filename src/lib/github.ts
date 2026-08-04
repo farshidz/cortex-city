@@ -19,6 +19,7 @@ import type {
   ReviewerCommentDelivery,
   ReviewerCommentReceipt,
   ReviewerCommentSurface,
+  ReviewerThreadSummary,
   ReviewRequest,
 } from "./types";
 
@@ -520,6 +521,104 @@ export async function getLatestForeignCommentAt(prUrl: string): Promise<string> 
     consider(review.submitted_at);
   }
   return latest;
+}
+
+interface ReviewThreadNode {
+  id?: string;
+  isResolved?: boolean;
+  comments?: {
+    nodes?: Array<{
+      databaseId?: number;
+      body?: string | null;
+      url?: string;
+      author?: { login?: string };
+    }>;
+  };
+}
+
+const UNRESOLVED_REVIEW_THREADS_QUERY = `query($owner:String!,$repo:String!,$number:Int!){
+  repository(owner:$owner,name:$repo){
+    pullRequest(number:$number){
+      reviewThreads(first:100){
+        nodes{
+          id
+          isResolved
+          comments(first:1){ nodes{ databaseId body url author{ login } } }
+        }
+      }
+    }
+  }
+}`;
+
+function firstLineOf(body: string | null | undefined): string {
+  const line = (body || "")
+    .split(/\r?\n/)
+    .map((candidate) => candidate.trim())
+    .find(Boolean);
+  if (!line) return "(no text)";
+  return line.length > 200 ? `${line.slice(0, 197)}...` : line;
+}
+
+// The reviewer's own unresolved review threads, as pointers. A tier-1
+// verification round is seeded with this list instead of a transcript, so it
+// starts from its open findings and pulls the bodies itself.
+export async function listUnresolvedReviewerThreads(
+  prUrl: string
+): Promise<ReviewerThreadSummary[]> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return [];
+
+  const result = await execFileResult("gh", [
+    "api",
+    "graphql",
+    "-f",
+    `query=${UNRESOLVED_REVIEW_THREADS_QUERY}`,
+    "-F",
+    `owner=${pr.owner}`,
+    "-F",
+    `repo=${pr.repo}`,
+    "-F",
+    `number=${pr.number}`,
+  ]);
+  if (!result.ok || !result.stdout.trim()) return [];
+
+  let nodes: ReviewThreadNode[] = [];
+  try {
+    const parsed = JSON.parse(result.stdout) as {
+      data?: {
+        repository?: {
+          pullRequest?: { reviewThreads?: { nodes?: ReviewThreadNode[] } };
+        };
+      };
+    };
+    nodes = parsed.data?.repository?.pullRequest?.reviewThreads?.nodes || [];
+  } catch {
+    return [];
+  }
+  if (nodes.length === 0) return [];
+
+  const identity = await reviewerCommentIdentity(
+    prUrl,
+    nodes.map((node) => ({ body: node.comments?.nodes?.[0]?.body }))
+  );
+  const threads: ReviewerThreadSummary[] = [];
+  for (const node of nodes) {
+    if (!node.id || node.isResolved) continue;
+    const first = node.comments?.nodes?.[0];
+    if (!first) continue;
+    const authored = isReviewerAuthoredComment(identity, "review_comment", {
+      id: typeof first.databaseId === "number" ? first.databaseId : -1,
+      body: first.body,
+      user: { login: first.author?.login },
+    });
+    if (!authored) continue;
+    threads.push({
+      thread_id: node.id,
+      url: first.url,
+      first_line: firstLineOf(first.body),
+    });
+  }
+  return threads;
 }
 
 export async function getPRStatus(prUrl: string): Promise<PRStatus> {

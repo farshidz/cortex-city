@@ -11,6 +11,8 @@ export interface ReviewStatusInput {
   summary?: string;
   summary_head_sha?: string;
   summary_diff_hash?: string;
+  last_round_diff_hash?: string;
+  last_round_head_sha?: string;
   effective_diff_hash?: string;
   effective_diff_head_sha?: string;
   error?: string;
@@ -20,22 +22,44 @@ export interface ReviewStatusInput {
   head_sha: string;
 }
 
-// Whether the stored summary describes the code at `headSha`. A moved head with
+// Whether the reviewer's opinion covers the code at `headSha`. A moved head with
 // an unchanged effective diff (a rebase) counts as covered, because scheduling
 // will not run another round for it — so every consumer that gates on "has this
 // head been reviewed?" has to ask through here, or it waits for a round that
-// never comes.
+// never comes. A tier-1 verification round at the current diff counts too: it did
+// not rewrite the summary, but it did check the code.
 export function reviewCoversHeadSha(
   review: ReviewStatusInput,
-  headSha: string
+  headSha: string,
+  // The identity the caller just computed, when it has one the row may not carry
+  // yet. Scheduling passes it so it cannot disagree with the derived state.
+  diffHash?: string
 ): boolean {
   if (!headSha) return false;
-  if ((review.summary_head_sha || review.head_sha) === headSha) return true;
-  return Boolean(
-    review.summary_diff_hash &&
-      review.effective_diff_hash &&
-      review.effective_diff_head_sha === headSha &&
-      review.summary_diff_hash === review.effective_diff_hash
+  const storedIdentity =
+    review.effective_diff_head_sha === headSha
+      ? review.effective_diff_hash
+      : undefined;
+  // An identity that moved while the head stood still is a base move: the code
+  // under review changed without a commit being pushed. A known inequality is
+  // authoritative and comes first, so no weaker evidence below can mask it.
+  if (diffHash && storedIdentity && diffHash !== storedIdentity) return false;
+  const identity = diffHash || storedIdentity;
+  const recorded = review.summary_diff_hash || review.last_round_diff_hash;
+  if (identity && recorded) {
+    // Identities on both sides: they decide.
+    return (
+      review.summary_diff_hash === identity ||
+      review.last_round_diff_hash === identity
+    );
+  }
+  // Nothing to compare — a row from before diff identities, or a PR whose diff
+  // GitHub could not identify when the round ran. The head is all there is, and a
+  // completed round at exactly this head counts for as long as the identity at
+  // that head has not been observed to move.
+  return (
+    review.last_round_head_sha === headSha ||
+    (review.summary_head_sha || review.head_sha) === headSha
   );
 }
 
@@ -45,6 +69,7 @@ export function summaryCoversHead(review: ReviewStatusInput): boolean {
 
 export interface ReviewStateInput extends ReviewStatusInput {
   agent_review_status?: ReviewAgentStatus;
+  pending_tier2_reason?: "fixes_verified" | "escalate";
   my_approval_sha?: string;
   my_changes_requested_sha?: string;
 }
@@ -118,6 +143,9 @@ export function deriveReviewState(review: ReviewStateInput): ReviewState {
   // Summary present: a stale summary means the diff moved on (verdict already
   // cleared). A rebase that preserved the diff is not stale.
   if (!summaryCoversHead(review)) return "re_reviewing";
+  // A cheap verification round handed this diff to a full review round that has
+  // not run yet, so the reviewer has not settled on it either.
+  if (review.pending_tier2_reason) return "re_reviewing";
 
   if (
     review.source !== "task" &&

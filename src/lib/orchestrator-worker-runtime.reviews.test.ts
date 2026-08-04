@@ -11,7 +11,11 @@ import {
   shouldRetryErroredReview,
   type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
-import { deriveReviewState, withReviewStatus } from "./review-status";
+import {
+  deriveReviewState,
+  summaryCoversHead,
+  withReviewStatus,
+} from "./review-status";
 import type {
   OrchestratorConfig,
   ReviewRequest,
@@ -51,7 +55,13 @@ interface Harness {
   reviews: Record<string, ReviewSummary>;
   diffHashLookups: DiffHashLookup[];
   spawnCalls: ReviewRequest[];
-  spawnRounds: Array<{ pr_url: string; round?: string; diff_hash?: string }>;
+  spawnRounds: Array<{
+    pr_url: string;
+    round?: string;
+    tier?: number;
+    diff_hash?: string;
+    unresolved_threads?: unknown;
+  }>;
   retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }>;
   deletedPrUrls: string[];
   removedReviewWorkspaceUrls: string[];
@@ -129,7 +139,9 @@ function makeHarness(options: HarnessOptions = {}): Harness {
   const spawnRounds: Array<{
     pr_url: string;
     round?: string;
+    tier?: number;
     diff_hash?: string;
+    unresolved_threads?: unknown;
   }> = [];
   const retroCalls: Array<{ review: ReviewSummary; learningsBefore: string }> = [];
   const deletedPrUrls: string[] = [];
@@ -199,7 +211,9 @@ function makeHarness(options: HarnessOptions = {}): Harness {
       spawnRounds.push({
         pr_url: request.pr_url,
         round: _opts?.round,
+        tier: _opts?.tier,
         diff_hash: _opts?.diff_hash,
+        unresolved_threads: _opts?.unresolved_threads,
       });
       const pid = spawnPid();
       reviews[request.pr_url] = {
@@ -315,12 +329,13 @@ test("decideReviewRound schedules on the effective diff, not the head SHA", () =
   // A real edit.
   assert.deepEqual(
     decideReviewRound({ review: reviewed, diffHash: "diff-2", config }),
-    { round: "review", reason: "diff_changed" }
+    { round: "review", tier: 2, reason: "diff_changed" }
   );
   // GitHub could not identify the diff, so the head SHA decides and an unknown
   // resolves to reviewing.
   assert.deepEqual(decideReviewRound({ review: reviewed, config }), {
     round: "review",
+    tier: 2,
     reason: "diff_changed",
   });
   // A row that predates diff identities has no stored diff to compare.
@@ -337,6 +352,7 @@ test("decideReviewRound schedules on the effective diff, not the head SHA", () =
   );
   assert.deepEqual(decideReviewRound({ config }), {
     round: "review",
+    tier: 2,
     reason: "initial",
   });
 });
@@ -368,11 +384,12 @@ test("decideReviewRound waits for the head to settle before a review round", () 
   );
   assert.deepEqual(
     decideReviewRound({ ...input, headStableSinceMs: now - 301_000 }),
-    { round: "review", reason: "diff_changed" }
+    { round: "review", tier: 2, reason: "diff_changed" }
   );
   // An unknown anchor never delays indefinitely.
   assert.deepEqual(decideReviewRound(input), {
     round: "review",
+    tier: 2,
     reason: "diff_changed",
   });
   assert.deepEqual(
@@ -381,7 +398,7 @@ test("decideReviewRound waits for the head to settle before a review round", () 
       config: makeConfig({ review_debounce_seconds: 0 }),
       headStableSinceMs: now - 1_000,
     }),
-    { round: "review", reason: "diff_changed" }
+    { round: "review", tier: 2, reason: "diff_changed" }
   );
 });
 
@@ -401,7 +418,7 @@ test("decideReviewRound answers conversation only at an unchanged diff", () => {
       latestConversationAt: "2026-05-01T00:30:00.000Z",
       config,
     }),
-    { round: "reply", reason: "conversation" }
+    { round: "reply", tier: 2, reason: "conversation" }
   );
   assert.deepEqual(
     decideReviewRound({
@@ -420,7 +437,7 @@ test("decideReviewRound answers conversation only at an unchanged diff", () => {
       latestConversationAt: "2026-05-01T00:30:00.000Z",
       config,
     }),
-    { round: "review", reason: "diff_changed" }
+    { round: "review", tier: 2, reason: "diff_changed" }
   );
   // Never seen before means unanswered.
   assert.deepEqual(
@@ -430,7 +447,7 @@ test("decideReviewRound answers conversation only at an unchanged diff", () => {
       latestConversationAt: "2026-05-01T00:30:00.000Z",
       config,
     }),
-    { round: "reply", reason: "conversation" }
+    { round: "reply", tier: 2, reason: "conversation" }
   );
   // An errored row takes the expensive path instead of replying: here the
   // stored reviewer profile is unknown, so the retry is immediate.
@@ -442,7 +459,7 @@ test("decideReviewRound answers conversation only at an unchanged diff", () => {
       config,
       now: Date.parse("2026-05-01T01:00:00.000Z"),
     }),
-    { round: "review", reason: "error_retry" }
+    { round: "review", tier: 2, reason: "error_retry" }
   );
   // Still no reply round once the same failure is inside its backoff window.
   assert.deepEqual(
@@ -459,6 +476,338 @@ test("decideReviewRound answers conversation only at an unchanged diff", () => {
       now: Date.parse("2026-05-01T01:00:00.000Z"),
     }),
     { reason: "error_backoff" }
+  );
+});
+
+test("decideReviewRound keeps discovery and terminal passes on tier 2", () => {
+  const tiered = makeConfig({
+    reviewer_tiers: { tier1: { effort: "low" } },
+  });
+  const untiered = makeConfig();
+  const reviewed = makeSummary(makeRequest({ head_sha: "newSha" }), {
+    summary: "reviewed",
+    summary_head_sha: "oldSha",
+    summary_diff_hash: "diff-1",
+    last_round_diff_hash: "diff-1",
+  });
+
+  // Verifying an existing review is the cheap tier's job.
+  assert.deepEqual(
+    decideReviewRound({ review: reviewed, diffHash: "diff-2", config: tiered }),
+    { round: "review", tier: 1, reason: "diff_changed" }
+  );
+  // Discovery is not.
+  assert.deepEqual(decideReviewRound({ config: tiered }), {
+    round: "review",
+    tier: 2,
+    reason: "initial",
+  });
+  assert.deepEqual(
+    decideReviewRound({
+      review: makeSummary(makeRequest(), { summary: "" }),
+      diffHash: "diff-2",
+      config: tiered,
+    }),
+    { round: "review", tier: 2, reason: "initial" }
+  );
+  // Neither is an error retry.
+  assert.deepEqual(
+    decideReviewRound({
+      review: { ...reviewed, error: "boom" },
+      diffHash: "diff-2",
+      config: tiered,
+    }),
+    { round: "review", tier: 2, reason: "error_retry" }
+  );
+  // Both tier-1 hand-offs run tier 2 at the same diff.
+  for (const [reason, expected] of [
+    ["fixes_verified", "tier1_verified"],
+    ["escalate", "tier1_escalated"],
+  ] as const) {
+    assert.deepEqual(
+      decideReviewRound({
+        review: {
+          ...reviewed,
+          last_round_diff_hash: "diff-2",
+          pending_tier2_reason: reason,
+        },
+        diffHash: "diff-2",
+        config: tiered,
+      }),
+      { round: "review", tier: 2, reason: expected }
+    );
+    // A diff that moved on since the hand-off still goes to tier 2.
+    assert.deepEqual(
+      decideReviewRound({
+        review: {
+          ...reviewed,
+          last_round_diff_hash: "diff-2",
+          pending_tier2_reason: reason,
+        },
+        diffHash: "diff-3",
+        config: tiered,
+      }),
+      { round: "review", tier: 2, reason: "diff_changed" }
+    );
+  }
+  // Reply rounds are cheap when tiering is on.
+  const conversation = {
+    review: { ...reviewed, head_sha: "oldSha" },
+    diffHash: "diff-1",
+    latestConversationAt: "2026-05-01T00:30:00.000Z",
+  };
+  assert.deepEqual(decideReviewRound({ ...conversation, config: tiered }), {
+    round: "reply",
+    tier: 1,
+    reason: "conversation",
+  });
+  // With tiering off every round is tier 2, exactly as before.
+  assert.deepEqual(decideReviewRound({ ...conversation, config: untiered }), {
+    round: "reply",
+    tier: 2,
+    reason: "conversation",
+  });
+  assert.deepEqual(
+    decideReviewRound({ review: reviewed, diffHash: "diff-2", config: untiered }),
+    { round: "review", tier: 2, reason: "diff_changed" }
+  );
+});
+
+// The review row a task-owned PR has after one full review round, in the task
+// context `makeTask()` produces, so the poll does not treat it as a new context.
+function makeTaskReviewRow(overrides: Partial<ReviewSummary> = {}) {
+  const task = makeTask();
+  return makeSummary(makeRequest({ head_sha: "oldSha" }), {
+    source: "task",
+    task_id: task.id,
+    task_title: task.title,
+    task_description: task.description,
+    task_plan: task.plan,
+    summary: "reviewed",
+    summary_head_sha: "oldSha",
+    summary_diff_hash: "diff-1",
+    last_round_diff_hash: "diff-1",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "oldSha",
+    ...overrides,
+  });
+}
+
+test("pollOnce runs a tier-1 verification round seeded with its open threads", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  const threads = [
+    {
+      thread_id: "PRRT_kw1",
+      url: "https://example.test/1",
+      first_line: "Inverted guard.",
+    },
+  ];
+  const listed: string[] = [];
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } } },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: { [prUrl]: makeTaskReviewRow() },
+    prDiffHashes: { [prUrl]: "diff-2" },
+  });
+  h.deps.listUnresolvedReviewerThreads = async (candidateUrl: string) => {
+    listed.push(candidateUrl);
+    return threads;
+  };
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(listed, [prUrl]);
+  assert.equal(h.spawnRounds.length, 1);
+  assert.equal(h.spawnRounds[0].round, "review");
+  assert.equal(h.spawnRounds[0].tier, 1);
+  assert.deepEqual(h.spawnRounds[0].unresolved_threads, threads);
+});
+
+test("a tier-1 result with no diff identity is actionable and not repeated", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  // What the runner persists after a tier-1 `needs_author_changes` at a PR whose
+  // effective diff GitHub could not identify: the summary still describes the
+  // old head, and only the head watermark says this round covered the new one.
+  const verified = makeTaskReviewRow({
+    head_sha: "fixedSha",
+    summary_diff_hash: undefined,
+    last_round_diff_hash: undefined,
+    last_round_head_sha: "fixedSha",
+    effective_diff_hash: undefined,
+    effective_diff_head_sha: undefined,
+    agent_review_status: "needs_author_changes",
+  });
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } } },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: { [prUrl]: verified },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  // No round is scheduled: the diff is covered as far as anything can tell, so
+  // the same verification is not repeated every poll.
+  assert.deepEqual(h.spawnRounds, []);
+  // And the verdict reads as current rather than as a pending re-review.
+  assert.equal(summaryCoversHead(h.reviews[prUrl]), true);
+  assert.equal(deriveReviewState(h.reviews[prUrl]), "needs_author_changes");
+});
+
+test("a recovered diff identity does not strand a head-only coverage watermark", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  // The row a tier-1 round leaves when the diff could not be identified: only a
+  // head watermark. On the next poll the lookup succeeds, so an identity exists
+  // that neither the summary nor the round ever recorded a hash for.
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } } },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: {
+      [prUrl]: makeTaskReviewRow({
+        head_sha: "fixedSha",
+        summary_diff_hash: undefined,
+        last_round_diff_hash: undefined,
+        last_round_head_sha: "fixedSha",
+        effective_diff_hash: undefined,
+        effective_diff_head_sha: undefined,
+        agent_review_status: "needs_author_changes",
+      }),
+    },
+    prDiffHashes: { [prUrl]: "diff-2" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  const stored = h.reviews[prUrl];
+  assert.equal(stored.effective_diff_hash, "diff-2");
+  // Scheduling and the derived state have to agree here. If scheduling says
+  // covered while the state says stale, no round will ever reconcile them,
+  // because scheduling is what runs the rounds.
+  assert.deepEqual(h.spawnRounds, []);
+  assert.equal(summaryCoversHead(stored), true);
+  assert.equal(
+    deriveReviewState({ ...stored, current_run_pid: undefined }),
+    "needs_author_changes"
+  );
+});
+
+test("an identity is reused at an unchanged head and recomputed after a move", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  const lookups: string[] = [];
+  const settled = makeTaskReviewRow({
+    head_sha: "fixedSha",
+    summary_head_sha: "fixedSha",
+    summary_diff_hash: "diff-1",
+    last_round_diff_hash: "diff-1",
+    last_round_head_sha: "fixedSha",
+    effective_diff_hash: "diff-1",
+    effective_diff_head_sha: "fixedSha",
+  });
+
+  // At an unchanged head the stored identity is reused, so a converged PR costs
+  // no GitHub calls. This is also why a base move under an unchanged head is not
+  // detected — nothing recomputes the identity to notice it. Wherever a caller
+  // does supply a fresh identity, `reviewCoversHeadSha` refuses coverage on a
+  // mismatch; see its own tests.
+  const unchanged = makeHarness({
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: { [prUrl]: settled },
+    prDiffHashes: { [prUrl]: "diff-2" },
+  });
+  unchanged.deps.getPRDiffHash = async (url: string) => {
+    lookups.push(url);
+    return "diff-2";
+  };
+  await pollOnce(new Map(), unchanged.deps, unchanged.activeReviewPids);
+  assert.equal(lookups.length, 0);
+  assert.deepEqual(unchanged.spawnRounds, []);
+  assert.equal(unchanged.reviews[prUrl].effective_diff_hash, "diff-1");
+
+  // A head move is what triggers a recompute, and a changed identity there is a
+  // review round.
+  const moved = makeHarness({
+    tasks: [task],
+    prHeadShas: { [prUrl]: "movedSha" },
+    reviews: { [prUrl]: settled },
+  });
+  moved.deps.getPRDiffHash = async (url: string) => {
+    lookups.push(url);
+    return "diff-2";
+  };
+  await pollOnce(new Map(), moved.deps, moved.activeReviewPids);
+  assert.deepEqual(lookups, [prUrl]);
+  assert.equal(moved.spawnRounds.length, 1);
+  assert.equal(moved.spawnRounds[0].diff_hash, "diff-2");
+});
+
+test("a tier-1 verdict with no diff identity still wakes the builder", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } } },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: { [prUrl]: makeTaskReviewRow({ summary_diff_hash: undefined }) },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 1);
+  assert.equal(h.spawnRounds[0].tier, 1);
+  assert.equal(h.reviewCompletions.length, 1);
+
+  // The tier-1 shape: the summary still describes the old head, and only the
+  // head watermark records that this round covered the current one.
+  await h.reviewCompletions[0](
+    makeSummary(h.spawnCalls[0], {
+      source: "task",
+      task_id: task.id,
+      summary: "reviewed",
+      summary_head_sha: "oldSha",
+      last_round_head_sha: "fixedSha",
+      agent_review_status: "needs_author_changes",
+      current_run_pid: undefined,
+    })
+  );
+
+  assert.equal(h.tasks[0].resume_requested, true);
+  assert.equal(h.tasks[0].resume_run_mode, "review");
+});
+
+test("pollOnce confirms a tier-1 verification with a tier-2 pass", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } } },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: {
+      [prUrl]: makeTaskReviewRow({
+        head_sha: "fixedSha",
+        last_round_diff_hash: "diff-2",
+        effective_diff_hash: "diff-2",
+        effective_diff_head_sha: "fixedSha",
+        pending_tier2_reason: "fixes_verified",
+      }),
+    },
+    prDiffHashes: { [prUrl]: "diff-2" },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.equal(h.spawnRounds.length, 1);
+  assert.equal(h.spawnRounds[0].tier, 2);
+  assert.equal(h.spawnRounds[0].diff_hash, "diff-2");
+  // Until that pass lands, the reviewer has not settled on this diff.
+  assert.equal(
+    deriveReviewState({ ...h.reviews[prUrl], current_run_pid: undefined }),
+    "re_reviewing"
   );
 });
 
@@ -606,7 +955,13 @@ test("pollOnce reviews again when the effective diff changed", async () => {
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
   assert.deepEqual(h.spawnRounds, [
-    { pr_url: pr.pr_url, round: "review", diff_hash: "diff-2" },
+    {
+      pr_url: pr.pr_url,
+      round: "review",
+      tier: 2,
+      diff_hash: "diff-2",
+      unresolved_threads: undefined,
+    },
   ]);
   assert.equal(h.reviews[pr.pr_url].agent_review_status, undefined);
   // The identity is bound to the head it is recorded against, so a head move
@@ -636,7 +991,13 @@ test("pollOnce schedules a reply round for comment-only activity", async () => {
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
   assert.deepEqual(h.spawnRounds, [
-    { pr_url: pr.pr_url, round: "reply", diff_hash: "diff-1" },
+    {
+      pr_url: pr.pr_url,
+      round: "reply",
+      tier: 2,
+      diff_hash: "diff-1",
+      unresolved_threads: undefined,
+    },
   ]);
 });
 
