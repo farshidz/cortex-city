@@ -304,13 +304,23 @@ export interface ReviewerCommentDelivery {
   body: string;
 }
 
+// Which GitHub comment collection a receipted comment lives in. IDs are only
+// unique per surface, so a receipt is meaningless without it. Legacy receipts
+// predate inline review comments and are all "issue" (PR conversation).
+export type ReviewerCommentSurface = "issue" | "review_comment";
+
 export interface ReviewerCommentReceipt {
-  // A receipt is stored only after GitHub returns a comment whose author and
-  // immutable body match the durable delivery action exactly.
-  action_token: string;
+  // Set only for the two application-owned delivery actions (human decision,
+  // manual-approval handoff). A receipt is stored for those only after GitHub
+  // returns a comment whose author and immutable body match the durable action
+  // exactly. Reviewer-authored comments posted by the run itself have no
+  // action token: they are recognized by author plus the reviewer prefix.
+  action_token?: string;
   comment_id: number;
   author_login: string;
   body_sha256: string;
+  // Defaults to "issue" when absent.
+  surface?: ReviewerCommentSurface;
 }
 
 export interface ReviewerCommentCancellation {
@@ -363,8 +373,14 @@ export interface ReviewSummary extends ReviewRequest {
   error?: string;
   error_at?: string;
   agent_review_status?: ReviewAgentStatus;
-  // Verified immutable GitHub events. Only these IDs may be filtered from task
-  // wakeups and PR-state hashes; prefixes and public marker copies are ignored.
+  // Comments the reviewer posted, recorded per surface. These IDs are filtered
+  // from task wakeups and PR-state hashes. Receipts for the two
+  // application-owned handoff comments are verified immutable events, matched by
+  // author and exact body against a durable action token. Receipts the reviewer
+  // run itself produced are matched by author plus the public reviewer prefix,
+  // which is weaker: on a self-authored PR the human author shares the
+  // reviewer's login, so a human comment starting with that prefix is treated as
+  // reviewer-authored. See README.md for that accepted residual risk.
   reviewer_comment_receipts?: ReviewerCommentReceipt[];
   // Terminal records for actions GitHub proved stale before any POST. These
   // tokens must never be retried or treated as delivered timeline events.

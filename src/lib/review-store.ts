@@ -9,6 +9,7 @@ import * as lockfile from "proper-lockfile";
 import {
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
   REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
+  reviewerCommentSurfaceOf,
   reviewerHumanDecisionCommentMarker,
 } from "./review-comments";
 import { withReviewState, withReviewStatus } from "./review-status";
@@ -107,22 +108,35 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
   const actionTokenPattern =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const seenReceiptTokens = new Set<string>();
-  const seenReceiptIds = new Set<number>();
+  const seenReceiptKeys = new Set<string>();
   const receipts = Array.isArray(normalized.reviewer_comment_receipts)
     ? normalized.reviewer_comment_receipts.filter((receipt) => {
+        if (!receipt) return false;
+        // Only an absent surface is a legacy issue receipt. An unrecognized
+        // literal is rejected outright: coercing it to "issue" would let a
+        // malformed review-comment receipt suppress the unrelated issue comment
+        // that happens to share its numeric ID.
+        const surfaceIsValid =
+          receipt.surface === undefined ||
+          receipt.surface === "issue" ||
+          receipt.surface === "review_comment";
+        // Comment IDs are unique per surface only, so identity is the pair.
+        const key = `${reviewerCommentSurfaceOf(receipt)}:${receipt.comment_id}`;
         const valid = Boolean(
-          receipt &&
-            actionTokenPattern.test(receipt.action_token) &&
+          surfaceIsValid &&
+            (receipt.action_token === undefined ||
+              actionTokenPattern.test(receipt.action_token)) &&
             Number.isSafeInteger(receipt.comment_id) &&
             receipt.comment_id > 0 &&
             receipt.author_login?.trim() &&
             /^[0-9a-f]{64}$/i.test(receipt.body_sha256) &&
-            !seenReceiptTokens.has(receipt.action_token) &&
-            !seenReceiptIds.has(receipt.comment_id)
+            (receipt.action_token === undefined ||
+              !seenReceiptTokens.has(receipt.action_token)) &&
+            !seenReceiptKeys.has(key)
         );
         if (valid) {
-          seenReceiptTokens.add(receipt.action_token);
-          seenReceiptIds.add(receipt.comment_id);
+          if (receipt.action_token) seenReceiptTokens.add(receipt.action_token);
+          seenReceiptKeys.add(key);
         }
         return valid;
       })

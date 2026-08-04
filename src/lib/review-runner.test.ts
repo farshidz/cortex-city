@@ -941,6 +941,97 @@ test("summarizePR persists Claude output as a ReviewSummary", () => {
   assert.equal(result.persisted.session_id, "claude-session-1");
 });
 
+test("summarizePR receipts the comments its run posted on every surface", () => {
+  const workspace = setupRunnerWorkspace("review-runner-comment-receipts-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const reviewerFinding = "**🤖[Cortex City Reviewer]** The guard is inverted.";
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "abc123",
+        // Stands in for the comments the reviewer posts with `gh` inside its
+        // own run: an inline finding, its wrapping COMMENTED review, a
+        // conversation summary, and a participant's reply.
+        comments: [
+          {
+            id: 700,
+            pull_request_review_id: 40,
+            body: reviewerFinding,
+            user: { login: "me" },
+          },
+        ],
+        reviews: [{ id: 40, state: "COMMENTED", body: "", user: { login: "me" } }],
+        issueComments: [
+          { id: 800, body: reviewerFinding, user: { login: "me" } },
+          { id: 801, body: "Looks wrong to me too.", user: { login: "octocat" } },
+        ],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-session-1",
+        result:
+          "## Summary\nOne finding posted.\n\n## Agent Status\nAgent status: needs_author_changes",
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { getPRStateHash, getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+        stateHash: await getPRStateHash(${JSON.stringify(request.pr_url)}),
+        submitted: await getSubmittedCommentIds(${JSON.stringify(request.pr_url)}),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(
+    result.persisted.reviewer_comment_receipts
+      .map(
+        (receipt: ReviewerCommentReceipt) =>
+          `${receipt.surface}:${receipt.comment_id}`
+      )
+      .sort(),
+    ["issue:800", "review_comment:700"]
+  );
+  for (const receipt of result.persisted
+    .reviewer_comment_receipts as ReviewerCommentReceipt[]) {
+    assert.equal(receipt.action_token, undefined);
+    assert.equal(receipt.author_login, "me");
+  }
+  // Only the participant's reply remains as conversation, and the hash carries
+  // no trace of the reviewer's own comments or their wrapping review.
+  assert.deepEqual(result.submitted, [801]);
+  assert.equal(
+    result.stateHash,
+    createHash("sha256")
+      .update("abc123|[]|[801]|[]|")
+      .digest("hex")
+      .slice(0, 16)
+  );
+});
+
 test("summarizePR posts and persists an application-owned human-decision comment", () => {
   const workspace = setupRunnerWorkspace("review-runner-decision-comment-");
   const scenarioFile = path.join(workspace, "scenario.json");
@@ -1671,7 +1762,10 @@ test("summarizePR appends a distinct rebuilt decision after recovering a pending
     }
   );
 
-  assert.deepEqual(result.submittedBefore, [8123]);
+  // The prior decision comment is the reviewer's own, so it never counts as
+  // conversation — before the run (matched by prefix and author) or after it
+  // (matched by its receipt).
+  assert.deepEqual(result.submittedBefore, []);
   assert.deepEqual(result.submittedAfter, []);
   assert.equal(result.persisted.summary_head_sha, "new-head");
   assert.equal(result.persisted.agent_review_status, "needs_human_decision");

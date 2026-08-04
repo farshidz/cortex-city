@@ -41,6 +41,7 @@ import { resolveReviewOpts, spawnReviewSummary } from "./review-runner";
 import { removeFinalReviewWorkspace } from "./review-workspace";
 import {
   appendReviewerCommentCancellation,
+  appendReviewerCommentReceipts,
   reviewerCommentBodySha256,
 } from "./review-comments";
 import { unlinkTask as unlinkIssueTask } from "./issue-store";
@@ -517,14 +518,13 @@ async function recoverPendingReviewerCommentDeliveries(
         }
         return {
           ...current,
-          reviewer_comment_receipts: [
-            ...(current.reviewer_comment_receipts || []).filter(
-              (candidate) =>
-                candidate.action_token !== deliveredReceipt.action_token &&
-                candidate.comment_id !== deliveredReceipt.comment_id
-            ),
-            deliveredReceipt,
-          ],
+          // Surface-qualified, like every other receipt writer: a recovered
+          // issue receipt must not evict the distinct review-comment receipt
+          // that shares its numeric ID.
+          reviewer_comment_receipts: appendReviewerCommentReceipts(
+            current.reviewer_comment_receipts,
+            [deliveredReceipt]
+          ),
           // The delivery is complete, but the process died before saving its
           // review result. Retain the durable action so an identical rebuild
           // reuses it rather than posting a second event.

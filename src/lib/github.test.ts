@@ -75,7 +75,7 @@ function runGithubScript(
     [
       "--eval",
       [
-        `import { deliverReviewerComment, getPRHeadSha, getPRStateHash, getSubmittedCommentIds } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { deliverReviewerComment, getPRHeadSha, getPRStateHash, getSubmittedCommentIds, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
         "(async () => {",
         body,
         "})().catch((error) => {",
@@ -476,6 +476,260 @@ test("getPRStateHash ignores only tracked decision comments", () => {
       .update("abc123|[]|[300,301]|[]|")
       .digest("hex")
       .slice(0, 16)
+  );
+});
+
+test("getPRStateHash ignores every reviewer-authored comment surface", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const reviewerBody = "**🤖[Cortex City Reviewer]** This assertion is inverted.";
+  const hashFor = (
+    issueComments: Array<Record<string, unknown>>,
+    reviewComments: Array<Record<string, unknown>>,
+    reviews: Array<Record<string, unknown>>
+  ) =>
+    runGithubScript(
+      workspace,
+      {
+        "api user --jq .login": { stdout: "me" },
+        [prViewKey(prUrl)]: {
+          stdout: JSON.stringify({ headRefOid: "abc123", statusCheckRollup: [] }),
+        },
+        [reviewsKey()]: { stdout: JSON.stringify([reviews]) },
+        [reviewCommentsKey()]: { stdout: JSON.stringify([reviewComments]) },
+        [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
+        [checksKey(prUrl)]: { stdout: "" },
+      },
+      `
+        const hash = await getPRStateHash(${JSON.stringify(prUrl)});
+        console.log(JSON.stringify(hash));
+      `
+    );
+
+  const baseline = hashFor([], [], []);
+
+  // An inline finding comment plus the empty COMMENTED review GitHub wraps it
+  // in: neither may move the hash.
+  assert.equal(
+    hashFor(
+      [],
+      [
+        {
+          id: 700,
+          pull_request_review_id: 40,
+          body: reviewerBody,
+          user: { login: "me" },
+        },
+      ],
+      [{ id: 40, state: "COMMENTED", body: "", user: { login: "me" } }]
+    ),
+    baseline
+  );
+
+  // A reviewer conversation comment on the issue surface.
+  assert.equal(
+    hashFor(
+      [{ id: 800, body: reviewerBody, user: { login: "me" } }],
+      [],
+      []
+    ),
+    baseline
+  );
+
+  // The same comment IDs from someone else copying the marker still count, and
+  // so does a wrapping review that owns a non-reviewer comment.
+  assert.notEqual(
+    hashFor(
+      [{ id: 800, body: reviewerBody, user: { login: "participant" } }],
+      [],
+      []
+    ),
+    baseline
+  );
+  assert.notEqual(
+    hashFor(
+      [],
+      [
+        {
+          id: 700,
+          pull_request_review_id: 40,
+          body: reviewerBody,
+          user: { login: "me" },
+        },
+        {
+          id: 701,
+          pull_request_review_id: 40,
+          body: "I disagree.",
+          user: { login: "participant" },
+        },
+      ],
+      [{ id: 40, state: "COMMENTED", body: "", user: { login: "me" } }]
+    ),
+    baseline
+  );
+
+  // A decisive review by the signed-in user is never filtered, whatever its
+  // body says.
+  assert.notEqual(
+    hashFor(
+      [],
+      [],
+      [
+        {
+          id: 41,
+          state: "CHANGES_REQUESTED",
+          body: reviewerBody,
+          user: { login: "me" },
+        },
+      ]
+    ),
+    baseline
+  );
+});
+
+test("a copied reviewer prefix only suppresses when the author shares the reviewer login", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const marker = "**🤖[Cortex City Reviewer]**";
+  const hashFor = (
+    issueComments: Array<Record<string, unknown>>,
+    reviewComments: Array<Record<string, unknown>> = [],
+    reviews: Array<Record<string, unknown>> = []
+  ) =>
+    runGithubScript(
+      workspace,
+      {
+        "api user --jq .login": { stdout: "me" },
+        [prViewKey(prUrl)]: {
+          stdout: JSON.stringify({ headRefOid: "abc123", statusCheckRollup: [] }),
+        },
+        [reviewsKey()]: { stdout: JSON.stringify([reviews]) },
+        [reviewCommentsKey()]: { stdout: JSON.stringify([reviewComments]) },
+        [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
+        [checksKey(prUrl)]: { stdout: "" },
+      },
+      `
+        const hash = await getPRStateHash(${JSON.stringify(prUrl)});
+        console.log(JSON.stringify(hash));
+      `
+    );
+
+  const baseline = hashFor([]);
+
+  // Another participant copying the marker is never suppressed, on either
+  // surface or through a wrapping review.
+  for (const copied of [
+    hashFor([{ id: 800, body: `${marker} Copied.`, user: { login: "octocat" } }]),
+    hashFor(
+      [],
+      [
+        {
+          id: 700,
+          pull_request_review_id: 40,
+          body: `${marker} Copied.`,
+          user: { login: "octocat" },
+        },
+      ],
+      [{ id: 40, state: "COMMENTED", body: "", user: { login: "octocat" } }]
+    ),
+  ]) {
+    assert.notEqual(copied, baseline);
+  }
+
+  // Leading whitespace means a human typed or quoted it, so the anchored match
+  // leaves it as conversation even under the reviewer's own login.
+  assert.notEqual(
+    hashFor([{ id: 801, body: `  ${marker} Quoted.`, user: { login: "me" } }]),
+    baseline
+  );
+  assert.notEqual(
+    hashFor([{ id: 802, body: `> ${marker} Quoted.`, user: { login: "me" } }]),
+    baseline
+  );
+
+  // The accepted residual risk, asserted so it is visible rather than implicit:
+  // on a self-authored PR the human author shares the reviewer's login, so a
+  // human comment that literally starts with the marker is suppressed.
+  assert.equal(
+    hashFor([{ id: 803, body: `${marker} Typed by the author.`, user: { login: "me" } }]),
+    baseline
+  );
+});
+
+test("listReviewerAuthoredComments reports the run's own comments per surface", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const reviewerBody = "**🤖[Cortex City Reviewer]** Reply on the open thread.";
+  const result = runGithubScript(
+    workspace,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [reviewCommentsKey()]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 700,
+              pull_request_review_id: 40,
+              body: reviewerBody,
+              user: { login: "me" },
+              created_at: "2026-05-01T00:30:00.000Z",
+            },
+            {
+              id: 701,
+              pull_request_review_id: 41,
+              body: reviewerBody,
+              user: { login: "me" },
+              created_at: "2026-05-01T00:00:00.000Z",
+            },
+          ],
+        ]),
+      },
+      [issueCommentsKey()]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 800,
+              body: reviewerBody,
+              user: { login: "me" },
+              created_at: "2026-05-01T00:30:00.000Z",
+            },
+            {
+              id: 801,
+              body: "Plain human comment.",
+              user: { login: "me" },
+              created_at: "2026-05-01T00:30:00.000Z",
+            },
+            {
+              id: 802,
+              body: reviewerBody,
+              user: { login: "participant" },
+              created_at: "2026-05-01T00:30:00.000Z",
+            },
+          ],
+        ]),
+      },
+    },
+    `
+      const receipts = await listReviewerAuthoredComments(
+        ${JSON.stringify(prUrl)},
+        "2026-05-01T00:15:00.000Z"
+      );
+      console.log(JSON.stringify(receipts));
+    `
+  );
+
+  assert.deepEqual(
+    result.map(
+      (receipt: { comment_id: number; surface: string }) =>
+        `${receipt.surface}:${receipt.comment_id}`
+    ),
+    ["review_comment:700", "issue:800"]
+  );
+  assert.equal(result[0].author_login, "me");
+  assert.equal(result[0].action_token, undefined);
+  assert.equal(
+    result[0].body_sha256,
+    createHash("sha256").update(reviewerBody).digest("hex")
   );
 });
 

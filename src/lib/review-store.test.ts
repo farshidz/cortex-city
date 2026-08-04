@@ -230,6 +230,59 @@ test("upsertReviewSummary writes a new entry keyed by pr_url", () => {
   assert.equal(persisted[entry.pr_url].review_state, "queued");
 });
 
+test("receipt identity is the surface and comment ID pair", () => {
+  const workspace = createTempWorkspace();
+  const entry = {
+    ...sampleReviewLiteral("https://github.com/acme/widget/pull/1"),
+    reviewer_comment_receipts: [
+      // The same numeric ID on both surfaces is two distinct events; both must
+      // survive normalization.
+      {
+        comment_id: 8123,
+        author_login: "me",
+        body_sha256: "a".repeat(64),
+        surface: "issue",
+      },
+      {
+        comment_id: 8123,
+        author_login: "me",
+        body_sha256: "b".repeat(64),
+        surface: "review_comment",
+      },
+      // Absent surface is the legacy issue form, so this collides with the
+      // first entry and is dropped.
+      {
+        comment_id: 8123,
+        author_login: "me",
+        body_sha256: "c".repeat(64),
+      },
+      // An unrecognized literal is rejected rather than coerced to "issue",
+      // which would let it suppress an unrelated issue comment.
+      {
+        comment_id: 9000,
+        author_login: "me",
+        body_sha256: "d".repeat(64),
+        surface: "issue_comment",
+      },
+    ],
+  };
+  const result = runStoreScript(
+    workspace,
+    `
+      const saved = await store.upsertReviewSummary(${JSON.stringify(entry)});
+      console.log(JSON.stringify({ saved }));
+    `
+  );
+
+  assert.deepEqual(
+    result.saved.reviewer_comment_receipts.map(
+      (receipt: { comment_id: number; surface?: string }) =>
+        `${receipt.surface ?? "issue"}:${receipt.comment_id}`
+    ),
+    ["issue:8123", "review_comment:8123"]
+  );
+});
+
 test("upsertReviewSummary overwrites existing entries with the same pr_url", () => {
   const workspace = createTempWorkspace();
   const entry = sampleReviewLiteral("https://github.com/acme/widget/pull/1");

@@ -26,16 +26,19 @@ import {
   getAuthenticatedUserLogin,
   getMyReviewSignals,
   isStaleReviewerCommentDeliveryError,
+  listReviewerAuthoredComments,
   reviewerCommentCancellationFromStaleError,
   type StaleReviewerCommentDeliveryError,
 } from "./github";
 import {
   appendReviewerCommentCancellation,
+  appendReviewerCommentReceipts,
   buildReviewerCommentBody,
   REVIEWER_GITHUB_COMMENT_PREFIX,
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
   REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
   reviewerCommentBodySha256,
+  reviewerCommentSurfaceOf,
 } from "./review-comments";
 import { readReviewLearnings } from "./review-learnings-store";
 import {
@@ -819,14 +822,25 @@ function appendReviewerCommentReceipt(
   existing: ReviewerCommentReceipt[] | undefined,
   receipt: ReviewerCommentReceipt
 ): ReviewerCommentReceipt[] {
-  return [
-    ...(existing || []).filter(
-      (candidate) =>
-        candidate.action_token !== receipt.action_token &&
-        candidate.comment_id !== receipt.comment_id
-    ),
-    receipt,
-  ];
+  return appendReviewerCommentReceipts(existing, [receipt]);
+}
+
+// Comments the run posted that are not yet receipted. A harvested receipt never
+// replaces an existing one: the application-owned delivery receipts carry an
+// action token that the durable-delivery recovery path looks up.
+function unreceiptedReviewerComments(
+  existing: ReviewerCommentReceipt[] | undefined,
+  observed: ReviewerCommentReceipt[]
+): ReviewerCommentReceipt[] {
+  const known = new Set(
+    (existing || []).map(
+      (receipt) => `${reviewerCommentSurfaceOf(receipt)}:${receipt.comment_id}`
+    )
+  );
+  return observed.filter(
+    (receipt) =>
+      !known.has(`${reviewerCommentSurfaceOf(receipt)}:${receipt.comment_id}`)
+  );
 }
 
 function buildClaudeArgs(
@@ -1228,6 +1242,7 @@ export async function spawnReviewSummary(
   };
 
   const runLock = await acquireReviewRunLock(target.pr_url);
+  const runStartedAt = new Date().toISOString();
   let spawned!: SpawnResult;
   try {
     spawned = spawnRuntime(
@@ -1358,6 +1373,20 @@ export async function spawnReviewSummary(
     let verifiedApprovalSha: string | undefined;
     let verifiedLastReviewSha: string | undefined;
     let preservePendingDelivery = false;
+    // The reviewer posts its findings, replies, and summaries through `gh`
+    // inside the run, so their IDs are only knowable afterwards. Receipting
+    // them keeps reviewer-only activity out of the PR state hash. A failure
+    // here is not fatal: the state hash falls back to matching the reviewer
+    // prefix on the signed-in user's comments.
+    let observedReviewerComments: ReviewerCommentReceipt[] = [];
+    try {
+      observedReviewerComments = await listReviewerAuthoredComments(
+        target.pr_url,
+        runStartedAt
+      );
+    } catch {
+      observedReviewerComments = [];
+    }
     assertReviewRunLockHealthy(runLock);
     let beforeReviewAction = getReviewSummary(target.pr_url);
     if (beforeReviewAction?.current_run_id === runLock.data.token) {
@@ -1686,8 +1715,13 @@ export async function spawnReviewSummary(
             ? undefined
             : agentReviewStatus
           : latestBeforeSave.agent_review_status,
-        reviewer_comment_receipts:
+        reviewer_comment_receipts: appendReviewerCommentReceipts(
           latestBeforeSave.reviewer_comment_receipts,
+          unreceiptedReviewerComments(
+            latestBeforeSave.reviewer_comment_receipts,
+            observedReviewerComments
+          )
+        ),
         reviewer_comment_cancellations:
           latestBeforeSave.reviewer_comment_cancellations,
         pending_reviewer_comment_delivery: preservePendingDelivery
