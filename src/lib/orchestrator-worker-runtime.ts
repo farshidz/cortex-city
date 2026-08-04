@@ -1666,6 +1666,10 @@ async function runReviewPhases(
         return {
           ...current,
           ...prFieldsFromRequest(pr),
+          // Scheduled review rounds never resume a session, so `session_id` is
+          // only an interactive Q&A pointer here. It is still dropped on a
+          // context change: a session that reviewed under different task
+          // context must not answer questions about the new one.
           summary: reviewContextChanged ? "" : current.summary,
           summary_head_sha: reviewContextChanged
             ? undefined

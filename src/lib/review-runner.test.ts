@@ -591,6 +591,7 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
     ...sampleRequest({ head_sha: "previous-head" }),
     summary: "## Summary\nPreviously reviewed.",
     summary_head_sha: "previous-head",
+    session_id: "stored-session",
     generated_at: "2026-05-01T00:10:00.000Z",
     review_status: "needs_review",
     review_state: "needs_review",
@@ -605,6 +606,11 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
   assert.match(prompt, /follow-up round in verification mode, not a full re-review/i);
   assert.match(prompt, /Previously reviewed head: previous-head/);
   assert.match(prompt, /Current head: current-head/);
+  assert.match(prompt, /This session is fresh and has no memory of the earlier rounds/i);
+  assert.match(
+    prompt,
+    /<previous_review>\n## Summary\nPreviously reviewed\.\n<\/previous_review>/
+  );
   assert.match(
     prompt,
     /using GitHub tooling to inspect your own prior reviewer comments/i
@@ -2033,7 +2039,11 @@ test("spawnReviewSummary publishes nothing when the stack slice scope changes mi
           "## Summary\nReviewed under the old slice scope.\n\n## Agent Status\nAgent status: needs_human_decision",
         is_error: false,
       }),
-      sleepMs: 100,
+      // The scope change is written while this run is in flight, so the run has
+      // to outlast a cross-process store write. 100ms lost that race on a loaded
+      // CI runner and failed the review with the stale result instead of
+      // discarding it.
+      sleepMs: 2_000,
     },
   });
   writeJson(ghStateFile, {
@@ -2183,7 +2193,95 @@ test("spawnReviewSummary keeps a mid-flight change request over the run's verdic
   assert.equal(result.persisted.review_state, "changes_requested");
 });
 
-test("summarizePR resumes cached review sessions for changed PRs", () => {
+// The Q&A resume pointer must identify the session that produced the persisted
+// summary. Both of these used to leave it aimed somewhere else.
+function runSessionPointerCase(
+  prefix: string,
+  claudeStdout: Record<string, unknown>,
+  claudeExtra: Record<string, unknown> = {}
+) {
+  const workspace = setupRunnerWorkspace(prefix);
+  const scenarioFile = path.join(workspace, "scenario.json");
+  writeJson(scenarioFile, {
+    claude: { stdout: JSON.stringify(claudeStdout), ...claudeExtra },
+  });
+
+  const request = sampleRequest({ head_sha: "new-head" });
+  const reviewsFile = path.join(workspace, ".cortex", "reviews.json");
+  mkdirSync(path.dirname(reviewsFile), { recursive: true });
+  writeFileSync(
+    reviewsFile,
+    JSON.stringify({
+      [request.pr_url]: {
+        ...sampleRequest({ head_sha: "old-head" }),
+        summary: "old summary",
+        summary_head_sha: "old-head",
+        generated_at: "2026-05-01T00:00:00.000Z",
+        runtime: "claude",
+        effort: "max",
+        model: "claude-sonnet-4-6",
+        session_profile: {
+          runtime: "claude",
+          effort: "max",
+          model: "claude-sonnet-4-6",
+        },
+        session_id: "claude-session-1",
+      },
+    })
+  );
+
+  return runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+}
+
+test("a saved summary never inherits the previous run's session pointer", () => {
+  // A fresh run that reported no session id: the new summary is published, so
+  // the stale pointer must be dropped rather than aimed at the old head.
+  const result = runSessionPointerCase("review-runner-session-pointer-none-", {
+    result: "## Summary\nFresh review of the new head.",
+    is_error: false,
+  });
+
+  assert.equal(result.persisted.summary_head_sha, "new-head");
+  assert.match(result.persisted.summary, /^## Summary\nFresh review/);
+  assert.equal(result.persisted.session_id, undefined);
+});
+
+test("a failed run keeps the pointer to the summary it did not replace", () => {
+  // A failed fresh run that did report a session id: the old summary survives,
+  // so the pointer must stay with it instead of moving to the failed session.
+  const result = runSessionPointerCase(
+    "review-runner-session-pointer-failed-",
+    {
+      session_id: "failed-fresh-session",
+      result: "",
+      is_error: true,
+    },
+    { exitCode: 1, stderr: "claude failed" }
+  );
+
+  assert.equal(result.persisted.summary, "old summary");
+  assert.equal(result.persisted.summary_head_sha, "old-head");
+  assert.ok(result.persisted.error);
+  assert.equal(result.persisted.session_id, "claude-session-1");
+});
+
+test("summarizePR starts a fresh session for a scheduled follow-up and seeds the stored summary", () => {
   const workspace = setupRunnerWorkspace("review-runner-stale-resume-");
   const scenarioFile = path.join(workspace, "scenario.json");
   const argsFile = path.join(workspace, "agent-args.json");
@@ -2259,12 +2357,17 @@ test("summarizePR resumes cached review sessions for changed PRs", () => {
     }
   );
 
-  assert.equal(result.args.args.includes("--resume"), true);
-  assert.equal(result.args.args.includes("claude-session-1"), true);
+  assert.equal(result.args.args.includes("--resume"), false);
+  assert.equal(result.args.args.includes("claude-session-1"), false);
   assert.match(result.args.args.join("\n"), /follow-up round in verification mode/i);
   assert.match(
     result.args.args.join("\n"),
     /Verify each enumerated finding at the current head/i
+  );
+  assert.match(result.args.args.join("\n"), /This session is fresh/i);
+  assert.match(
+    result.args.args.join("\n"),
+    /<previous_review>\nold summary\n<\/previous_review>/
   );
   assert.equal(result.summary.summary_head_sha, "new-head");
   assert.equal(result.summary.session_id, "claude-session-2");
