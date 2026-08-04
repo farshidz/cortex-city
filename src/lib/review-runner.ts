@@ -585,6 +585,48 @@ export function buildReviewWrapperPrompt(
       "scope gate on each follow-up and explicitly withdraw any that asked for",
       "out-of-scope work.",
     ].join(" "),
+    // Convergence rules. These are prompt-only on purpose: the loop they guard
+    // against (a finding family redefined or re-raised until the PR never
+    // converges) is cheapest to test as instructions before adding a durable
+    // findings ledger.
+    [
+      "- Group every finding by root cause. A family is one root cause; two",
+      "symptoms of the same root cause are variants of one family, not two",
+      "findings. A new blocking finding requires a materially distinct root cause,",
+      "or a regression the latest fix introduced.",
+    ].join(" "),
+    [
+      "- When you are unsure whether a finding is a new family or a variant of one",
+      "you already reported, treat it as a variant. Novelty is the claim that needs",
+      "justification: a wrongly merged variant still surfaces in your residual-risk",
+      "summary, while a wrongly new family restarts the review loop.",
+    ].join(" "),
+    [
+      "- Count a family's variants by round, not by case. Every sibling case you",
+      "report together in one finding counts as one reported variant, so the cap",
+      "below never limits the same-round sibling sweep and never converts a family",
+      "you are reporting for the first time.",
+    ].join(" "),
+    [
+      "- Once three separate rounds have each reported a new variant of one family,",
+      "stop reporting further variants of it and convert the family to residual",
+      "risk: reply on its existing threads to say you are converting it, put the",
+      "risk that remains in the generated `## Human Decision` section, and set",
+      "`needs_human_decision` once for it. Do not post a top-level conversion",
+      "comment yourself. Never re-raise a family a human has already ruled on.",
+    ].join(" "),
+    [
+      "- Report the broken rule, not one example of it. When a finding is an",
+      "instance of a violated invariant, state the invariant, test the obvious",
+      "sibling cases in the same round, list every case you found in that one",
+      "finding, and request the fix at the level of the rule plus a regression test",
+      "covering the listed cases.",
+    ].join(" "),
+    [
+      "- Before raising `needs_human_decision`, search your own prior comments on",
+      "this PR for the same question. If a human already answered it, that answer",
+      "is binding scope: apply it and do not ask again.",
+    ].join(" "),
     [
       "- If a broader improvement is valuable but not required for this PR, you may",
       "leave one explicitly non-blocking top-level GitHub comment that recommends a separate task",
@@ -653,13 +695,31 @@ export function buildReviewWrapperPrompt(
   if (followup) {
     sections.push(
       "",
-      "This is a follow-up review, not a full re-review.",
+      "This is a follow-up round in verification mode, not a full re-review.",
       `Previously reviewed head: ${reviewedHeadSha}`,
       `Current head: ${target.head_sha}`,
       [
-        "Verify whether your previous findings were addressed. Then review the",
-        "changes between the previously reviewed head and the current head for",
-        "significant newly introduced issues.",
+        "- Start by using GitHub tooling to inspect your own prior reviewer comments",
+        "and review threads on this PR, and enumerate the findings you reported.",
+      ].join(" "),
+      [
+        "- Verify each enumerated finding at the current head by running the repro or",
+        "check you recorded for it, then report the outcome on the same GitHub",
+        "surface the finding was posted on.",
+      ].join(" "),
+      [
+        "- For a finding on an inline review thread: reply on that thread with what",
+        "you verified and the outcome, and resolve the thread only when the finding",
+        "is fixed at the current head. Leave it unresolved otherwise.",
+      ].join(" "),
+      [
+        "- For a finding in a PR conversation comment, which has no thread and cannot",
+        "be resolved: post a new top-level comment with the outcome. Resolving one is",
+        "never an action you owe, so its absence is not a reason to return `blocked`.",
+      ].join(" "),
+      [
+        "- Limit new discovery to the changes between the previously reviewed head",
+        "and the current head, and gate every new finding on the family rules above.",
       ].join(" "),
       [
         "Do not raise new findings about unchanged code unless the issue is critical.",
@@ -671,7 +731,12 @@ export function buildReviewWrapperPrompt(
     sections.push(
       "",
       "This is an initial review of the current PR state.",
-      `Current head SHA: ${target.head_sha}`
+      `Current head SHA: ${target.head_sha}`,
+      [
+        "This is the round in which to sweep for sibling cases. For every rule you",
+        "find broken, check the whole diff for other places that break the same rule",
+        "now, and report them as one family-level finding.",
+      ].join(" ")
     );
   }
 
