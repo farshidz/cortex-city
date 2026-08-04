@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTask, updateTask, deleteTask, readTasks, readConfig } from "@/lib/store";
 import { removeWorktree } from "@/lib/agent-runner";
 import { getIssue, unlinkTask } from "@/lib/issue-store";
+import { summaryCoversHead } from "@/lib/review-status";
 import { getReviewSummary } from "@/lib/review-store";
 import type { AgentRuntime, LinkedIssueSummary } from "@/lib/types";
 import {
@@ -51,6 +52,10 @@ export async function GET(
         generated_at: matchingTaskReview.generated_at || undefined,
         head_sha: matchingTaskReview.head_sha,
         summary_head_sha: matchingTaskReview.summary_head_sha,
+        // A rebase that preserved the effective diff moves the head without
+        // scheduling another round, so staleness is not a SHA comparison the
+        // client can make for itself.
+        covers_head: summaryCoversHead(matchingTaskReview),
       }
     : undefined;
 

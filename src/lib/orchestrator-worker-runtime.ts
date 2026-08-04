@@ -10,7 +10,9 @@ import {
 } from "./final-task-cleanup";
 import {
   deliverReviewerComment,
+  getLatestForeignCommentAt,
   getPRBaseBranch,
+  getPRDiffHash,
   getPRHeadSha,
   getPRMergeCommitSha,
   getPRStateHash,
@@ -35,9 +37,19 @@ import {
   readReviewSummaryMap,
   upsertReviewSummary,
 } from "./review-store";
+import {
+  REVIEW_DEBOUNCE_DEFAULT_SECONDS,
+  REVIEW_DEBOUNCE_MAX_SECONDS,
+  resolveReviewDebounceMs,
+} from "./review-debounce";
 import { readReviewLearnings } from "./review-learnings-store";
+import { reviewCoversHeadSha } from "./review-status";
 import { spawnReviewRetro } from "./review-learnings-runner";
-import { resolveReviewOpts, spawnReviewSummary } from "./review-runner";
+import {
+  resolveReviewOpts,
+  spawnReviewSummary,
+  type ReviewRoundKind,
+} from "./review-runner";
 import { removeFinalReviewWorkspace } from "./review-workspace";
 import {
   appendReviewerCommentCancellation,
@@ -68,6 +80,12 @@ export const PRUNE_AGE_MS = 24 * 60 * 60 * 1000;
 export const DEAD_OWNED_PID_GRACE_MS = 10_000;
 export const FINAL_CLASSIFICATION_RETRY_MS = 15 * 60 * 1000;
 export const REVIEW_ERROR_RETRY_MS = 5 * 60 * 1000;
+export {
+  REVIEW_DEBOUNCE_DEFAULT_SECONDS,
+  REVIEW_DEBOUNCE_MAX_SECONDS,
+  resolveReviewDebounceMs,
+};
+
 const REVIEW_DECISION_ACTION_INTERRUPTED_ERROR =
   "The reviewer comment delivery was interrupted before its result was saved.";
 
@@ -157,6 +175,10 @@ interface WorkerLogger {
 export interface WorkerRuntimeDeps {
   deleteTask: typeof deleteTask;
   getPRBaseBranch?: typeof getPRBaseBranch;
+  // Absent leaves the effective diff unknown, which falls scheduling back to
+  // comparing head SHAs.
+  getPRDiffHash?: typeof getPRDiffHash;
+  getLatestForeignCommentAt?: typeof getLatestForeignCommentAt;
   getPRHeadSha?: typeof getPRHeadSha;
   getPRMergeCommitSha?: typeof getPRMergeCommitSha;
   getPRStateHash: typeof getPRStateHash;
@@ -190,6 +212,8 @@ export interface WorkerRuntimeDeps {
 export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   deleteTask,
   getPRBaseBranch,
+  getPRDiffHash,
+  getLatestForeignCommentAt,
   getPRHeadSha,
   getPRMergeCommitSha,
   getPRStateHash,
@@ -374,7 +398,11 @@ function shouldDeferBuilderForStoredReviewUrl(
   // explicit implementation work while the reviewer configuration is repaired.
   if (review.error) return false;
   if (!review || !review.summary?.trim()) return true;
-  return summaryHeadShaFor(review) !== currentHeadSha;
+  // An unchanged rebase leaves `summary_head_sha` at the originally reviewed
+  // commit on purpose, and the scheduler will not run another round for it. A raw
+  // SHA comparison here would defer the builder forever, including for an
+  // explicit manual instruction or a participant-feedback wake.
+  return !reviewCoversHeadSha(review, currentHeadSha);
 }
 
 function shouldDeferBuilderForStoredReview(
@@ -436,6 +464,101 @@ export function shouldRetryErroredReview(
   }
   const failedAt = review.error_at ? new Date(review.error_at).getTime() : NaN;
   return !Number.isFinite(failedAt) || now - failedAt >= REVIEW_ERROR_RETRY_MS;
+}
+
+export type ReviewRoundReason =
+  | "initial"
+  | "error_retry"
+  | "diff_changed"
+  | "conversation"
+  | "debouncing"
+  | "error_backoff"
+  | "up_to_date";
+
+export interface ReviewRoundDecision {
+  round?: ReviewRoundKind;
+  reason: ReviewRoundReason;
+}
+
+export interface ReviewRoundInput {
+  review?: ReviewSummary;
+  // Identity of the effective diff at the review row's current head. Empty or
+  // absent means GitHub could not answer.
+  diffHash?: string;
+  // When the head this diff belongs to was first observed, shared across a
+  // stack. Absent disables the debounce rather than delaying indefinitely.
+  headStableSinceMs?: number;
+  // Newest comment by anyone other than the reviewer, or "" / absent when the
+  // caller has not looked yet.
+  latestConversationAt?: string;
+  config: Pick<
+    ReturnType<typeof readConfig>,
+    "review_debounce_seconds" | "review_runtime" | "review_effort" | "review_model" | "default_agent_runner" | "default_codex_model" | "default_codex_effort" | "default_claude_model" | "default_claude_effort"
+  >;
+  now?: number;
+}
+
+// Whether the stored summary already covers the code in front of us. An
+// unavailable diff identity falls back to the head SHA, so an unknown resolves
+// to running a review rather than skipping one.
+function summaryCoversDiff(review: ReviewSummary, diffHash?: string): boolean {
+  if (diffHash && review.summary_diff_hash) {
+    return review.summary_diff_hash === diffHash;
+  }
+  return summaryHeadShaFor(review) === review.head_sha;
+}
+
+function hasUnansweredConversation(
+  review: ReviewSummary,
+  latestConversationAt?: string
+): boolean {
+  if (!latestConversationAt) return false;
+  const latestMs = new Date(latestConversationAt).getTime();
+  if (!Number.isFinite(latestMs)) return false;
+  const seenMs = review.last_conversation_seen_at
+    ? new Date(review.last_conversation_seen_at).getTime()
+    : NaN;
+  if (!Number.isFinite(seenMs)) return true;
+  return latestMs > seenMs;
+}
+
+// The single scheduling gate for review work on one PR. Head SHA alone is not a
+// trigger: a stack rebase moves every head in the stack without changing any
+// effective diff, and re-reviewing those cost ~180M raw input tokens in a day.
+export function decideReviewRound(
+  input: ReviewRoundInput
+): ReviewRoundDecision {
+  const now = input.now ?? Date.now();
+  const review = input.review;
+  if (!review) return { round: "review", reason: "initial" };
+  if (review.error) {
+    return shouldRetryErroredReview(review, input.config as ReturnType<typeof readConfig>, now)
+      ? { round: "review", reason: "error_retry" }
+      : { reason: "error_backoff" };
+  }
+
+  const hasSummary = Boolean(review.summary?.trim());
+  if (!hasSummary || !summaryCoversDiff(review, input.diffHash)) {
+    const debounceMs = resolveReviewDebounceMs(input.config);
+    const stableSince = input.headStableSinceMs;
+    if (
+      debounceMs > 0 &&
+      typeof stableSince === "number" &&
+      Number.isFinite(stableSince) &&
+      now - stableSince < debounceMs
+    ) {
+      return { reason: "debouncing" };
+    }
+    return {
+      round: "review",
+      reason: hasSummary ? "diff_changed" : "initial",
+    };
+  }
+
+  if (hasUnansweredConversation(review, input.latestConversationAt)) {
+    return { round: "reply", reason: "conversation" };
+  }
+  return { reason: "up_to_date" };
 }
 
 let activeRetroPid: number | undefined;
@@ -1220,11 +1343,11 @@ export async function pollOnce(
       if (automaticReviewEnabled) {
         if (request) {
           taskReviewRequests.push(request);
-          const reviewedHeadSha = cached ? summaryHeadShaFor(cached) : undefined;
           if (cached?.current_run_pid != null) {
             deferForPendingReview = true;
           } else if (
-            (!cached?.summary?.trim() || reviewedHeadSha !== request.head_sha) &&
+            (!cached?.summary?.trim() ||
+              !reviewCoversHeadSha(cached, request.head_sha)) &&
             !cached?.error
           ) {
             deferForPendingReview = true;
@@ -1344,11 +1467,10 @@ export async function pollOnce(
         if (automaticReviewEnabled) {
           if (request) {
             taskReviewRequests.push(request);
-            const reviewedHeadSha = cached ? summaryHeadShaFor(cached) : undefined;
             if (cached?.current_run_pid != null) return;
             if (
               (!cached?.summary?.trim() ||
-                reviewedHeadSha !== request.head_sha) &&
+                !reviewCoversHeadSha(cached, request.head_sha)) &&
               !cached?.error
             ) {
               return;
@@ -1635,7 +1757,40 @@ async function runReviewPhases(
   }
   const openReviewRequests = [...requestsByUrl.values()];
 
+  // Identify each PR's effective diff (base...head). Only a head move can
+  // change it, so a converged PR costs no GitHub calls here. A base branch that
+  // moves under an unchanged head is not detected — no more and no less than
+  // the head-SHA scheduling this replaces.
+  const cachedBeforeDiffIdentity = deps.readReviewSummaryMap();
+  const diffHashes = new Map<string, string>();
+  await Promise.all(
+    openReviewRequests.map(async (pr) => {
+      const cached = cachedBeforeDiffIdentity[pr.pr_url];
+      if (
+        cached?.effective_diff_hash &&
+        cached.effective_diff_head_sha === pr.head_sha
+      ) {
+        diffHashes.set(pr.pr_url, cached.effective_diff_hash);
+        return;
+      }
+      if (!deps.getPRDiffHash) return;
+      try {
+        // The head this identity is about to be recorded against, so a head move
+        // during the read yields no identity instead of the wrong one.
+        const hash = await deps.getPRDiffHash(pr.pr_url, pr.head_sha);
+        if (hash) diffHashes.set(pr.pr_url, hash);
+      } catch (error) {
+        deps.logger.error(
+          `[worker] Failed to identify the effective diff for ${pr.pr_url}:`,
+          error
+        );
+      }
+    })
+  );
+
+  const observedAt = new Date().toISOString();
   for (const pr of openReviewRequests) {
+    const diffHash = diffHashes.get(pr.pr_url);
     await mutateStoredReview(deps, pr.pr_url, (current) => {
       if (
         refreshOnlyTaskUrls.has(pr.pr_url) &&
@@ -1650,6 +1805,11 @@ async function runReviewPhases(
           ...prFieldsFromRequest(pr),
           summary: "",
           generated_at: "",
+          effective_diff_hash: diffHash || undefined,
+          effective_diff_head_sha: diffHash ? pr.head_sha : undefined,
+          // No debounce anchor on a PR we have only just started watching: we
+          // cannot know how long its head has been still, and an initial review
+          // must not wait on a window it never entered.
         };
       }
       const reviewContextChanged =
@@ -1663,6 +1823,25 @@ async function runReviewPhases(
         current.task_stack_size !== pr.task_stack_size ||
         current.task_pr_scope !== pr.task_pr_scope;
       if (current.head_sha !== pr.head_sha) {
+        // A rebase moves the head without changing the effective diff. The
+        // verdict is about the diff, so it survives; only a diff that is known to
+        // have changed clears it.
+        //
+        // A row that had an identity and got none this poll is looking at a
+        // transient GitHub failure, not at evidence the diff changed. Clearing
+        // there would lose the verdict permanently: the next successful poll
+        // reads the same hash back, calls the row up to date, and never runs a
+        // round to restore it. A row that never had an identity gets no such
+        // benefit — a head move is then simply new, unreviewed code.
+        const diffKnownUnchanged = Boolean(
+          diffHash &&
+            current.effective_diff_hash &&
+            diffHash === current.effective_diff_hash
+        );
+        const diffIdentityUnavailable = Boolean(
+          !diffHash && current.effective_diff_hash
+        );
+        const verdictSurvives = diffKnownUnchanged || diffIdentityUnavailable;
         return {
           ...current,
           ...prFieldsFromRequest(pr),
@@ -1674,12 +1853,27 @@ async function runReviewPhases(
           summary_head_sha: reviewContextChanged
             ? undefined
             : summaryHeadShaFor(current),
+          summary_diff_hash: reviewContextChanged
+            ? undefined
+            : current.summary_diff_hash,
+          effective_diff_hash: reviewContextChanged
+            ? undefined
+            : diffHash || undefined,
+          effective_diff_head_sha:
+            !reviewContextChanged && diffHash ? pr.head_sha : undefined,
+          head_first_seen_at: observedAt,
+          last_conversation_seen_at: reviewContextChanged
+            ? undefined
+            : current.last_conversation_seen_at,
           generated_at: reviewContextChanged ? "" : current.generated_at,
           session_id: reviewContextChanged ? undefined : current.session_id,
           session_profile: reviewContextChanged
             ? undefined
             : current.session_profile,
-          agent_review_status: undefined,
+          agent_review_status:
+            reviewContextChanged || !verdictSurvives
+              ? undefined
+              : current.agent_review_status,
           error: undefined,
           error_at: undefined,
           followups: reviewContextChanged ? [] : current.followups,
@@ -1703,7 +1897,20 @@ async function runReviewPhases(
         current.label_only !== pr.label_only ||
         current.title !== pr.title ||
         current.updated_at !== pr.updated_at;
-      if (!wasFinal && !reviewShaChanged && !sourceMetadataChanged && !hadFinalLookup) {
+      // A freshly computed diff identity still needs one write at an otherwise
+      // unchanged head.
+      const diffIdentityChanged = Boolean(
+        diffHash &&
+          (current.effective_diff_hash !== diffHash ||
+            current.effective_diff_head_sha !== pr.head_sha)
+      );
+      if (
+        !wasFinal &&
+        !reviewShaChanged &&
+        !sourceMetadataChanged &&
+        !hadFinalLookup &&
+        !diffIdentityChanged
+      ) {
         return undefined;
       }
       // An approval going set -> undefined means the human requested changes
@@ -1717,6 +1924,21 @@ async function runReviewPhases(
         summary_head_sha: reviewContextChanged
           ? undefined
           : current.summary_head_sha,
+        summary_diff_hash: reviewContextChanged
+          ? undefined
+          : current.summary_diff_hash,
+        effective_diff_hash: reviewContextChanged
+          ? undefined
+          : diffHash || current.effective_diff_hash,
+        effective_diff_head_sha: reviewContextChanged
+          ? undefined
+          : diffHash
+            ? pr.head_sha
+            : current.effective_diff_head_sha,
+        head_first_seen_at: current.head_first_seen_at,
+        last_conversation_seen_at: reviewContextChanged
+          ? undefined
+          : current.last_conversation_seen_at,
         generated_at: reviewContextChanged ? "" : current.generated_at,
         session_id: reviewContextChanged ? undefined : current.session_id,
         session_profile: reviewContextChanged
@@ -1739,6 +1961,20 @@ async function runReviewPhases(
 
   const maxParallelReviews = Math.max(1, config.max_parallel_reviews ?? 2);
   let reviewSlots = maxParallelReviews - activeReviewPids.size;
+  // Every PR in a stack shares one debounce window: a push anywhere in the
+  // stack rebases the entries above it, so none of them has settled yet.
+  const stackHeadStableSince = new Map<string, number>();
+  for (const review of Object.values(deps.readReviewSummaryMap())) {
+    if ((review.source || "inbound") !== "task" || !review.task_id) continue;
+    const seenMs = review.head_first_seen_at
+      ? new Date(review.head_first_seen_at).getTime()
+      : NaN;
+    if (!Number.isFinite(seenMs)) continue;
+    const current = stackHeadStableSince.get(review.task_id);
+    if (current == null || seenMs > current) {
+      stackHeadStableSince.set(review.task_id, seenMs);
+    }
+  }
   if (reviewSlots > 0) {
     for (const pr of openReviewRequests) {
       if (
@@ -1769,21 +2005,47 @@ async function runReviewPhases(
       ) {
         continue;
       }
-      const needsSummary =
-        !cached ||
-        Boolean(cached.error) ||
-        !cached.summary ||
-        summaryHeadShaFor(cached) !== cached.head_sha;
+      const diffHash = diffHashes.get(pr.pr_url);
+      const headStableSinceMs =
+        (cached?.source === "task" && cached.task_id
+          ? stackHeadStableSince.get(cached.task_id)
+          : undefined) ??
+        (cached?.head_first_seen_at
+          ? new Date(cached.head_first_seen_at).getTime()
+          : undefined);
+      const roundInput = {
+        review: cached,
+        diffHash,
+        headStableSinceMs,
+        config,
+      };
+      let decision = decideReviewRound(roundInput);
+      // Looking for conversation costs two GitHub calls, so it only happens once
+      // the code itself needs no round — which is the steady state.
       if (
-        !needsSummary ||
-        (cached.error && !shouldRetryErroredReview(cached, config))
+        !decision.round &&
+        decision.reason === "up_to_date" &&
+        deps.getLatestForeignCommentAt
       ) {
-        continue;
+        let latestConversationAt = "";
+        try {
+          latestConversationAt = await deps.getLatestForeignCommentAt(pr.pr_url);
+        } catch (error) {
+          deps.logger.error(
+            `[worker] Failed to read conversation timestamps for ${pr.pr_url}:`,
+            error
+          );
+        }
+        if (latestConversationAt) {
+          decision = decideReviewRound({ ...roundInput, latestConversationAt });
+        }
       }
+      if (!decision.round) continue;
+      const round: ReviewRoundKind = decision.round;
       try {
         const { pid, done } = await deps.spawnReviewSummary(
           pr,
-          {},
+          { round, diff_hash: diffHash },
           async (summary) => {
             activeReviewPids.delete(pr.pr_url);
             if (
@@ -1819,7 +2081,9 @@ async function runReviewPhases(
         });
         activeReviewPids.set(pr.pr_url, pid);
         reviewSlots--;
-        deps.logger.log(`[worker] Spawned review summary for ${pr.pr_url}`);
+        deps.logger.log(
+          `[worker] Spawned ${round} round for ${pr.pr_url} (${decision.reason})`
+        );
       } catch (error) {
         deps.logger.error(
           `[worker] Failed to spawn review summary for ${pr.pr_url}:`,

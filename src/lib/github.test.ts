@@ -75,7 +75,7 @@ function runGithubScript(
     [
       "--eval",
       [
-        `import { deliverReviewerComment, getPRHeadSha, getPRStateHash, getSubmittedCommentIds, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { deliverReviewerComment, getPRHeadSha, getPRStateHash, getSubmittedCommentIds, getLatestForeignCommentAt, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
         "(async () => {",
         body,
         "})().catch((error) => {",
@@ -653,6 +653,145 @@ test("a copied reviewer prefix only suppresses when the author shares the review
   assert.equal(
     hashFor([{ id: 803, body: `${marker} Typed by the author.`, user: { login: "me" } }]),
     baseline
+  );
+});
+
+test("the conversation clock tracks published foreign feedback only", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const marker = "**🤖[Cortex City Reviewer]**";
+  const latestFor = (
+    reviews: Array<Record<string, unknown>>,
+    reviewComments: Array<Record<string, unknown>> = [],
+    issueComments: Array<Record<string, unknown>> = []
+  ) =>
+    runGithubScript(
+      workspace,
+      {
+        "api user --jq .login": { stdout: "me" },
+        [reviewsKey()]: { stdout: JSON.stringify([reviews]) },
+        [reviewCommentsKey()]: { stdout: JSON.stringify([reviewComments]) },
+        [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
+      },
+      `
+        const latest = await getLatestForeignCommentAt(${JSON.stringify(prUrl)});
+        console.log(JSON.stringify(latest));
+      `
+    );
+
+  // A submitted review whose feedback is only in its body is conversation.
+  assert.equal(
+    latestFor([
+      {
+        id: 40,
+        state: "CHANGES_REQUESTED",
+        body: "Please split this.",
+        user: { login: "octocat" },
+        submitted_at: "2026-05-01T00:30:00.000Z",
+      },
+    ]),
+    "2026-05-01T00:30:00.000Z"
+  );
+
+  // A pending draft is not published, so neither its own body nor its inline
+  // comments may start a reply round.
+  assert.equal(
+    latestFor(
+      [
+        {
+          id: 41,
+          state: "PENDING",
+          body: "Draft thoughts.",
+          user: { login: "octocat" },
+          submitted_at: "2026-05-01T00:30:00.000Z",
+        },
+      ],
+      [
+        {
+          id: 700,
+          pull_request_review_id: 41,
+          body: "Draft inline note.",
+          user: { login: "octocat" },
+          created_at: "2026-05-01T00:30:00.000Z",
+        },
+      ]
+    ),
+    ""
+  );
+
+  // The same inline comment counts once its review is submitted.
+  assert.equal(
+    latestFor(
+      [
+        {
+          id: 41,
+          state: "COMMENTED",
+          body: "",
+          user: { login: "octocat" },
+          submitted_at: "2026-05-01T00:29:00.000Z",
+        },
+      ],
+      [
+        {
+          id: 700,
+          pull_request_review_id: 41,
+          body: "Inline note.",
+          user: { login: "octocat" },
+          created_at: "2026-05-01T00:30:00.000Z",
+        },
+      ]
+    ),
+    "2026-05-01T00:30:00.000Z"
+  );
+
+  // The reviewer talking to itself is not conversation, on any surface.
+  assert.equal(
+    latestFor(
+      [
+        {
+          id: 42,
+          state: "COMMENTED",
+          body: `${marker} My own review body.`,
+          user: { login: "me" },
+          submitted_at: "2026-05-01T00:30:00.000Z",
+        },
+      ],
+      [],
+      [
+        {
+          id: 800,
+          body: `${marker} My own summary.`,
+          user: { login: "me" },
+          created_at: "2026-05-01T00:31:00.000Z",
+        },
+      ]
+    ),
+    ""
+  );
+
+  // The newest published item wins.
+  assert.equal(
+    latestFor(
+      [
+        {
+          id: 43,
+          state: "COMMENTED",
+          body: "Earlier review body.",
+          user: { login: "octocat" },
+          submitted_at: "2026-05-01T00:10:00.000Z",
+        },
+      ],
+      [],
+      [
+        {
+          id: 801,
+          body: "Later comment.",
+          user: { login: "octocat" },
+          created_at: "2026-05-01T00:40:00.000Z",
+        },
+      ]
+    ),
+    "2026-05-01T00:40:00.000Z"
   );
 });
 

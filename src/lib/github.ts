@@ -52,6 +52,7 @@ interface ReviewItem {
   state?: string;
   body?: string | null;
   user?: { login?: string };
+  submitted_at?: string;
 }
 
 interface IssueCommentItem {
@@ -365,6 +366,160 @@ export async function updatePRBranch(prUrl: string): Promise<void> {
   exec(
     `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/update-branch -X PUT 2>&1`
   );
+}
+
+// Reduce a unified diff to the content that decides whether it is the same
+// change, following `git patch-id --stable`: file identity and mode transitions,
+// plus every hunk body line — context included — with whitespace stripped, and
+// with blob hashes and hunk headers dropped. Dropping only the line numbers is
+// what makes the identity survive a rebase; keeping context is what keeps two
+// identical edits in different places apart.
+//
+// Returning "" means the diff cannot be identified, which is the fail-closed
+// answer: callers then fall back to head SHAs and review again rather than
+// treating two unknowns as the same change. A binary diff is exactly that case —
+// `gh pr diff` reports only that the files differ, so no revision of a binary is
+// distinguishable from any other.
+function normalizedDiffIdentity(diff: string): string | undefined {
+  const parts: string[] = [];
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("Binary files ") || line === "GIT binary patch") {
+      return undefined;
+    }
+    if (
+      line.startsWith("diff --git ") ||
+      line.startsWith("old mode ") ||
+      line.startsWith("new mode ") ||
+      line.startsWith("new file mode ") ||
+      line.startsWith("deleted file mode ") ||
+      line.startsWith("rename from ") ||
+      line.startsWith("rename to ")
+    ) {
+      parts.push(line.trim());
+      continue;
+    }
+    if (
+      line.startsWith("index ") ||
+      line.startsWith("--- ") ||
+      line.startsWith("+++ ") ||
+      line.startsWith("@@") ||
+      line.startsWith("similarity index ") ||
+      line.startsWith("\\")
+    ) {
+      continue;
+    }
+    if (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) {
+      const stripped = line.slice(1).replace(/\s+/g, "");
+      // A blank context line carries nothing and its presence shifts with
+      // reformatting, so only its marker would be recorded. Skip it.
+      if (line.startsWith(" ") && !stripped) continue;
+      parts.push(`${line[0]}${stripped}`);
+    }
+  }
+  return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+export function reviewDiffIdentityHash(diff: string): string {
+  const normalized = normalizedDiffIdentity(diff);
+  if (!normalized) return "";
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+export async function getPRDiffHash(
+  prUrl: string,
+  // The head this identity is about to be recorded against. `gh pr diff`
+  // resolves whatever the PR points at when it runs, so without this a head move
+  // mid-poll would tag the new head's diff onto the old identity, or the reverse.
+  expectedHeadSha?: string
+): Promise<string> {
+  if (!parsePRUrl(prUrl)) return "";
+  const result = await execFileResult("gh", ["pr", "diff", prUrl]);
+  if (!result.ok) return "";
+  const hash = reviewDiffIdentityHash(result.stdout);
+  if (!hash || !expectedHeadSha) return hash;
+  // Confirm the target held still across the read. An unreadable or moved head
+  // yields no identity, which schedules a review instead of trusting this one.
+  const observedHeadSha = await getPRHeadSha(prUrl);
+  return observedHeadSha === expectedHeadSha ? hash : "";
+}
+
+// The newest published conversation on this PR that the reviewer did not author,
+// or "" when there is none and when GitHub could not answer. Drives the
+// reply-round trigger, so a reviewer comment never counts as someone talking to
+// it, an unsubmitted draft never counts as published, and a submitted review
+// whose feedback is only in its body is not missed.
+export async function getLatestForeignCommentAt(prUrl: string): Promise<string> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return "";
+
+  const [reviews, comments, issueComments] = await Promise.all([
+    execPaginatedArrayStrict<ReviewItem>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
+    ),
+    execPaginatedArrayStrict<ReviewCommentItem>(
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
+    ),
+    execPaginatedArrayStrict<IssueCommentItem>(
+      `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
+    ),
+  ]);
+  if (!reviews || !comments || !issueComments) return "";
+
+  const identity = await reviewerCommentIdentity(prUrl, [
+    ...comments,
+    ...issueComments,
+    ...reviews,
+  ]);
+  const submittedIds = new Set(
+    reviews
+      .filter((review) => review.state !== "PENDING")
+      .map((review) => review.id)
+  );
+  let latest = "";
+  let latestMs = -Infinity;
+  const consider = (timestamp?: string) => {
+    const at = (timestamp || "").trim();
+    const atMs = at ? new Date(at).getTime() : NaN;
+    if (!Number.isFinite(atMs) || atMs <= latestMs) return;
+    latest = at;
+    latestMs = atMs;
+  };
+  const considerComments = (
+    surface: ReviewerCommentSurface,
+    items: Array<{
+      id: number;
+      body?: string | null;
+      user?: { login?: string };
+      created_at?: string;
+    }>
+  ) => {
+    for (const item of items) {
+      if (isReviewerAuthoredComment(identity, surface, item)) continue;
+      consider(item.created_at);
+    }
+  };
+  // An inline comment counts only once its owning review is submitted, which is
+  // the same contract the PR state hash uses.
+  considerComments(
+    "review_comment",
+    comments.filter((comment) =>
+      isCommentFromSubmittedReview(comment, submittedIds)
+    )
+  );
+  considerComments("issue", issueComments);
+  for (const review of reviews) {
+    if (review.state === "PENDING") continue;
+    if (!(review.body || "").trim()) continue;
+    if (
+      identity.authorLogin &&
+      review.user?.login === identity.authorLogin &&
+      isReviewerAuthoredCommentBody(review.body)
+    ) {
+      continue;
+    }
+    consider(review.submitted_at);
+  }
+  return latest;
 }
 
 export async function getPRStatus(prUrl: string): Promise<PRStatus> {

@@ -76,6 +76,7 @@ type TaskDetail = Task & {
     generated_at?: string;
     head_sha: string;
     summary_head_sha?: string;
+    covers_head?: boolean;
   };
   automatic_review_error?: string;
   automatic_review_error_at?: string;
@@ -733,9 +734,7 @@ export default function TaskDetailPage({
                   <p className="text-xs text-muted-foreground">
                     Last reviewed{" "}
                     {new Date(task.automatic_review.generated_at).toLocaleString()}
-                    {task.automatic_review.summary_head_sha &&
-                    task.automatic_review.summary_head_sha !==
-                      task.automatic_review.head_sha
+                    {task.automatic_review.covers_head === false
                       ? task.reviewer_agent_enabled === false
                         ? " · New commits since this review"
                         : " · New commits are awaiting review"

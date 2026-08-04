@@ -193,6 +193,49 @@ test("config route reads and updates Cortex config", () => {
   );
 });
 
+test("config route enforces the review debounce bounds", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const configRoute = await loadRoute("./src/app/api/config/route.ts");
+      const configPath = path.join(cortexDir, "config.json");
+      const put = (body) =>
+        configRoute.PUT(
+          request("http://localhost/api/config", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          })
+        );
+
+      // The maximum the Settings input advertises is the maximum this route
+      // accepts, since HTML constraints do not reach a custom save path.
+      const atMax = await json(await put({ review_debounce_seconds: 3600 }));
+      assert.equal(atMax.body.review_debounce_seconds, 3600);
+      assert.equal(readJson(configPath).review_debounce_seconds, 3600);
+
+      const zero = await json(await put({ review_debounce_seconds: 0 }));
+      assert.equal(zero.body.review_debounce_seconds, 0);
+
+      await put({ review_debounce_seconds: 120 });
+      for (const invalid of [3601, 36000, 1e15, -1, 12.5, "300", null, {}]) {
+        const rejected = await json(await put({ review_debounce_seconds: invalid }));
+        if (invalid === null) {
+          // An explicit null clears the override rather than failing.
+          assert.equal("review_debounce_seconds" in rejected.body, false);
+          assert.equal("review_debounce_seconds" in readJson(configPath), false);
+          await put({ review_debounce_seconds: 120 });
+          continue;
+        }
+        assert.equal(rejected.status, 400);
+        assert.match(rejected.body.error, /review_debounce_seconds/);
+        // A rejected write leaves the persisted value alone rather than
+        // silently clearing it.
+        assert.equal(readJson(configPath).review_debounce_seconds, 120);
+      }
+    `)
+  );
+});
+
 test("config route persists and clears reviewer model overrides safely", () => {
   runRouteAssertions(
     withCortexState(`
@@ -798,6 +841,7 @@ test("task detail route exposes task-owned automatic review results", () => {
         generated_at: "2026-05-01T00:11:00.000Z",
         head_sha: "head-78",
         summary_head_sha: "head-78",
+        covers_head: true,
       });
       assert.equal(response.body.automatic_review_error, undefined);
     `)
