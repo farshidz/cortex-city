@@ -2111,6 +2111,13 @@ async function runReviewPhases(
               summary.source === "task" &&
               summary.task_id &&
               summary.agent_review_status === "needs_author_changes" &&
+              // A round that handed this diff to a tier-2 pass preserved the
+              // standing verdict without standing behind it, so the verdict is
+              // not actionable until that pass replaces it. Waking the author
+              // here would send them after a finding the conversation may have
+              // just settled, and the resumed builder runs before review phases
+              // on the next poll, delaying the round that would have said so.
+              !summary.pending_tier2_reason &&
               // Any tier's round covering the current diff is actionable; a
               // tier-1 round reports one without rewriting the summary.
               summaryCoversHead(summary)
