@@ -173,9 +173,12 @@ const REVIEW_AGENT_STATUSES: ReviewAgentStatus[] = [
 
 // A reply round answers conversation at an unchanged diff. It may not produce a
 // terminal verdict, so its status space is separate and small: `replied` leaves
-// the standing verdict alone, and only a material discovery escalates.
+// the standing verdict alone, `resolved` reports that the conversation settled it
+// and hands the diff to tier 2 to replace it, and only a material discovery
+// escalates.
 export const REVIEW_REPLY_STATUSES = [
   "replied",
+  "resolved",
   "needs_human_decision",
   "blocked",
 ] as const;
@@ -891,6 +894,19 @@ export function buildReviewReplyPrompt(
     "<previous_review>",
     cached?.summary?.trim() || "(not recorded)",
     "</previous_review>",
+    // Named explicitly so `resolved` is usable. It is also inside the review text
+    // above, but which of those lines is the standing verdict — as opposed to a
+    // status quoted in the prose — is not something the round should have to
+    // infer.
+    ...(cached?.agent_review_status
+      ? [
+          [
+            "Standing verdict from your last review round:",
+            `\`${cached.agent_review_status}\`.`,
+            "It stands until a full review round replaces it.",
+          ].join(" "),
+        ]
+      : []),
     [
       "- Read the comments and review threads added since your last round, and",
       "reply on the existing thread each one belongs to.",
@@ -925,6 +941,13 @@ export function buildReviewReplyPrompt(
     [
       "- Use `replied` when you answered the conversation and it surfaced nothing",
       "material. This leaves the standing review verdict as it is.",
+    ].join(" "),
+    [
+      "- Use `resolved` when the conversation settled the standing verdict above:",
+      "the change or decision that verdict was waiting on has happened, so the",
+      "verdict no longer describes this PR. Cortex City then queues a full review",
+      "round to replace it. Do not declare the PR ready yourself, and do not use",
+      "this status merely because you answered a question — `replied` covers that.",
     ].join(" "),
     [
       "- Use `needs_human_decision` when the conversation surfaced something",
@@ -1778,15 +1801,29 @@ export async function spawnReviewSummary(
           ? "escalate"
           : parseReviewTier1Status(finalOutput.result_text) || "escalate"
       : undefined;
+    // A reply round that reports `resolved` says the conversation settled the
+    // standing verdict: the change or decision that verdict was waiting on has
+    // happened. It may not clear the verdict itself, because only a tier-2 round
+    // may declare a PR ready, so it hands the diff on exactly as a tier-1 round
+    // does. Without that hand-off a settled verdict stands forever — `replied`
+    // leaves it alone by design, and scheduling then sees a covered diff with no
+    // unanswered conversation and runs nothing further.
+    const replyResolvedStandingVerdict =
+      replyRound &&
+      !cheapTierInfrastructureFailure &&
+      !cheapTierRunFailed &&
+      replyStatus === "resolved";
     // A cheap reply round never publishes a terminal verdict. Anything material
     // it found, any ambiguity in what it reported, and any failure to finish
     // becomes an escalation for the tier-2 round to resolve and to own the
-    // human-decision event.
+    // human-decision event. A `resolved` reply already carries its own hand-off
+    // to the same round, so it is recorded as that rather than as an escalation.
     const cheapReplyEscalates =
       replyRound &&
       cheapTierRound &&
       !cheapTierInfrastructureFailure &&
-      (cheapTierRunFailed || replyStatus !== "replied");
+      (cheapTierRunFailed ||
+        (replyStatus !== "replied" && !replyResolvedStandingVerdict));
     const runtimeSuccessful = cheapTierRound
       ? !cheapTierInfrastructureFailure
       : !finalOutput.error && !replyRoundError;
@@ -2136,11 +2173,18 @@ export async function spawnReviewSummary(
             : tier1Status === "escalate"
               ? ("escalate" as const)
               : undefined
-          : cheapReplyEscalates
-            ? ("escalate" as const)
-            : replyRound
-              ? latestBeforeSave.pending_tier2_reason
-              : undefined;
+          : // A verdict of `ready_for_human_approval` needs no re-derivation, so a
+            // `resolved` reply against one queues nothing. Skipping it also keeps
+            // a reply round on an already-clean PR from re-running a full review
+            // every time someone comments.
+            replyResolvedStandingVerdict &&
+              latestBeforeSave.agent_review_status !== "ready_for_human_approval"
+            ? ("conversation_resolved" as const)
+            : cheapReplyEscalates
+              ? ("escalate" as const)
+              : replyRound
+                ? latestBeforeSave.pending_tier2_reason
+                : undefined;
       return {
         // Reconciliation may discover a new HEAD or change review context while
         // the agent is running. Keep the latest identity; a changed context is

@@ -481,6 +481,7 @@ export type ReviewRoundReason =
   | "conversation"
   | "tier1_verified"
   | "tier1_escalated"
+  | "reply_resolved"
   | "debouncing"
   | "error_backoff"
   | "up_to_date";
@@ -576,8 +577,9 @@ export function decideReviewRound(
     };
   }
 
-  // A tier-1 round handed this diff on. `fixes_verified` still gets the full
-  // pass: `ready_for_human_approval` may only come from tier 2.
+  // An earlier round handed this diff on. `fixes_verified` and a reply round's
+  // `conversation_resolved` still get the full pass: `ready_for_human_approval`
+  // may only come from tier 2.
   if (tier2Pending) {
     return {
       round: "review",
@@ -585,7 +587,9 @@ export function decideReviewRound(
       reason:
         review.pending_tier2_reason === "fixes_verified"
           ? "tier1_verified"
-          : "tier1_escalated",
+          : review.pending_tier2_reason === "conversation_resolved"
+            ? "reply_resolved"
+            : "tier1_escalated",
     };
   }
 

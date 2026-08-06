@@ -519,10 +519,11 @@ test("decideReviewRound keeps discovery and terminal passes on tier 2", () => {
     }),
     { round: "review", tier: 2, reason: "error_retry" }
   );
-  // Both tier-1 hand-offs run tier 2 at the same diff.
+  // Every hand-off runs tier 2 at the same diff, including a reply round's.
   for (const [reason, expected] of [
     ["fixes_verified", "tier1_verified"],
     ["escalate", "tier1_escalated"],
+    ["conversation_resolved", "reply_resolved"],
   ] as const) {
     assert.deepEqual(
       decideReviewRound({
