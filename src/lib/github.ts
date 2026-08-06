@@ -887,10 +887,16 @@ export async function drainMyPendingReview(
   // carry one independently of its inline comments. Classifying only the comments
   // would delete a body-only draft and overwrite a body on submit, so the body is
   // weighed with the same reviewer-authored test as every comment.
-  const heldBody = (pending.body || "").trim();
-  const foreignBody = Boolean(
-    heldBody && !isReviewerAuthoredCommentBody(pending.body)
-  );
+  //
+  // The raw body and the trimmed one serve different jobs and must not be mixed:
+  // trimming answers "does it hold a body at all", while the value sent back on
+  // submit has to be the raw one, or submitting would rewrite trailing Markdown
+  // newlines out of a body this code promises to preserve. Ownership stays
+  // anchored on the raw body, so a prefix pushed off position 0 by leading
+  // whitespace is foreign.
+  const rawBody = pending.body || "";
+  const heldBody = rawBody.trim();
+  const foreignBody = Boolean(heldBody && !isReviewerAuthoredCommentBody(rawBody));
 
   if (comments.length === 0 && !heldBody) {
     const deleted = await execFileResult("gh", [
@@ -925,11 +931,20 @@ export async function drainMyPendingReview(
     ]
       .filter(Boolean)
       .join(" and ");
+    const reviewerComments = comments.length - foreignComments.length;
     return {
       status: "foreign",
       review_id: pending.id,
       comment_count: comments.length,
-      error: `Unsubmitted review ${pending.id} holds ${held} Cortex City did not author, so it was left in place. Reviewer comments cannot publish until it is submitted or discarded.`,
+      error: [
+        `Unsubmitted review ${pending.id} holds ${held} Cortex City did not author, so it was left in place.`,
+        "Reviewer comments cannot publish on this PR until its author submits or discards it.",
+        reviewerComments > 0
+          ? `Discarding it also discards ${reviewerComments} reviewer comment(s) it holds, which a re-review has to regenerate.`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join(" "),
     };
   }
 
@@ -942,8 +957,9 @@ export async function drainMyPendingReview(
     "event=COMMENT",
     "-f",
     // Submitting replaces the review body, so a body the reviewer already wrote
-    // is passed back unchanged rather than traded for the recovery note.
-    `body=${heldBody || pendingReviewSubmitBody(comments.length)}`,
+    // is passed back byte-for-byte rather than traded for the recovery note or
+    // silently normalized.
+    `body=${heldBody ? rawBody : pendingReviewSubmitBody(comments.length)}`,
   ]);
   if (!submitted.ok) {
     return {

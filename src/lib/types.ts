@@ -456,10 +456,15 @@ export interface ReviewSummary extends ReviewRequest {
   // its verified receipt and the enclosing review result have both been saved.
   pending_reviewer_comment_delivery?: ReviewerCommentDelivery;
   // An unsubmitted (GitHub PENDING) review on this PR that Cortex City could not
-  // repair after a round: one holding another author's comments, or one whose
-  // submit call failed. While it stands, every reviewer comment on this PR is
-  // captured by it and visible to nobody else, so the condition is recorded
-  // rather than left to be inferred from missing comments.
+  // repair. Two classes: content it did not author — a comment or a review body
+  // without the reviewer prefix, which on a shared login includes the human's own
+  // draft — and a failed repair call, whether listing the held comments, deleting
+  // an empty draft, or submitting an owned one. While it stands, every reviewer
+  // comment on this PR is captured by it and visible to nobody else, so the
+  // condition is recorded rather than left to be inferred from missing comments.
+  // The worker poll retries the repair for as long as this is set, because a
+  // PENDING review is excluded from the PR state hash and so cannot schedule a
+  // round of its own.
   pending_review_error?: string;
   followups?: ReviewFollowup[];
   final_at?: string;

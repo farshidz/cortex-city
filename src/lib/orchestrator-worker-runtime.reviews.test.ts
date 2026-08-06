@@ -11,6 +11,7 @@ import {
   shouldRetryErroredReview,
   type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
+import type { PendingReviewDrain } from "./github";
 import {
   deriveReviewState,
   summaryCoversHead,
@@ -40,6 +41,9 @@ interface HarnessOptions {
   // leaves the dep absent, which is the "GitHub cannot answer" fallback.
   prDiffHashes?: Record<string, string>;
   foreignCommentAt?: Record<string, string>;
+  // Installs the drain dep. Each PR maps to the results successive poll passes
+  // see, so a failed → repaired transition is expressible without real GitHub.
+  pendingReviewDrains?: Record<string, PendingReviewDrain[]>;
 }
 
 // (pr_url, expectedHeadSha) pairs the worker asked to identify a diff for. The
@@ -70,6 +74,7 @@ interface Harness {
   builderCalls: Array<{ task: Task; mode: string }>;
   stoppedLegacyReviewerPids: number[];
   reviewCompletions: Array<(summary: ReviewSummary) => Promise<void>>;
+  drainCalls: string[];
   tasks: Task[];
 }
 
@@ -149,6 +154,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
   const tasks = [...(options.tasks || [])];
   const builderCalls: Array<{ task: Task; mode: string }> = [];
   const stoppedLegacyReviewerPids: number[] = [];
+  const drainCalls: string[] = [];
   const reviewCompletions: Array<
     (summary: ReviewSummary) => Promise<void>
   > = [];
@@ -204,6 +210,17 @@ function makeHarness(options: HarnessOptions = {}): Harness {
       ? {
           getLatestForeignCommentAt: async (prUrl: string) =>
             options.foreignCommentAt?.[prUrl] || "",
+        }
+      : {}),
+    ...(options.pendingReviewDrains
+      ? {
+          drainMyPendingReview: async (prUrl: string) => {
+            drainCalls.push(prUrl);
+            const queued = options.pendingReviewDrains?.[prUrl] || [];
+            return (
+              queued.shift() || ({ status: "none" } as PendingReviewDrain)
+            );
+          },
         }
       : {}),
     spawnReviewSummary: async (request, _opts, onComplete) => {
@@ -309,6 +326,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     builderCalls,
     stoppedLegacyReviewerPids,
     reviewCompletions,
+    drainCalls,
     tasks,
   };
 }
@@ -2647,4 +2665,139 @@ test("pollOnce clears final_at if a PR comes back into the live list", async () 
   await pollOnce(new Map(), h.deps, h.activeReviewPids);
 
   assert.equal(h.reviews[pr.pr_url].final_at, undefined);
+});
+
+
+// A recorded unsubmitted-review condition cannot schedule a review round of its
+// own: a PENDING review and its comments are excluded from the PR state hash, so
+// the poll is the only thing that can converge it.
+test("pollOnce repairs a recorded unsubmitted review without spawning a round", async () => {
+  const pr = makeRequest();
+  const h = makeHarness({
+    reviews: {
+      [pr.pr_url]: makeSummary(pr, {
+        summary: "## Summary\nReviewed.",
+        summary_head_sha: pr.head_sha,
+        generated_at: "2026-05-01T00:10:00.000Z",
+        agent_review_status: "ready_for_human_approval",
+        pending_review_error:
+          "Could not submit unsubmitted review 77: gh: API rate limit",
+      }),
+    },
+    openReviewRequests: [pr],
+    prHeadShas: { [pr.pr_url]: pr.head_sha },
+    pendingReviewDrains: {
+      [pr.pr_url]: [
+        {
+          status: "submitted",
+          review_id: 77,
+          comment_count: 1,
+          receipts: [
+            {
+              comment_id: 4101,
+              author_login: "me",
+              body_sha256: "a".repeat(64),
+              surface: "review_comment",
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.drainCalls, [pr.pr_url]);
+  const repaired = h.reviews[pr.pr_url];
+  assert.equal(repaired.pending_review_error, undefined);
+  // Comments the submit published were written in an earlier round, so they are
+  // receipted here too rather than reading as new PR activity.
+  assert.deepEqual(
+    repaired.reviewer_comment_receipts?.map((receipt) => receipt.comment_id),
+    [4101]
+  );
+  // The repair is GitHub calls only: it must not cost an agent round.
+  assert.deepEqual(h.spawnCalls, []);
+});
+
+test("pollOnce keeps a foreign unsubmitted review recorded until its author acts", async () => {
+  const pr = makeRequest();
+  const firstPass =
+    "Unsubmitted review 77 holds a review body Cortex City did not author, so it was left in place.";
+  const h = makeHarness({
+    reviews: {
+      [pr.pr_url]: makeSummary(pr, {
+        summary: "## Summary\nReviewed.",
+        summary_head_sha: pr.head_sha,
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_review_error: "an older description of the same draft",
+      }),
+    },
+    openReviewRequests: [pr],
+    prHeadShas: { [pr.pr_url]: pr.head_sha },
+    pendingReviewDrains: {
+      [pr.pr_url]: [
+        { status: "foreign", review_id: 77, comment_count: 1, error: firstPass },
+        // The human submitted or discarded it between polls.
+        { status: "none" },
+      ],
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.reviews[pr.pr_url].pending_review_error, firstPass);
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.reviews[pr.pr_url].pending_review_error, undefined);
+  assert.deepEqual(h.spawnCalls, []);
+});
+
+test("pollOnce keeps the recorded condition when GitHub cannot be read", async () => {
+  const pr = makeRequest();
+  const recorded = "Unsubmitted review 77 holds 1 comment(s) Cortex City did not author.";
+  const h = makeHarness({
+    reviews: {
+      [pr.pr_url]: makeSummary(pr, {
+        summary: "## Summary\nReviewed.",
+        summary_head_sha: pr.head_sha,
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_review_error: recorded,
+      }),
+    },
+    openReviewRequests: [pr],
+    prHeadShas: { [pr.pr_url]: pr.head_sha },
+    pendingReviewDrains: {
+      [pr.pr_url]: [{ status: "unavailable", error: "gh: API rate limit" }],
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  // Unknown is not repaired: clearing here would drop the only record of a draft
+  // that is still swallowing every reviewer comment on the PR.
+  assert.equal(h.reviews[pr.pr_url].pending_review_error, recorded);
+});
+
+test("pollOnce leaves the repair alone while a review run owns the record", async () => {
+  const pr = makeRequest();
+  const h = makeHarness({
+    reviews: {
+      [pr.pr_url]: makeSummary(pr, {
+        summary: "## Summary\nReviewed.",
+        summary_head_sha: pr.head_sha,
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_review_error: "Could not submit unsubmitted review 77.",
+        current_run_pid: 4242,
+        current_run_id: "run-token",
+      }),
+    },
+    openReviewRequests: [pr],
+    prHeadShas: { [pr.pr_url]: pr.head_sha },
+    pendingReviewDrains: { [pr.pr_url]: [{ status: "submitted", review_id: 77 }] },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  // The in-flight round drains at its own end; two writers would race the field.
+  assert.deepEqual(h.drainCalls, []);
 });
