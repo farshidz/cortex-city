@@ -455,6 +455,12 @@ export interface ReviewSummary extends ReviewRequest {
   // The complete action is durably saved before POST. It remains pending until
   // its verified receipt and the enclosing review result have both been saved.
   pending_reviewer_comment_delivery?: ReviewerCommentDelivery;
+  // An unsubmitted (GitHub PENDING) review on this PR that Cortex City could not
+  // repair after a round: one holding another author's comments, or one whose
+  // submit call failed. While it stands, every reviewer comment on this PR is
+  // captured by it and visible to nobody else, so the condition is recorded
+  // rather than left to be inferred from missing comments.
+  pending_review_error?: string;
   followups?: ReviewFollowup[];
   final_at?: string;
   final_state?: "merged" | "closed";

@@ -1091,3 +1091,135 @@ test("getReviewLifecycleState ignores other reviewers' approvals", () => {
   );
   assert.equal(result, "needs_approval");
 });
+
+const DRAIN_IMPORT = `import { drainMyPendingReview } from ${JSON.stringify(GITHUB_MODULE_URL)};`;
+const DRAIN_PR_URL = "https://github.com/acme/widget/pull/1";
+const DRAIN_REVIEWS_KEY =
+  "api --paginate --slurp repos/acme/widget/pulls/1/reviews";
+const DRAIN_REVIEW_COMMENTS_KEY =
+  "api --paginate --slurp repos/acme/widget/pulls/1/reviews/77/comments";
+
+function drainScript(): string {
+  return `
+      const drain = await drainMyPendingReview(${JSON.stringify(DRAIN_PR_URL)});
+      console.log(JSON.stringify(drain));
+    `;
+}
+
+test("drainMyPendingReview ignores a pending review that is not the signed-in user's", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [{ id: 77, state: "PENDING", user: { login: "octocat" } }],
+          [{ id: 78, state: "COMMENTED", user: { login: "me" } }],
+        ]),
+      },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  assert.equal((result as { status: string }).status, "none");
+  // Another user's draft does not block this user's comments, and is not ours to
+  // read or repair.
+  assert.equal(
+    calls.some((call) => call.includes("--method")),
+    false
+  );
+});
+
+test("drainMyPendingReview deletes a pending review holding no comments", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [{ id: 77, state: "PENDING", user: { login: "me" } }],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: { stdout: JSON.stringify([[]]) },
+      "api --method DELETE repos/acme/widget/pulls/1/reviews/77": {
+        stdout: "",
+      },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  assert.deepEqual(result, {
+    status: "deleted",
+    review_id: 77,
+    comment_count: 0,
+  });
+  // An empty draft carries nothing to publish, so it is discarded rather than
+  // submitted as a content-free review event.
+  assert.equal(
+    calls.some((call) => call.includes("/events")),
+    false
+  );
+});
+
+test("drainMyPendingReview reports a failed submit instead of losing the draft", () => {
+  const workspace = setupWorkspace();
+  const { result } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [{ id: 77, state: "PENDING", user: { login: "me" } }],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 4101,
+              pull_request_review_id: 77,
+              body: "**🤖[Cortex City Reviewer]** Still open.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      // No response is registered for the submit call, so the fake gh exits 1.
+    },
+    drainScript()
+  );
+
+  const drain = result as { status: string; error: string; review_id: number };
+  assert.equal(drain.status, "failed");
+  assert.equal(drain.review_id, 77);
+  assert.match(drain.error, /Could not submit unsubmitted review 77/);
+});
+
+test("drainMyPendingReview reports an unreadable reviews list as unavailable", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: { stderr: "gh: API rate limit", exitCode: 1 },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  // Unknown is not the same as absent: a caller must not clear a recorded draft
+  // condition because one lookup failed.
+  assert.equal((result as { status: string }).status, "unavailable");
+  assert.equal(
+    calls.some((call) => call.includes("--method")),
+    false
+  );
+});
