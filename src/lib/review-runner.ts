@@ -784,18 +784,36 @@ export function buildReviewWrapperPrompt(
       ].join(" "),
       [
         "- Verify each enumerated finding at the current head by running the repro or",
-        "check you recorded for it, then report the outcome on the same GitHub",
-        "surface the finding was posted on.",
+        "check you recorded for it.",
+      ].join(" "),
+      // The redundancy gate. Without it every round replies to every open
+      // thread, so a finding that stays unfixed across N rounds collects N
+      // near-identical "still unresolved at <sha>" comments.
+      [
+        "- Post a GitHub comment for a verified finding only when this round changes",
+        "what its thread or comment already says: it is fixed, you are withdrawing it",
+        "as out of scope, you are converting it to residual risk, the remaining ask is",
+        "now materially narrower or wider, or you observed a materially different",
+        "failure than the one already recorded. Running the recorded check and getting",
+        "the recorded result is not a change, and neither is a new head SHA.",
       ].join(" "),
       [
-        "- For a finding on an inline review thread: reply on that thread with what",
-        "you verified and the outcome, and resolve the thread only when the finding",
-        "is fixed at the current head. Leave it unresolved otherwise.",
+        "- When there is such a change, report it on the same GitHub surface the",
+        "finding was posted on. For a finding on an inline review thread: reply on that",
+        "thread with what you verified, and resolve the thread only when the finding is",
+        "fixed at the current head. Leave it unresolved otherwise. For a finding in a",
+        "PR conversation comment, which has no thread and cannot be resolved: post a",
+        "new top-level comment. Resolving one is never an action you owe, so its",
+        "absence is not a reason to return `blocked`.",
       ].join(" "),
       [
-        "- For a finding in a PR conversation comment, which has no thread and cannot",
-        "be resolved: post a new top-level comment with the outcome. Resolving one is",
-        "never an action you owe, so its absence is not a reason to return `blocked`.",
+        "- A finding that is still unfixed and otherwise unchanged owes no comment on",
+        "either surface. The unresolved thread, or your last standing comment, already",
+        "says the finding holds; restating it at a new SHA gives the author nothing to",
+        "act on. Saying nothing there is the correct outcome, not an action you failed",
+        "to complete, so never return `blocked` over it. Report every finding that",
+        "remains open in the generated review's findings and in the agent status",
+        "instead.",
       ].join(" "),
       [
         "- Limit new discovery to the changes between the previously reviewed head",
@@ -876,6 +894,11 @@ export function buildReviewReplyPrompt(
     [
       "- Read the comments and review threads added since your last round, and",
       "reply on the existing thread each one belongs to.",
+    ].join(" "),
+    [
+      "- Reply only where there is new conversation to answer. A thread with nothing",
+      "new since your last round owes no comment: its unresolved state already says",
+      "the finding holds, so do not post a reply that only restates it.",
     ].join(" "),
     [
       "- Answer questions directly, and withdraw any earlier request of yours that",
@@ -986,12 +1009,24 @@ export function buildReviewTier1Prompt(
       "- Work the list. For each open finding, read its thread, run the repro or",
       "check it records, and decide at the current head whether it is fixed.",
     ].join(" "),
+    // Same redundancy gate as the full follow-up round: this tier runs on every
+    // new head, so replying to each open thread per round is what produces
+    // stacks of near-identical "still unresolved" comments.
     [
-      "- Report the outcome on the surface the finding was posted on. For an inline",
-      "review thread: reply on that thread with what you verified, and resolve it",
-      "only when the finding is fixed at the current head. For a PR conversation",
-      "comment, which has no thread and cannot be resolved: post a new top-level",
-      "comment with the outcome, and owe no resolve for it.",
+      "- Comment only when this round changes what a finding's thread or comment",
+      "already says: it is fixed, you are withdrawing it as out of scope, or you",
+      "observed a materially different failure than the one recorded. A finding that",
+      "is still unfixed and otherwise unchanged owes no comment — its unresolved",
+      "thread already says it holds, and running the recorded check to the recorded",
+      "result at a new head SHA is not a change. Report those findings in your own",
+      "output instead, and never return `escalate` merely because you posted nothing.",
+    ].join(" "),
+    [
+      "- When there is such a change, report it on the surface the finding was posted",
+      "on. For an inline review thread: reply on that thread with what you verified,",
+      "and resolve it only when the finding is fixed at the current head. For a PR",
+      "conversation comment, which has no thread and cannot be resolved: post a new",
+      "top-level comment, and owe no resolve for it.",
     ].join(" "),
     // The cheap tier inherits the scope gate, or it would enforce requests the
     // full reviewer would have withdrawn.
