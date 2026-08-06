@@ -684,7 +684,14 @@ async function repairUnsubmittedReviewerReviews(
         !current ||
         !current.pending_review_error ||
         current.current_run_pid != null ||
-        current.current_run_id != null
+        current.current_run_id != null ||
+        // The drain ran outside the store lock, so this result describes the
+        // condition read at the top of the loop and nothing newer. A review
+        // round that finished in the meantime may have recorded a different
+        // draft; applying this result to it would clear a condition nobody
+        // inspected, and a PENDING review the state hash cannot see has no
+        // other way back onto anyone's queue.
+        current.pending_review_error !== review.pending_review_error
       ) {
         return undefined;
       }

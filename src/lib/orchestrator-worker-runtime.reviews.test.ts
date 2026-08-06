@@ -44,6 +44,10 @@ interface HarnessOptions {
   // Installs the drain dep. Each PR maps to the results successive poll passes
   // see, so a failed → repaired transition is expressible without real GitHub.
   pendingReviewDrains?: Record<string, PendingReviewDrain[]>;
+  // Runs inside the drain fake, before it answers. Lets a test stand in for a
+  // concurrent writer that records a different condition while the real drain's
+  // GitHub calls are in flight, outside the store lock.
+  onDrainCall?: (prUrl: string) => void;
 }
 
 // (pr_url, expectedHeadSha) pairs the worker asked to identify a diff for. The
@@ -216,6 +220,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
       ? {
           drainMyPendingReview: async (prUrl: string) => {
             drainCalls.push(prUrl);
+            options.onDrainCall?.(prUrl);
             const queued = options.pendingReviewDrains?.[prUrl] || [];
             return (
               queued.shift() || ({ status: "none" } as PendingReviewDrain)
@@ -2800,4 +2805,42 @@ test("pollOnce leaves the repair alone while a review run owns the record", asyn
 
   // The in-flight round drains at its own end; two writers would race the field.
   assert.deepEqual(h.drainCalls, []);
+});
+
+
+test("pollOnce will not clear a condition recorded after the drain it inspected", async () => {
+  const pr = makeRequest();
+  const inspected = "Could not submit unsubmitted review 77: gh: API rate limit";
+  const newer =
+    "Unsubmitted review 78 holds a review body Cortex City did not author, so it was left in place.";
+  const h: Harness = makeHarness({
+    reviews: {
+      [pr.pr_url]: makeSummary(pr, {
+        summary: "## Summary\nReviewed.",
+        summary_head_sha: pr.head_sha,
+        generated_at: "2026-05-01T00:10:00.000Z",
+        pending_review_error: inspected,
+      }),
+    },
+    openReviewRequests: [pr],
+    prHeadShas: { [pr.pr_url]: pr.head_sha },
+    // A review round completes while the drain's GitHub calls are in flight and
+    // records a different draft.
+    onDrainCall: (prUrl) => {
+      h.reviews[prUrl] = {
+        ...h.reviews[prUrl],
+        pending_review_error: newer,
+      };
+    },
+    pendingReviewDrains: {
+      [pr.pr_url]: [{ status: "submitted", review_id: 77, comment_count: 1 }],
+    },
+  });
+
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+
+  // Draft 77's result must not clear draft 78's condition: nothing else can
+  // schedule or retry a PENDING review, so the newer draft would swallow every
+  // later reviewer comment with no record left of it.
+  assert.equal(h.reviews[pr.pr_url].pending_review_error, newer);
 });
