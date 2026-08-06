@@ -23,6 +23,7 @@ import {
 } from "./review-workspace";
 import {
   deliverReviewerComment,
+  drainMyPendingReview,
   getAuthenticatedUserLogin,
   getMyReviewSignals,
   isStaleReviewerCommentDeliveryError,
@@ -203,7 +204,50 @@ const REVIEW_CONVERSATION_SEEN_SKEW_MS = 60_000;
 const REVIEWER_SEPARATE_FOLLOWUP_COMMENT_PREFIX =
   `${REVIEWER_GITHUB_COMMENT_PREFIX} **Separate follow-up suggested (non-blocking):**`;
 const REVIEW_GITHUB_TOOL_INSTRUCTION =
-  "Use the `gh` CLI for GitHub inspection and comments. The working directory persists for this PR, so reuse any existing checkout or artifacts.";
+  "Use the `gh` CLI for GitHub inspection and comments. Post every comment so it publishes immediately, and never leave an unsubmitted review behind: its comments are visible only to you, and while it is open it captures every later inline comment on this PR. The working directory persists for this PR, so reuse any existing checkout or artifacts.";
+
+// Prescriptive on purpose. The failure these rules prevent is invisible to the
+// round that causes it: GitHub answers a GraphQL thread reply with a comment URL
+// whether or not the review carrying that reply was ever submitted, so a reviewer
+// that only checks the call's result cannot tell a published comment from one
+// nobody else can see.
+const REVIEW_THREAD_REPLY_INSTRUCTIONS = [
+  [
+    "- Reply on an inline thread with the REST replies endpoint: `gh api --method",
+    "POST repos/<owner>/<repo>/pulls/<number>/comments/<comment_id>/replies -f",
+    "body=...`, which publishes the reply immediately. Do not reply with the",
+    "GraphQL `addPullRequestReviewThreadReply` mutation, and do not wrap a comment",
+    "in a review you create: GitHub may leave that review unsubmitted while still",
+    "returning a comment URL, which reads as a successful post.",
+  ].join(" "),
+  [
+    "- Before you finish, list any unsubmitted review of your own with `gh api",
+    "repos/<owner>/<repo>/pulls/<number>/reviews --jq '.[] | select(.state ==",
+    '"PENDING") | {id, body}\'` and read what it holds with `gh api',
+    "repos/<owner>/<repo>/pulls/<number>/reviews/<id>/comments`. An open",
+    "unsubmitted review blocks every later reviewer comment on this PR, including",
+    "later rounds', so it has to be cleared — but only your own content may be",
+    "acted on.",
+  ].join(" "),
+  [
+    "- On a PR you also authored, the signed-in login is shared with the human, so",
+    "check content rather than authorship: a held comment or review body is yours",
+    "only when it begins with your reviewer prefix. Submit the review only when",
+    "every held comment and its body are yours, with `gh api --method POST",
+    "repos/<owner>/<repo>/pulls/<number>/reviews/<id>/events -f event=COMMENT -f",
+    "body=<the body it already holds, or your prefix and a one-line note when it",
+    "holds none>` — submitting replaces the body, so never substitute your own",
+    "text for a body that is already there. Delete it, with the same path and",
+    "`--method DELETE`, only when it holds no comments and no body at all.",
+  ].join(" "),
+  [
+    "- If it holds anything you did not write — one unprefixed comment, or only an",
+    "unprefixed body — leave the review exactly as it is: it is someone's review",
+    "in progress, and submitting or deleting it destroys their unfinished work.",
+    "Report that you found it and that your comments cannot publish until its",
+    "author submits or discards it.",
+  ].join(" "),
+];
 
 const REVIEWER_SELF_APPROVAL_COMMENT_BODY =
   "Cortex City found no blocking issues and would approve this PR, but GitHub does not allow the PR author to approve their own pull request. Please ask an eligible non-author reviewer to approve it, or make the appropriate manual merge or coordination decision if repository policy permits.";
@@ -806,6 +850,7 @@ export function buildReviewWrapperPrompt(
         "new top-level comment. Resolving one is never an action you owe, so its",
         "absence is not a reason to return `blocked`.",
       ].join(" "),
+      ...REVIEW_THREAD_REPLY_INSTRUCTIONS,
       [
         "- A finding that is still unfixed and otherwise unchanged owes no comment on",
         "either surface. The unresolved thread, or your last standing comment, already",
@@ -900,6 +945,7 @@ export function buildReviewReplyPrompt(
       "new since your last round owes no comment: its unresolved state already says",
       "the finding holds, so do not post a reply that only restates it.",
     ].join(" "),
+    ...REVIEW_THREAD_REPLY_INSTRUCTIONS,
     [
       "- Answer questions directly, and withdraw any earlier request of yours that",
       "the conversation shows was wrong or out of scope.",
@@ -1028,6 +1074,7 @@ export function buildReviewTier1Prompt(
       "conversation comment, which has no thread and cannot be resolved: post a new",
       "top-level comment, and owe no resolve for it.",
     ].join(" "),
+    ...REVIEW_THREAD_REPLY_INSTRUCTIONS,
     // The cheap tier inherits the scope gate, or it would enforce requests the
     // full reviewer would have withdrawn.
     [
@@ -1613,6 +1660,7 @@ export async function spawnReviewSummary(
       cachedBefore?.reviewer_comment_cancellations,
     pending_reviewer_comment_delivery:
       cachedBefore?.pending_reviewer_comment_delivery,
+    pending_review_error: cachedBefore?.pending_review_error,
     followups: cachedBefore?.followups,
     final_at: cachedBefore?.final_at,
     error: cachedBefore?.error,
@@ -1809,6 +1857,30 @@ export async function spawnReviewSummary(
     let verifiedApprovalSha: string | undefined;
     let verifiedLastReviewSha: string | undefined;
     let preservePendingDelivery = false;
+    // GitHub carries each inline comment in a review of its own and sometimes
+    // leaves that review unsubmitted, which hides the comment from everyone but
+    // the signed-in user and captures every later inline comment on the PR. The
+    // round cannot detect that itself — the call that posted the comment
+    // succeeded — so the draft is drained here, on every round, including one
+    // whose run failed. Draining before the receipt harvest means comments this
+    // publishes are receipted in the same pass.
+    let drainedReviewerComments: ReviewerCommentReceipt[] = [];
+    let pendingReviewError: string | undefined;
+    let pendingReviewErrorResolved = false;
+    try {
+      const drain = await drainMyPendingReview(target.pr_url);
+      drainedReviewerComments = drain.receipts || [];
+      if (drain.status === "foreign" || drain.status === "failed") {
+        pendingReviewError = drain.error;
+      } else if (drain.status !== "unavailable") {
+        // "none", "submitted", and "deleted" all mean no draft stands now, so a
+        // condition recorded by an earlier round is over.
+        pendingReviewErrorResolved = true;
+      }
+    } catch {
+      // An unreadable GitHub says nothing about whether a draft exists, so the
+      // previously recorded condition stands untouched.
+    }
     // The reviewer posts its findings, replies, and summaries through `gh`
     // inside the run, so their IDs are only knowable afterwards. Receipting
     // them keeps reviewer-only activity out of the PR state hash. A failure
@@ -1823,6 +1895,10 @@ export async function spawnReviewSummary(
     } catch {
       observedReviewerComments = [];
     }
+    observedReviewerComments = [
+      ...drainedReviewerComments,
+      ...observedReviewerComments,
+    ];
     assertReviewRunLockHealthy(runLock);
     let beforeReviewAction = getReviewSummary(target.pr_url);
     if (beforeReviewAction?.current_run_id === runLock.data.token) {
@@ -2243,6 +2319,14 @@ export async function spawnReviewSummary(
         pending_reviewer_comment_delivery: preservePendingDelivery
           ? latestBeforeSave.pending_reviewer_comment_delivery
           : undefined,
+        // Only a round that learned the draft's state changes this: a repair
+        // that failed records why, a PR with no draft clears it, and a round
+        // that could not reach GitHub leaves the last known condition standing.
+        pending_review_error:
+          pendingReviewError ??
+          (pendingReviewErrorResolved
+            ? undefined
+            : latestBeforeSave.pending_review_error),
         followups: reviewContextChangedDuringRun
           ? []
           : verificationRound ||

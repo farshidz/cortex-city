@@ -267,6 +267,15 @@ export default function ReviewDetailPage({
             </Button>
           </div>
         </div>
+        {/* An unrepaired unsubmitted review blocks every reviewer comment on the
+            PR while staying invisible to everyone but its author, so it is shown
+            here rather than left to be inferred from comments that never appear. */}
+        {review.pending_review_error && (
+          <div className="border-t border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <span className="font-medium">Unsubmitted review on this PR: </span>
+            {review.pending_review_error}
+          </div>
+        )}
         <div className="px-4 py-4 text-sm min-h-[6rem]">
           {review.review_status === "summary_error" ? (
             <span className="text-destructive">

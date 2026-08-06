@@ -1091,3 +1091,350 @@ test("getReviewLifecycleState ignores other reviewers' approvals", () => {
   );
   assert.equal(result, "needs_approval");
 });
+
+const DRAIN_IMPORT = `import { drainMyPendingReview } from ${JSON.stringify(GITHUB_MODULE_URL)};`;
+const DRAIN_PR_URL = "https://github.com/acme/widget/pull/1";
+const DRAIN_REVIEWS_KEY =
+  "api --paginate --slurp repos/acme/widget/pulls/1/reviews";
+const DRAIN_REVIEW_COMMENTS_KEY =
+  "api --paginate --slurp repos/acme/widget/pulls/1/reviews/77/comments";
+
+function drainScript(): string {
+  return `
+      const drain = await drainMyPendingReview(${JSON.stringify(DRAIN_PR_URL)});
+      console.log(JSON.stringify(drain));
+    `;
+}
+
+test("drainMyPendingReview ignores a pending review that is not the signed-in user's", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [{ id: 77, state: "PENDING", user: { login: "octocat" } }],
+          [{ id: 78, state: "COMMENTED", user: { login: "me" } }],
+        ]),
+      },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  assert.equal((result as { status: string }).status, "none");
+  // Another user's draft does not block this user's comments, and is not ours to
+  // read or repair.
+  assert.equal(
+    calls.some((call) => call.includes("--method")),
+    false
+  );
+});
+
+test("drainMyPendingReview deletes a pending review holding no comments", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [{ id: 77, state: "PENDING", user: { login: "me" } }],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: { stdout: JSON.stringify([[]]) },
+      "api --method DELETE repos/acme/widget/pulls/1/reviews/77": {
+        stdout: "",
+      },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  assert.deepEqual(result, {
+    status: "deleted",
+    review_id: 77,
+    comment_count: 0,
+  });
+  // An empty draft carries nothing to publish, so it is discarded rather than
+  // submitted as a content-free review event.
+  assert.equal(
+    calls.some((call) => call.includes("/events")),
+    false
+  );
+});
+
+test("drainMyPendingReview reports a failed submit instead of losing the draft", () => {
+  const workspace = setupWorkspace();
+  const { result } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [{ id: 77, state: "PENDING", user: { login: "me" } }],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 4101,
+              pull_request_review_id: 77,
+              body: "**🤖[Cortex City Reviewer]** Still open.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      // No response is registered for the submit call, so the fake gh exits 1.
+    },
+    drainScript()
+  );
+
+  const drain = result as { status: string; error: string; review_id: number };
+  assert.equal(drain.status, "failed");
+  assert.equal(drain.review_id, 77);
+  assert.match(drain.error, /Could not submit unsubmitted review 77/);
+});
+
+test("drainMyPendingReview reports an unreadable reviews list as unavailable", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: { stderr: "gh: API rate limit", exitCode: 1 },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  // Unknown is not the same as absent: a caller must not clear a recorded draft
+  // condition because one lookup failed.
+  assert.equal((result as { status: string }).status, "unavailable");
+  assert.equal(
+    calls.some((call) => call.includes("--method")),
+    false
+  );
+});
+
+test("drainMyPendingReview leaves a body-only draft in place instead of deleting it", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 77,
+              state: "PENDING",
+              // A review body is held content even with no inline comments, and
+              // on a self-authored PR it can be the human's, not the reviewer's.
+              body: "Draft summary I have not finished writing.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: { stdout: JSON.stringify([[]]) },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  const drain = result as { status: string; error: string };
+  assert.equal(drain.status, "foreign");
+  assert.match(drain.error, /holds a review body Cortex City did not author/);
+  assert.equal(
+    calls.some((call) => call.includes("--method")),
+    false
+  );
+});
+
+test("drainMyPendingReview will not overwrite a foreign body on reviewer comments", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 77,
+              state: "PENDING",
+              body: "My own summary, still being written.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 4101,
+              pull_request_review_id: 77,
+              body: "**🤖[Cortex City Reviewer]** Still open.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  const drain = result as { status: string; error: string };
+  // Submitting replaces the review body, so reviewer-owned comments do not make
+  // the human's body safe to publish under a generated note.
+  assert.equal(drain.status, "foreign");
+  assert.match(drain.error, /a review body Cortex City did not author/);
+  assert.equal(
+    calls.some((call) => call.includes("/events")),
+    false
+  );
+});
+
+test("drainMyPendingReview submits a reviewer-authored body byte-for-byte", () => {
+  const workspace = setupWorkspace();
+  // Trailing Markdown newlines and a trailing space: submitting replaces the
+  // body, so anything but the exact bytes is a silent rewrite of reviewer text.
+  const heldBody = "**\u{1F916}[Cortex City Reviewer]** Round summary. \n\n";
+  const { result } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [{ id: 77, state: "PENDING", body: heldBody, user: { login: "me" } }],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 4101,
+              pull_request_review_id: 77,
+              body: "**\u{1F916}[Cortex City Reviewer]** Still open.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      // Only the untrimmed body is registered, so a normalized outbound value
+      // would miss this key and the fake gh would fail the submit.
+      [`api --method POST repos/acme/widget/pulls/1/reviews/77/events -f event=COMMENT -f body=${heldBody}`]:
+        { stdout: "{}" },
+    },
+    drainScript()
+  );
+
+  // The fake gh matches on the exact argv, and only the untrimmed body is
+  // registered, so "submitted" is reachable only if the outbound body was the
+  // exact bytes: a trimmed one misses the key and returns status "failed".
+  assert.deepEqual(result, {
+    status: "submitted",
+    review_id: 77,
+    comment_count: 1,
+    receipts: [
+      {
+        comment_id: 4101,
+        author_login: "me",
+        body_sha256: (result as { receipts: Array<{ body_sha256: string }> })
+          .receipts[0].body_sha256,
+        surface: "review_comment",
+      },
+    ],
+  });
+});
+
+test("drainMyPendingReview treats a prefix pushed off position 0 as foreign", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 77,
+              state: "PENDING",
+              // Leading whitespace, so the prefix is not anchored at the start.
+              body: "  **\u{1F916}[Cortex City Reviewer]** quoted by a human",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: { stdout: JSON.stringify([[]]) },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  assert.equal((result as { status: string }).status, "foreign");
+  assert.equal(
+    calls.some((call) => call.includes("--method")),
+    false
+  );
+});
+
+test("drainMyPendingReview says a discarded foreign draft loses the comments it holds", () => {
+  const workspace = setupWorkspace();
+  const { result } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 77,
+              state: "PENDING",
+              body: "Human summary in progress.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 4101,
+              pull_request_review_id: 77,
+              body: "**\u{1F916}[Cortex City Reviewer]** Still open.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+    },
+    drainScript()
+  );
+
+  const drain = result as { status: string; error: string };
+  assert.equal(drain.status, "foreign");
+  // The operator is the one who acts on a foreign draft, so the cost of each
+  // option has to be in the message they read.
+  assert.match(
+    drain.error,
+    /Discarding it also discards 1 reviewer comment\(s\) it holds, which a re-review has to regenerate/
+  );
+});

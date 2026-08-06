@@ -702,6 +702,97 @@ test("buildReviewWrapperPrompt gates follow-up comments on a changed finding sta
   );
 });
 
+test("every round is told to publish comments and never leave an unsubmitted review", () => {
+  const config = baseConfig({ review_learning_enabled: false });
+  const cached = {
+    ...sampleRequest({ head_sha: "previous-head" }),
+    summary: "## Summary\nPreviously reviewed.",
+    summary_head_sha: "previous-head",
+    generated_at: "2026-05-01T00:10:00.000Z",
+    review_status: "needs_review",
+    review_state: "needs_review",
+  } satisfies ReviewSummary;
+  const initial = buildReviewWrapperPrompt(config, sampleRequest());
+  const followup = buildReviewWrapperPrompt(
+    config,
+    sampleRequest({ head_sha: "current-head" }),
+    cached
+  );
+  const tier1 = buildReviewTier1Prompt(
+    config,
+    sampleRequest({ head_sha: "current-head" }),
+    cached
+  );
+  const reply = buildReviewReplyPrompt(config, sampleRequest(), cached);
+
+  // The rule itself reaches every round, including an initial review that posts
+  // its findings as new inline comments.
+  for (const prompt of [initial, followup, tier1, reply]) {
+    assert.match(prompt, /Post every comment so it publishes immediately/i);
+    assert.match(prompt, /never leave an unsubmitted review behind/i);
+    assert.match(
+      prompt,
+      /while it is open it captures every later inline comment on this PR/i
+    );
+  }
+
+  // The mechanics go to the rounds that reply on existing threads, which is
+  // where the reply path that can leave a review unsubmitted gets used.
+  for (const prompt of [followup, tier1, reply]) {
+    assert.match(
+      prompt,
+      /comments\/<comment_id>\/replies -f body=\.\.\.`, which publishes the reply immediately/i
+    );
+    assert.match(
+      prompt,
+      /Do not reply with the GraphQL `addPullRequestReviewThreadReply` mutation/i
+    );
+    assert.match(
+      prompt,
+      /GitHub may leave that review unsubmitted while still returning a comment URL/i
+    );
+    assert.match(
+      prompt,
+      /list any unsubmitted review of your own with `gh api/i
+    );
+    assert.match(prompt, /-f event=COMMENT/);
+    // The draft's contents are read before anything is submitted, because the
+    // signed-in login is shared with the human on a self-authored PR.
+    assert.match(prompt, /reviews\/<id>\/comments`/);
+    assert.match(
+      prompt,
+      /a held comment or review body is yours only when it begins with your reviewer prefix/i
+    );
+    assert.match(
+      prompt,
+      /Submit the review only when every held comment and its body are yours/i
+    );
+    // Submitting replaces the body, so an existing one is passed back untouched.
+    assert.match(
+      prompt,
+      /never substitute your own text for a body that is already there/i
+    );
+    // Deleting is for a draft that holds nothing, not for one that merely has no
+    // inline comments — a body-only draft is someone's unfinished summary.
+    assert.match(
+      prompt,
+      /Delete it, .*only when it holds no comments and no body at all/i
+    );
+    assert.match(
+      prompt,
+      /holds anything you did not write — one unprefixed comment, or only an unprefixed body — leave the review exactly as it is/i
+    );
+    assert.match(
+      prompt,
+      /Report that you found it and that your comments cannot publish/i
+    );
+  }
+  assert.doesNotMatch(
+    initial,
+    /Do not reply with the GraphQL `addPullRequestReviewThreadReply` mutation/i
+  );
+});
+
 test("buildReviewWrapperPrompt sweeps sibling cases on initial reviews", () => {
   const prompt = buildReviewWrapperPrompt(
     baseConfig({ review_learning_enabled: false }),
@@ -2131,6 +2222,157 @@ test("summarizePR posts and persists an application-owned human-decision comment
   assert.match(
     ghState.prs["acme/widget#1"].issueComments[0].body,
     /<!-- cortex-city-review-decision:[0-9a-f-]{36} -->$/
+  );
+});
+
+// The comments GitHub left in an unsubmitted review are visible only to the
+// signed-in user, so a round can only repair the draft after the fact — the call
+// that wrote each comment reported success.
+function pendingReviewPRState(
+  comments: Array<{ id: number; body: string; login?: string }>
+) {
+  return {
+    prs: {
+      "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "abc123",
+        reviews: [
+          { id: 77, state: "PENDING", body: "", user: { login: "me" } },
+        ],
+        comments: comments.map((comment) => ({
+          id: comment.id,
+          pull_request_review_id: 77,
+          body: comment.body,
+          user: { login: comment.login || "me" },
+        })),
+        issueComments: [],
+        nextIssueCommentId: 8123,
+      },
+    },
+  };
+}
+
+// `needs_author_changes` keeps the round free of approval and handoff-comment
+// side effects, so the only GitHub writes under test are the draft repair itself.
+function drainReviewScenario() {
+  return {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-drain-session",
+        result: [
+          "## Summary",
+          "One finding stands.",
+          "## Agent Status",
+          "Agent status: `needs_author_changes`",
+        ].join("\n"),
+        is_error: false,
+      }),
+    },
+  };
+}
+
+test("summarizePR publishes an unsubmitted review the round left behind", () => {
+  const workspace = setupRunnerWorkspace("review-runner-pending-review-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(
+    ghStateFile,
+    pendingReviewPRState([
+      { id: 4101, body: "**🤖[Cortex City Reviewer]** Still open at abc123." },
+      { id: 4102, body: "**🤖[Cortex City Reviewer]** Fixed at abc123." },
+    ])
+  );
+  writeJson(scenarioFile, drainReviewScenario());
+
+  const request = sampleRequest();
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  const review = ghState.prs["acme/widget#1"].reviews[0];
+  // Submitted as a comment review, never as a decision.
+  assert.equal(review.state, "COMMENTED");
+  assert.match(
+    review.body,
+    /^\*\*🤖\[Cortex City Reviewer\]\*\* Publishing 2 review comments that GitHub left in an unsubmitted review\./
+  );
+  // The published comments are receipted in the same pass, so comments written
+  // in earlier rounds cannot read as new PR activity now that they are visible.
+  const receipted = (
+    result.persisted.reviewer_comment_receipts as ReviewerCommentReceipt[]
+  ).filter((receipt) => receipt.surface === "review_comment");
+  assert.deepEqual(
+    receipted.map((receipt) => receipt.comment_id).sort(),
+    [4101, 4102]
+  );
+  assert.equal(receipted[0].author_login, "me");
+  assert.match(receipted[0].body_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(result.persisted.pending_review_error, undefined);
+});
+
+test("summarizePR leaves an unsubmitted review holding other comments in place", () => {
+  const workspace = setupRunnerWorkspace("review-runner-pending-foreign-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(
+    ghStateFile,
+    pendingReviewPRState([
+      { id: 4201, body: "Draft note I am still writing." },
+    ])
+  );
+  writeJson(scenarioFile, drainReviewScenario());
+
+  const request = sampleRequest();
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await summarizePR(${JSON.stringify(request)}, { runtime: "claude" });
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  const ghState = JSON.parse(readFileSync(ghStateFile, "utf-8"));
+  // Publishing someone's review in progress is not Cortex City's call.
+  assert.equal(ghState.prs["acme/widget#1"].reviews[0].state, "PENDING");
+  assert.match(
+    result.persisted.pending_review_error,
+    /holds 1 comment\(s\) Cortex City did not author, so it was left in place/
+  );
+  const receipts =
+    (result.persisted.reviewer_comment_receipts as
+      | ReviewerCommentReceipt[]
+      | undefined) || [];
+  assert.equal(
+    receipts.some((receipt) => receipt.comment_id === 4201),
+    false
   );
 });
 

@@ -6,6 +6,7 @@ import path from "path";
 import * as lockfile from "proper-lockfile";
 import {
   isReviewerAuthoredCommentBody,
+  REVIEWER_GITHUB_COMMENT_PREFIX,
   REVIEWER_HUMAN_DECISION_COMMENT_PREFIX,
   REVIEWER_SELF_APPROVAL_COMMENT_PREFIX,
   reviewerCommentBodySha256,
@@ -780,6 +781,209 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
     .map((comment) => comment.id);
 
   return [...reviewCommentIds, ...issueCommentIds].sort();
+}
+
+// An unsubmitted review — GitHub's PENDING state, the draft a reviewer builds
+// before submitting. It matters because GitHub wraps each inline comment in a
+// review of its own and sometimes leaves that review unsubmitted: a PENDING
+// review is visible only to its author, GitHub allows one per user per pull
+// request, and while it is open every later inline comment the user posts joins
+// it instead of publishing. One leaked draft therefore swallows every later
+// round's replies, and REST inline posts start failing with "user_id can only
+// have one pending review per pull request". Prompts can reduce how often one is
+// created; only draining it afterwards repairs the ones that happen anyway.
+export type PendingReviewDrainStatus =
+  // Nothing pending for the signed-in user.
+  | "none"
+  // Held only reviewer-authored content; published as a COMMENT review.
+  | "submitted"
+  // Held no comments and no review body, so there was nothing to publish.
+  | "deleted"
+  // Holds a comment or a review body Cortex City did not author — someone's
+  // review in progress. Left untouched: publishing or discarding another
+  // author's draft would destroy unfinished work.
+  | "foreign"
+  // GitHub could not be read. Nothing is known about a draft either way.
+  | "unavailable"
+  // A draft was found and the repair call failed.
+  | "failed";
+
+export interface PendingReviewDrain {
+  status: PendingReviewDrainStatus;
+  review_id?: number;
+  comment_count?: number;
+  // Receipts for the comments the submit published. Publishing makes comments
+  // written in earlier rounds visible for the first time, so the caller records
+  // them exactly like comments a run posted directly, keeping reviewer-only
+  // activity out of the PR state hash.
+  receipts?: ReviewerCommentReceipt[];
+  error?: string;
+}
+
+function pendingReviewSubmitBody(commentCount: number): string {
+  // The reviewer prefix is load-bearing: `reviewerAuthoredReviewIds` excludes a
+  // COMMENTED review carrying it, so publishing the draft does not change the PR
+  // state hash and does not wake the author for the reviewer's own comments.
+  return [
+    REVIEWER_GITHUB_COMMENT_PREFIX,
+    `Publishing ${commentCount} review comment${commentCount === 1 ? "" : "s"}`,
+    "that GitHub left in an unsubmitted review. They were written in earlier",
+    "rounds and were visible only to the reviewer until now.",
+  ].join(" ");
+}
+
+// Find the signed-in user's unsubmitted review on a PR and repair it. GitHub
+// permits one pending review per user, so this handles a single draft per call;
+// a later call drains anything that appears afterwards.
+export async function drainMyPendingReview(
+  prUrl: string
+): Promise<PendingReviewDrain> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return { status: "unavailable", error: "Invalid PR URL" };
+
+  let authorLogin = "";
+  try {
+    authorLogin = (await getAuthenticatedUserLogin()).trim();
+  } catch {
+    authorLogin = "";
+  }
+  if (!authorLogin) {
+    return {
+      status: "unavailable",
+      error: "GitHub did not return the signed-in user.",
+    };
+  }
+
+  const reviews = await execPaginatedArrayStrict<ReviewItem>(
+    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
+  );
+  if (!reviews) {
+    return {
+      status: "unavailable",
+      error: "Could not list the pull request's reviews.",
+    };
+  }
+  const pending = reviews.find(
+    (review) =>
+      (review.state || "").toUpperCase() === "PENDING" &&
+      review.user?.login === authorLogin &&
+      Number.isSafeInteger(review.id) &&
+      review.id > 0
+  );
+  if (!pending) return { status: "none" };
+
+  const comments = await execPaginatedArrayStrict<ReviewCommentItem>(
+    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews/${pending.id}/comments`
+  );
+  if (!comments) {
+    return {
+      status: "failed",
+      review_id: pending.id,
+      error: `Could not list the comments held by unsubmitted review ${pending.id}.`,
+    };
+  }
+
+  // A review body is held content in its own right: GitHub lets a pending review
+  // carry one independently of its inline comments. Classifying only the comments
+  // would delete a body-only draft and overwrite a body on submit, so the body is
+  // weighed with the same reviewer-authored test as every comment.
+  //
+  // The raw body and the trimmed one serve different jobs and must not be mixed:
+  // trimming answers "does it hold a body at all", while the value sent back on
+  // submit has to be the raw one, or submitting would rewrite trailing Markdown
+  // newlines out of a body this code promises to preserve. Ownership stays
+  // anchored on the raw body, so a prefix pushed off position 0 by leading
+  // whitespace is foreign.
+  const rawBody = pending.body || "";
+  const heldBody = rawBody.trim();
+  const foreignBody = Boolean(heldBody && !isReviewerAuthoredCommentBody(rawBody));
+
+  if (comments.length === 0 && !heldBody) {
+    const deleted = await execFileResult("gh", [
+      "api",
+      "--method",
+      "DELETE",
+      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews/${pending.id}`,
+    ]);
+    return deleted.ok
+      ? { status: "deleted", review_id: pending.id, comment_count: 0 }
+      : {
+          status: "failed",
+          review_id: pending.id,
+          comment_count: 0,
+          error: `Could not delete empty unsubmitted review ${pending.id}: ${
+            (deleted.stderr || deleted.stdout || "Unknown gh error").trim()
+          }`,
+        };
+  }
+
+  const foreignComments = comments.filter(
+    (comment) =>
+      comment.user?.login !== authorLogin ||
+      !isReviewerAuthoredCommentBody(comment.body)
+  );
+  if (foreignComments.length > 0 || foreignBody) {
+    const held = [
+      foreignComments.length > 0
+        ? `${foreignComments.length} comment(s)`
+        : undefined,
+      foreignBody ? "a review body" : undefined,
+    ]
+      .filter(Boolean)
+      .join(" and ");
+    const reviewerComments = comments.length - foreignComments.length;
+    return {
+      status: "foreign",
+      review_id: pending.id,
+      comment_count: comments.length,
+      error: [
+        `Unsubmitted review ${pending.id} holds ${held} Cortex City did not author, so it was left in place.`,
+        "Reviewer comments cannot publish on this PR until its author submits or discards it.",
+        reviewerComments > 0
+          ? `Discarding it also discards ${reviewerComments} reviewer comment(s) it holds, which a re-review has to regenerate.`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join(" "),
+    };
+  }
+
+  const submitted = await execFileResult("gh", [
+    "api",
+    "--method",
+    "POST",
+    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews/${pending.id}/events`,
+    "-f",
+    "event=COMMENT",
+    "-f",
+    // Submitting replaces the review body, so a body the reviewer already wrote
+    // is passed back byte-for-byte rather than traded for the recovery note or
+    // silently normalized.
+    `body=${heldBody ? rawBody : pendingReviewSubmitBody(comments.length)}`,
+  ]);
+  if (!submitted.ok) {
+    return {
+      status: "failed",
+      review_id: pending.id,
+      comment_count: comments.length,
+      error: `Could not submit unsubmitted review ${pending.id}: ${
+        (submitted.stderr || submitted.stdout || "Unknown gh error").trim()
+      }`,
+    };
+  }
+  return {
+    status: "submitted",
+    review_id: pending.id,
+    comment_count: comments.length,
+    receipts: comments
+      .filter((comment) => Number.isSafeInteger(comment.id) && comment.id > 0)
+      .map((comment) => ({
+        comment_id: comment.id,
+        author_login: authorLogin,
+        body_sha256: reviewerCommentBodySha256(comment.body || ""),
+        surface: "review_comment" as ReviewerCommentSurface,
+      })),
+  };
 }
 
 // Every comment the signed-in user posted with the reviewer prefix, optionally

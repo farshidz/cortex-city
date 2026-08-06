@@ -245,6 +245,42 @@ if (args[0] === "api") {
 
   if (args[1] === "--method" && args[2] === "POST") {
     const endpoint = args[3];
+    // Submitting a review that was left unsubmitted: the review flips to
+    // COMMENTED and keeps the comments it already holds.
+    const submitMatch = endpoint.match(
+      /^repos\\/([^/]+)\\/([^/]+)\\/pulls\\/(\\d+)\\/reviews\\/(\\d+)\\/events$/
+    );
+    if (submitMatch) {
+      const [, owner, repo, number, reviewIdText] = submitMatch;
+      const pr = getPr(state, owner, repo, number);
+      const review = (pr.reviews || []).find(
+        (candidate) => candidate.id === Number(reviewIdText)
+      );
+      if (!review) {
+        process.stderr.write("Review not found");
+        process.exit(1);
+      }
+      const eventIndex = args.indexOf("-f");
+      const fields = {};
+      for (let i = 0; i < args.length; i += 1) {
+        if (args[i] !== "-f") continue;
+        const pair = args[i + 1] || "";
+        const eq = pair.indexOf("=");
+        if (eq > 0) fields[pair.slice(0, eq)] = pair.slice(eq + 1);
+      }
+      if (eventIndex < 0 || fields.event !== "COMMENT") {
+        process.stderr.write("Unsupported review event");
+        process.exit(1);
+      }
+      review.state = "COMMENTED";
+      review.body = fields.body || "";
+      review.submitted_at = state.now || "2026-05-01T00:00:00Z";
+      if (process.env.FAKE_GH_STATE_FILE) {
+        writeFileSync(process.env.FAKE_GH_STATE_FILE, JSON.stringify(state));
+      }
+      output(review);
+      process.exit(0);
+    }
     const match = endpoint.match(/^repos\\/([^/]+)\\/([^/]+)\\/issues\\/(\\d+)\\/comments$/);
     if (!match) process.exit(0);
     const [, owner, repo, number] = match;
@@ -274,6 +310,26 @@ if (args[0] === "api") {
   if (args[1] === "--method" && ["PATCH", "DELETE"].includes(args[2])) {
     const method = args[2];
     const endpoint = args[3];
+    // Discarding a review that was left unsubmitted and holds no comments.
+    const reviewMatch = endpoint.match(
+      /^repos\\/([^/]+)\\/([^/]+)\\/pulls\\/(\\d+)\\/reviews\\/(\\d+)$/
+    );
+    if (reviewMatch && method === "DELETE") {
+      const [, owner, repo, number, reviewIdText] = reviewMatch;
+      const pr = getPr(state, owner, repo, number);
+      const index = (pr.reviews || []).findIndex(
+        (candidate) => candidate.id === Number(reviewIdText)
+      );
+      if (index < 0) {
+        process.stderr.write("Review not found");
+        process.exit(1);
+      }
+      pr.reviews.splice(index, 1);
+      if (process.env.FAKE_GH_STATE_FILE) {
+        writeFileSync(process.env.FAKE_GH_STATE_FILE, JSON.stringify(state));
+      }
+      process.exit(0);
+    }
     const match = endpoint.match(/^repos\\/([^/]+)\\/([^/]+)\\/issues\\/comments\\/(\\d+)$/);
     if (!match) process.exit(0);
     const [, owner, repo, idText] = match;
@@ -313,6 +369,21 @@ if (args[0] === "api") {
 
   if (args[1] === "--paginate" && args[2] === "--slurp") {
     const endpoint = args[3];
+    // The comments one review owns, which is how an unsubmitted review's
+    // contents are inspected before it is submitted or discarded.
+    const reviewCommentsMatch = endpoint.match(
+      /^repos\\/([^/]+)\\/([^/]+)\\/pulls\\/(\\d+)\\/reviews\\/(\\d+)\\/comments$/
+    );
+    if (reviewCommentsMatch) {
+      const [, owner, repo, number, reviewIdText] = reviewCommentsMatch;
+      const pr = getPr(state, owner, repo, number);
+      output([
+        (pr.comments || []).filter(
+          (comment) => comment.pull_request_review_id === Number(reviewIdText)
+        ),
+      ]);
+      process.exit(0);
+    }
     const match = endpoint.match(/^repos\\/([^/]+)\\/([^/]+)\\/(pulls|issues)\\/(\\d+)\\/(reviews|comments)$/);
     if (!match) process.exit(0);
     const [, owner, repo, scope, number, resource] = match;

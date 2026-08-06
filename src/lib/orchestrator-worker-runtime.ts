@@ -11,11 +11,13 @@ import {
 import {
   deliverReviewerComment,
   getLatestForeignCommentAt,
+  drainMyPendingReview,
   getPRBaseBranch,
   getPRDiffHash,
   getPRHeadSha,
   getPRMergeCommitSha,
   getPRStateHash,
+  type PendingReviewDrain,
   getPRStatus,
   getReviewRequestedPRs,
   isCommitAncestor,
@@ -189,6 +191,9 @@ export interface WorkerRuntimeDeps {
   getPRHeadSha?: typeof getPRHeadSha;
   getPRMergeCommitSha?: typeof getPRMergeCommitSha;
   getPRStateHash: typeof getPRStateHash;
+  // Absent leaves a recorded unsubmitted-review condition to the next review
+  // round instead of retrying it from the poll.
+  drainMyPendingReview?: typeof drainMyPendingReview;
   getPRStatus: typeof getPRStatus;
   getReviewRequestedPRs: typeof getReviewRequestedPRs;
   getTask: typeof getTask;
@@ -227,6 +232,7 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   getPRStatus,
   getReviewRequestedPRs,
   getTask,
+  drainMyPendingReview,
   isCommitAncestor,
   isPRMergedOrClosed,
   listUnresolvedReviewerThreads,
@@ -639,6 +645,87 @@ async function launchTaskRun(
   }
 }
 
+// A recorded unsubmitted-review condition does not heal itself. A PENDING review
+// and the comments it holds are excluded from the PR state hash by design, so a
+// failed repair changes nothing the scheduler can see and no later round is
+// guaranteed to run. This retries the repair directly — GitHub calls only, no
+// agent run and no additional reviewer comments — so a transient failure
+// converges, and a draft that belonged to someone else clears as soon as its
+// author submits or discards it.
+async function repairUnsubmittedReviewerReviews(
+  deps: WorkerRuntimeDeps
+): Promise<void> {
+  if (!deps.drainMyPendingReview) return;
+  for (const review of Object.values(deps.readReviewSummaryMap())) {
+    if (
+      !review.pending_review_error ||
+      review.final_at ||
+      review.current_run_pid != null ||
+      review.current_run_id != null
+    ) {
+      continue;
+    }
+    let drain: PendingReviewDrain;
+    try {
+      drain = await deps.drainMyPendingReview(review.pr_url);
+    } catch (error) {
+      deps.logger.error(
+        `[worker] Failed to repair the unsubmitted review on ${review.pr_url}:`,
+        error
+      );
+      continue;
+    }
+    // Unreadable GitHub says nothing about the draft, so the recorded condition
+    // stands rather than being cleared on a failed lookup.
+    if (drain.status === "unavailable") continue;
+    const repaired = drain.status !== "foreign" && drain.status !== "failed";
+    const saved = await mutateStoredReview(deps, review.pr_url, (current) => {
+      if (
+        !current ||
+        !current.pending_review_error ||
+        current.current_run_pid != null ||
+        current.current_run_id != null ||
+        // The drain ran outside the store lock, so this result describes the
+        // condition read at the top of the loop and nothing newer. A review
+        // round that finished in the meantime may have recorded a different
+        // draft; applying this result to it would clear a condition nobody
+        // inspected, and a PENDING review the state hash cannot see has no
+        // other way back onto anyone's queue.
+        current.pending_review_error !== review.pending_review_error
+      ) {
+        return undefined;
+      }
+      return {
+        ...current,
+        pending_review_error: repaired ? undefined : drain.error,
+        // Comments this publishes were written in earlier rounds, so they are
+        // receipted here for the same reason the in-round drain receipts them:
+        // becoming visible must not read as new PR activity.
+        reviewer_comment_receipts: drain.receipts?.length
+          ? appendReviewerCommentReceipts(
+              current.reviewer_comment_receipts,
+              drain.receipts
+            )
+          : current.reviewer_comment_receipts,
+      };
+    });
+    if (!saved) continue;
+    if (repaired) {
+      deps.logger.log(
+        `[worker] Repaired the unsubmitted review on ${review.pr_url} (${drain.status})`
+      );
+      // Nothing republishes comments a discarded draft took with it, and the
+      // state hash cannot see their absence, so the operator is told a
+      // re-review is what reproduces them.
+      if (drain.status === "none" && /Discarding it also discards/.test(review.pending_review_error)) {
+        deps.logger.log(
+          `[worker] The unsubmitted review on ${review.pr_url} is gone; if it was discarded rather than submitted, re-review the PR to reproduce the comments it held`
+        );
+      }
+    }
+  }
+}
+
 async function recoverPendingReviewerCommentDeliveries(
   deps: WorkerRuntimeDeps
 ): Promise<void> {
@@ -852,6 +939,8 @@ export async function pollOnce(
   await reconcileReviewRunOwnership(activeReviewPids, deps);
   deps.logger.log("[worker] Poll phase: recover reviewer comment deliveries");
   await recoverPendingReviewerCommentDeliveries(deps);
+  deps.logger.log("[worker] Poll phase: repair unsubmitted reviewer reviews");
+  await repairUnsubmittedReviewerReviews(deps);
   const initialTaskUpdatedAt = new Map(
     tasks.map((task) => [task.id, new Date(task.updated_at).getTime()])
   );
