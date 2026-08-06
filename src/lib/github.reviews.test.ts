@@ -1223,3 +1223,127 @@ test("drainMyPendingReview reports an unreadable reviews list as unavailable", (
     false
   );
 });
+
+test("drainMyPendingReview leaves a body-only draft in place instead of deleting it", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 77,
+              state: "PENDING",
+              // A review body is held content even with no inline comments, and
+              // on a self-authored PR it can be the human's, not the reviewer's.
+              body: "Draft summary I have not finished writing.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: { stdout: JSON.stringify([[]]) },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  const drain = result as { status: string; error: string };
+  assert.equal(drain.status, "foreign");
+  assert.match(drain.error, /holds a review body Cortex City did not author/);
+  assert.equal(
+    calls.some((call) => call.includes("--method")),
+    false
+  );
+});
+
+test("drainMyPendingReview will not overwrite a foreign body on reviewer comments", () => {
+  const workspace = setupWorkspace();
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 77,
+              state: "PENDING",
+              body: "My own summary, still being written.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 4101,
+              pull_request_review_id: 77,
+              body: "**🤖[Cortex City Reviewer]** Still open.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  const drain = result as { status: string; error: string };
+  // Submitting replaces the review body, so reviewer-owned comments do not make
+  // the human's body safe to publish under a generated note.
+  assert.equal(drain.status, "foreign");
+  assert.match(drain.error, /a review body Cortex City did not author/);
+  assert.equal(
+    calls.some((call) => call.includes("/events")),
+    false
+  );
+});
+
+test("drainMyPendingReview submits a reviewer-authored body unchanged", () => {
+  const workspace = setupWorkspace();
+  const heldBody = "**🤖[Cortex City Reviewer]** Round summary.";
+  const { result, calls } = runGhScript(
+    workspace,
+    DRAIN_IMPORT,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [DRAIN_REVIEWS_KEY]: {
+        stdout: JSON.stringify([
+          [{ id: 77, state: "PENDING", body: heldBody, user: { login: "me" } }],
+        ]),
+      },
+      [DRAIN_REVIEW_COMMENTS_KEY]: {
+        stdout: JSON.stringify([
+          [
+            {
+              id: 4101,
+              pull_request_review_id: 77,
+              body: "**🤖[Cortex City Reviewer]** Still open.",
+              user: { login: "me" },
+            },
+          ],
+        ]),
+      },
+      [`api --method POST repos/acme/widget/pulls/1/reviews/77/events -f event=COMMENT -f body=${heldBody}`]:
+        { stdout: "{}" },
+    },
+    drainScript(),
+    { recordCalls: true }
+  );
+
+  assert.equal((result as { status: string }).status, "submitted");
+  // The reviewer's own body is passed back verbatim rather than traded for the
+  // recovery note, which submitting would otherwise overwrite.
+  assert.equal(
+    calls.some((call) => call.endsWith(`-f body=${heldBody}`)),
+    true
+  );
+});

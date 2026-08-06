@@ -795,12 +795,13 @@ export async function getSubmittedCommentIds(prUrl: string): Promise<number[]> {
 export type PendingReviewDrainStatus =
   // Nothing pending for the signed-in user.
   | "none"
-  // Held only reviewer-authored comments; published as a COMMENT review.
+  // Held only reviewer-authored content; published as a COMMENT review.
   | "submitted"
-  // Held no comments, so there was nothing to publish.
+  // Held no comments and no review body, so there was nothing to publish.
   | "deleted"
-  // Holds comments Cortex City did not author — someone's review in progress.
-  // Left untouched: publishing another author's draft is not ours to do.
+  // Holds a comment or a review body Cortex City did not author — someone's
+  // review in progress. Left untouched: publishing or discarding another
+  // author's draft would destroy unfinished work.
   | "foreign"
   // GitHub could not be read. Nothing is known about a draft either way.
   | "unavailable"
@@ -882,7 +883,16 @@ export async function drainMyPendingReview(
     };
   }
 
-  if (comments.length === 0) {
+  // A review body is held content in its own right: GitHub lets a pending review
+  // carry one independently of its inline comments. Classifying only the comments
+  // would delete a body-only draft and overwrite a body on submit, so the body is
+  // weighed with the same reviewer-authored test as every comment.
+  const heldBody = (pending.body || "").trim();
+  const foreignBody = Boolean(
+    heldBody && !isReviewerAuthoredCommentBody(pending.body)
+  );
+
+  if (comments.length === 0 && !heldBody) {
     const deleted = await execFileResult("gh", [
       "api",
       "--method",
@@ -901,17 +911,25 @@ export async function drainMyPendingReview(
         };
   }
 
-  const ownedByReviewer = comments.every(
+  const foreignComments = comments.filter(
     (comment) =>
-      comment.user?.login === authorLogin &&
-      isReviewerAuthoredCommentBody(comment.body)
+      comment.user?.login !== authorLogin ||
+      !isReviewerAuthoredCommentBody(comment.body)
   );
-  if (!ownedByReviewer) {
+  if (foreignComments.length > 0 || foreignBody) {
+    const held = [
+      foreignComments.length > 0
+        ? `${foreignComments.length} comment(s)`
+        : undefined,
+      foreignBody ? "a review body" : undefined,
+    ]
+      .filter(Boolean)
+      .join(" and ");
     return {
       status: "foreign",
       review_id: pending.id,
       comment_count: comments.length,
-      error: `Unsubmitted review ${pending.id} holds ${comments.length} comment(s) Cortex City did not author, so it was left in place. Reviewer comments cannot publish until it is submitted or discarded.`,
+      error: `Unsubmitted review ${pending.id} holds ${held} Cortex City did not author, so it was left in place. Reviewer comments cannot publish until it is submitted or discarded.`,
     };
   }
 
@@ -923,7 +941,9 @@ export async function drainMyPendingReview(
     "-f",
     "event=COMMENT",
     "-f",
-    `body=${pendingReviewSubmitBody(comments.length)}`,
+    // Submitting replaces the review body, so a body the reviewer already wrote
+    // is passed back unchanged rather than traded for the recovery note.
+    `body=${heldBody || pendingReviewSubmitBody(comments.length)}`,
   ]);
   if (!submitted.ok) {
     return {

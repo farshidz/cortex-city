@@ -756,7 +756,36 @@ test("every round is told to publish comments and never leave an unsubmitted rev
       /list any unsubmitted review of your own with `gh api/i
     );
     assert.match(prompt, /-f event=COMMENT/);
-    assert.match(prompt, /delete one that holds none/i);
+    // The draft's contents are read before anything is submitted, because the
+    // signed-in login is shared with the human on a self-authored PR.
+    assert.match(prompt, /reviews\/<id>\/comments`/);
+    assert.match(
+      prompt,
+      /a held comment or review body is yours only when it begins with your reviewer prefix/i
+    );
+    assert.match(
+      prompt,
+      /Submit the review only when every held comment and its body are yours/i
+    );
+    // Submitting replaces the body, so an existing one is passed back untouched.
+    assert.match(
+      prompt,
+      /never substitute your own text for a body that is already there/i
+    );
+    // Deleting is for a draft that holds nothing, not for one that merely has no
+    // inline comments — a body-only draft is someone's unfinished summary.
+    assert.match(
+      prompt,
+      /Delete it, .*only when it holds no comments and no body at all/i
+    );
+    assert.match(
+      prompt,
+      /holds anything you did not write — one unprefixed comment, or only an unprefixed body — leave the review exactly as it is/i
+    );
+    assert.match(
+      prompt,
+      /Report that you found it and that your comments cannot publish/i
+    );
   }
   assert.doesNotMatch(
     initial,
