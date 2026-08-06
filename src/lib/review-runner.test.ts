@@ -626,7 +626,7 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
   assert.match(prompt, /running the repro or check you recorded for it/i);
   // Both comment surfaces get an action that exists on that surface: an inline
   // thread can be resolved, a PR conversation comment cannot.
-  assert.match(prompt, /report the outcome on the same GitHub surface/i);
+  assert.match(prompt, /report it on the same GitHub surface/i);
   assert.match(
     prompt,
     /inline review thread: reply on that thread with what you verified/i
@@ -638,7 +638,7 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
   assert.match(prompt, /Leave it unresolved otherwise/i);
   assert.match(
     prompt,
-    /PR conversation comment, which has no thread and cannot be resolved: post a new top-level comment with the outcome/i
+    /PR conversation comment, which has no thread and cannot be resolved: post a new top-level comment/i
   );
   assert.match(
     prompt,
@@ -654,6 +654,52 @@ test("buildReviewWrapperPrompt scopes follow-up reviews to prior findings and th
   assert.match(prompt, /return a clean status/i);
   assert.doesNotMatch(prompt, /Review the current PR fresh as well/i);
   assert.doesNotMatch(prompt, /This is the round in which to sweep/i);
+});
+
+test("buildReviewWrapperPrompt gates follow-up comments on a changed finding state", () => {
+  const cached = {
+    ...sampleRequest({ head_sha: "previous-head" }),
+    summary: "## Summary\nPreviously reviewed.",
+    summary_head_sha: "previous-head",
+    generated_at: "2026-05-01T00:10:00.000Z",
+    review_status: "needs_review",
+    review_state: "needs_review",
+  } satisfies ReviewSummary;
+
+  const prompt = buildReviewWrapperPrompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest({ head_sha: "current-head" }),
+    cached
+  );
+
+  // A comment is owed for a change in the finding's state, and the states that
+  // count are enumerated so an unchanged finding cannot qualify.
+  assert.match(
+    prompt,
+    /Post a GitHub comment for a verified finding only when this round changes what its thread or comment already says/i
+  );
+  assert.match(prompt, /you are withdrawing it as out of scope/i);
+  assert.match(prompt, /remaining ask is now materially narrower or wider/i);
+  assert.match(
+    prompt,
+    /materially different failure than the one already recorded/i
+  );
+  // The two non-changes that produced the duplicate comments this rule exists
+  // to stop: re-running the same check, and a new head SHA.
+  assert.match(
+    prompt,
+    /Running the recorded check and getting the recorded result is not a change, and neither is a new head SHA/i
+  );
+  assert.match(
+    prompt,
+    /still unfixed and otherwise unchanged owes no comment on either surface/i
+  );
+  // Silence on an unchanged finding must not read as an unfinished action.
+  assert.match(prompt, /never return `blocked` over it/i);
+  assert.match(
+    prompt,
+    /Report every finding that remains open in the generated review's findings and in the agent status/i
+  );
 });
 
 test("buildReviewWrapperPrompt sweeps sibling cases on initial reviews", () => {
@@ -815,7 +861,7 @@ test("buildReviewTier1Prompt carries the scope gate and both comment surfaces", 
 
   // A top-level PR comment has no resolvable thread, so the cheap tier needs the
   // same surface branching the full follow-up prompt has.
-  assert.match(prompt, /Report the outcome on the surface the finding was posted on/i);
+  assert.match(prompt, /report it on the surface the finding was posted on/i);
   assert.match(
     prompt,
     /inline review thread: reply on that thread with what you verified, and resolve it only when the finding is fixed/i
@@ -837,6 +883,44 @@ test("buildReviewTier1Prompt carries the scope gate and both comment surfaces", 
     /withdraw it instead of reporting it unfixed, on the same surface rule as above: a reply on its inline thread, or a new top-level comment when the finding was a PR conversation comment/i
   );
   assert.doesNotMatch(prompt, /withdraw it on its thread/i);
+});
+
+test("buildReviewTier1Prompt gates comments on a changed finding state", () => {
+  const cached = {
+    ...sampleRequest({ head_sha: "old-head" }),
+    summary: "## Summary\nPreviously reviewed.",
+    summary_head_sha: "old-head",
+    generated_at: "2026-05-01T00:10:00.000Z",
+    review_status: "new_commits",
+    review_state: "re_reviewing",
+  } satisfies ReviewSummary;
+  const prompt = buildReviewTier1Prompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest({ head_sha: "new-head" }),
+    cached
+  );
+
+  // This tier runs on every new head, so it is the round most likely to restate
+  // an unchanged finding.
+  assert.match(
+    prompt,
+    /Comment only when this round changes what a finding's thread or comment already says/i
+  );
+  assert.match(
+    prompt,
+    /still unfixed and otherwise unchanged owes no comment/i
+  );
+  assert.match(
+    prompt,
+    /running the recorded check to the recorded result at a new head SHA is not a change/i
+  );
+  assert.match(prompt, /Report those findings in your own output instead/i);
+  // Posting nothing is a valid round, so it must not be laundered into an
+  // escalation.
+  assert.match(
+    prompt,
+    /never return `escalate` merely because you posted nothing/i
+  );
 });
 
 test("buildReviewReplyPrompt answers conversation without re-reviewing", () => {
@@ -863,6 +947,14 @@ test("buildReviewReplyPrompt answers conversation without re-reviewing", () => {
     /<previous_review>\n## Summary\nPreviously reviewed\.\n<\/previous_review>/
   );
   assert.match(prompt, /reply on the existing thread each one belongs to/i);
+  // A reply round answers new conversation only; a quiet open thread is not an
+  // invitation to restate its finding.
+  assert.match(prompt, /Reply only where there is new conversation to answer/i);
+  assert.match(
+    prompt,
+    /thread with nothing new since your last round owes no comment/i
+  );
+  assert.match(prompt, /do not post a reply that only restates it/i);
   assert.match(prompt, /withdraw any earlier request of yours/i);
   assert.match(prompt, /must be one of: replied, needs_human_decision, blocked/);
   assert.match(prompt, /leaves the standing review verdict as it is/i);
