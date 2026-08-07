@@ -1047,8 +1047,18 @@ test("buildReviewReplyPrompt answers conversation without re-reviewing", () => {
   );
   assert.match(prompt, /do not post a reply that only restates it/i);
   assert.match(prompt, /withdraw any earlier request of yours/i);
-  assert.match(prompt, /must be one of: replied, needs_human_decision, blocked/);
+  assert.match(
+    prompt,
+    /must be one of: replied, resolved, needs_human_decision, blocked/
+  );
   assert.match(prompt, /leaves the standing review verdict as it is/i);
+  // `resolved` is how a settled verdict gets replaced. It hands the diff to a
+  // full review round rather than clearing the verdict itself.
+  assert.match(prompt, /Use `resolved` when the conversation settled the standing verdict/);
+  assert.match(prompt, /queues a full review round to replace it/i);
+  assert.match(prompt, /Do not declare the PR ready yourself/i);
+  // No standing verdict recorded, so none is named.
+  assert.doesNotMatch(prompt, /Standing verdict from your last review round/);
   assert.match(prompt, /Do not approve, request changes, or submit any review decision/i);
   assert.match(prompt, /## Human Decision/);
   // A reply round has no summary to write and no approval to give.
@@ -1066,6 +1076,7 @@ test("parseReviewReplyStatus reads only the reply round's own status line", () =
     "needs_human_decision"
   );
   assert.equal(parseReviewReplyStatus("Agent status: blocked"), "blocked");
+  assert.equal(parseReviewReplyStatus("Agent status: `resolved`"), "resolved");
   // A quoted finding in the prose is not a status.
   assert.equal(
     parseReviewReplyStatus(
@@ -1784,7 +1795,8 @@ test("a reply round answers conversation without touching the stored review", ()
 function runCheapReplyRound(
   prefix: string,
   claudeStdout: Record<string, unknown>,
-  claudeExtra: Record<string, unknown> = {}
+  claudeExtra: Record<string, unknown> = {},
+  standingVerdict = "needs_author_changes"
 ) {
   const workspace = setupRunnerWorkspace(prefix, TIER1_CONFIG);
   const scenarioFile = path.join(workspace, "scenario.json");
@@ -1821,7 +1833,7 @@ function runCheapReplyRound(
         summary_head_sha: "abc123",
         summary_diff_hash: "diff-1",
         generated_at: "2026-05-01T00:10:00.000Z",
-        agent_review_status: "needs_author_changes",
+        agent_review_status: ${JSON.stringify(standingVerdict)},
         last_conversation_seen_at: "2026-05-01T00:00:00.000Z",
       });
       await summarizePR(
@@ -1920,6 +1932,144 @@ test("a cheap reply round escalates instead of raising the decision itself", () 
     new Date(replied.persisted.last_conversation_seen_at).getTime() >
       Date.parse("2026-05-01T00:00:00.000Z")
   );
+});
+
+test("a reply round that settles the standing verdict hands the diff to tier 2", () => {
+  // The regression this guards: the standing verdict outlived the conversation
+  // that settled it. `replied` leaves the verdict alone by design, so a reply
+  // round agreeing the finding was fixed left `needs_author_changes` standing,
+  // and scheduling — a covered diff, no unanswered conversation — ran nothing
+  // else. `Ready for manual approval` then never got posted, because only a
+  // tier-2 round can reach `ready_for_human_approval`.
+  const resolved = runCheapReplyRound("review-runner-cheap-reply-resolved-", {
+    session_id: "s",
+    result: [
+      "The author landed the fix I asked for, so my request no longer applies.",
+      "## Agent Status",
+      "Agent status: `resolved`",
+    ].join("\n"),
+    is_error: false,
+  });
+
+  assert.equal(
+    resolved.persisted.pending_tier2_reason,
+    "conversation_resolved"
+  );
+  // The reply round does not get to replace the verdict itself; the queued
+  // tier-2 round does.
+  assert.equal(
+    resolved.persisted.agent_review_status,
+    "needs_author_changes"
+  );
+  assert.equal(resolved.persisted.review_state, "re_reviewing");
+  assert.equal(resolved.persisted.error, undefined);
+  assert.equal(resolved.persisted.summary, "## Summary\nThe standing review.");
+  // The hand-off is recorded as a resolution, not as a cheap-tier escalation.
+  assert.equal(
+    resolved.ghState.prs["acme/widget#1"].issueComments.length,
+    0
+  );
+
+  // A verdict that already reads `ready_for_human_approval` has nothing to
+  // re-derive, so a `resolved` reply against one queues no round.
+  const alreadyReady = runCheapReplyRound(
+    "review-runner-cheap-reply-resolved-ready-",
+    {
+      session_id: "s",
+      result: "Nothing left to do here.\n\n## Agent Status\nAgent status: `resolved`",
+      is_error: false,
+    },
+    {},
+    "ready_for_human_approval"
+  );
+  assert.equal(alreadyReady.persisted.pending_tier2_reason, undefined);
+  assert.equal(
+    alreadyReady.persisted.agent_review_status,
+    "ready_for_human_approval"
+  );
+});
+
+test("a tier-2 reply round hands a settled verdict on without tiering", () => {
+  // With tiering off there is no cheap-tier escalation to carry the hand-off, so
+  // the `resolved` status is the only thing that queues the round which replaces
+  // the verdict.
+  const workspace = setupRunnerWorkspace("review-runner-reply-resolved-full-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const argsFile = path.join(workspace, "agent-args.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {
+    prs: {
+      "acme/widget#1": {
+        state: "open",
+        merged: false,
+        headRefOid: "abc123",
+        issueComments: [],
+        reviews: [],
+        comments: [],
+        checks: [],
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "claude-reply-session",
+        result:
+          "The decision I raised is settled.\n\n## Agent Status\nAgent status: `resolved`",
+        is_error: false,
+      }),
+    },
+  });
+
+  const request = sampleRequest({ source: "task", task_id: "task-1" });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "## Summary\\nThe standing review.",
+        summary_head_sha: "abc123",
+        summary_diff_hash: "diff-1",
+        effective_diff_hash: "diff-1",
+        effective_diff_head_sha: "abc123",
+        generated_at: "2026-05-01T00:10:00.000Z",
+        agent_review_status: "needs_human_decision",
+        last_conversation_seen_at: "2026-05-01T00:00:00.000Z",
+      });
+      await summarizePR(
+        ${JSON.stringify(request)},
+        { runtime: "claude", round: "reply", diff_hash: "diff-1" }
+      );
+      const args = JSON.parse(require("node:fs").readFileSync(${JSON.stringify(argsFile)}, "utf-8"));
+      console.log(JSON.stringify({
+        args,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_AGENT_ARGS_FILE: argsFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  // The round is told which verdict is standing, so `resolved` is usable.
+  assert.match(
+    result.args.args.join("\n"),
+    /Standing verdict from your last review round: `needs_human_decision`/
+  );
+  assert.equal(
+    result.persisted.pending_tier2_reason,
+    "conversation_resolved"
+  );
+  assert.equal(result.persisted.agent_review_status, "needs_human_decision");
+  assert.equal(result.persisted.error, undefined);
+  assert.equal(result.persisted.summary, "## Summary\nThe standing review.");
 });
 
 test("a failed tier-1 run escalates even when its output parses", () => {

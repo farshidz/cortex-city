@@ -542,10 +542,11 @@ test("decideReviewRound keeps discovery and terminal passes on tier 2", () => {
     }),
     { round: "review", tier: 2, reason: "error_retry" }
   );
-  // Both tier-1 hand-offs run tier 2 at the same diff.
+  // Every hand-off runs tier 2 at the same diff, including a reply round's.
   for (const [reason, expected] of [
     ["fixes_verified", "tier1_verified"],
     ["escalate", "tier1_escalated"],
+    ["conversation_resolved", "reply_resolved"],
   ] as const) {
     assert.deepEqual(
       decideReviewRound({
@@ -1773,6 +1774,50 @@ test("task review completion wakes the builder only for current actionable findi
 
   assert.equal(optedOut.tasks[0].resume_requested, undefined);
   assert.equal(optedOut.tasks[0].resume_run_mode, undefined);
+});
+
+test("a hand-off to tier 2 queues the round instead of waking the builder", async () => {
+  // A round that hands its diff on preserves the standing verdict without
+  // standing behind it: `conversation_resolved` from a reply round whose
+  // conversation settled the finding, `escalate` from a cheap reply round that
+  // found something the full pass must own. Acting on the preserved verdict
+  // would send the author after a finding that may already be settled, and the
+  // resumed builder runs before review phases on the next poll, delaying the
+  // round that would have replaced the verdict.
+  for (const pendingReason of ["conversation_resolved", "escalate"] as const) {
+    const task = makeTask({ id: `handoff-${pendingReason}` });
+    const h = makeHarness({
+      tasks: [task],
+      prHeadShas: { [task.pr_url!]: "handoff-head" },
+    });
+    await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+    assert.equal(h.reviewCompletions.length, 1);
+
+    const request = h.spawnCalls[0];
+    const handedOff = makeSummary(request, {
+      summary: "## Summary\nThe standing review.",
+      summary_head_sha: request.head_sha,
+      generated_at: "2026-05-01T00:20:00.000Z",
+      agent_review_status: "needs_author_changes",
+      pending_tier2_reason: pendingReason,
+      current_run_pid: undefined,
+    });
+    await h.reviewCompletions[0](handedOff);
+
+    assert.equal(h.tasks[0].resume_requested, undefined);
+    assert.equal(h.tasks[0].resume_run_mode, undefined);
+    assert.deepEqual(h.builderCalls, []);
+    assert.equal(h.activeReviewPids.has(request.pr_url), false);
+
+    // What runs next is the tier-2 pass that replaces the verdict.
+    await h.deps.upsertReviewSummary(handedOff);
+    await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+    assert.equal(h.spawnRounds.length, 2);
+    assert.equal(h.spawnRounds[1].pr_url, request.pr_url);
+    assert.equal(h.spawnRounds[1].round, "review");
+    assert.equal(h.spawnRounds[1].tier, 2);
+    assert.deepEqual(h.builderCalls, []);
+  }
 });
 
 test("paused and automatic-review-disabled task PRs stay live without spawning", async () => {

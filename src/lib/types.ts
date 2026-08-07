@@ -325,6 +325,16 @@ export type ReviewTier1Status =
   | "needs_author_changes"
   | "escalate";
 
+// Why a completed round handed its diff to a tier-2 pass instead of settling it.
+// `fixes_verified` and `escalate` come from a tier-1 verification round;
+// `conversation_resolved` comes from a reply round whose conversation settled the
+// standing verdict. All three mean the same thing to scheduling: the recorded
+// verdict no longer describes this diff, and only a tier-2 round may replace it.
+export type ReviewPendingTier2Reason =
+  | "fixes_verified"
+  | "escalate"
+  | "conversation_resolved";
+
 // One unresolved reviewer-authored review thread, listed mechanically by the
 // orchestrator so a tier-1 round starts from pointers instead of a transcript.
 export interface ReviewerThreadSummary {
@@ -421,9 +431,10 @@ export interface ReviewSummary extends ReviewRequest {
   // tier-1 round at a PR whose diff GitHub could not identify still counts as
   // covering the current head instead of repeating forever.
   last_round_head_sha?: string;
-  // Set by a tier-1 round that cannot conclude on its own. The next round is a
-  // tier-2 pass at the same diff; a terminal verdict never comes from tier 1.
-  pending_tier2_reason?: "fixes_verified" | "escalate";
+  // Set by a round that cannot conclude on its own: a tier-1 verification round,
+  // or a reply round that reports the standing verdict settled. The next round is
+  // a tier-2 pass at the same diff; a terminal verdict never comes from either.
+  pending_tier2_reason?: ReviewPendingTier2Reason;
   generated_at: string;
   review_status: ReviewStatus;
   review_state: ReviewState;

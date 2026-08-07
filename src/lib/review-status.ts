@@ -1,5 +1,6 @@
 import type {
   ReviewAgentStatus,
+  ReviewPendingTier2Reason,
   ReviewSource,
   ReviewState,
   ReviewStatus,
@@ -69,7 +70,7 @@ export function summaryCoversHead(review: ReviewStatusInput): boolean {
 
 export interface ReviewStateInput extends ReviewStatusInput {
   agent_review_status?: ReviewAgentStatus;
-  pending_tier2_reason?: "fixes_verified" | "escalate";
+  pending_tier2_reason?: ReviewPendingTier2Reason;
   my_approval_sha?: string;
   my_changes_requested_sha?: string;
 }
@@ -143,8 +144,8 @@ export function deriveReviewState(review: ReviewStateInput): ReviewState {
   // Summary present: a stale summary means the diff moved on (verdict already
   // cleared). A rebase that preserved the diff is not stale.
   if (!summaryCoversHead(review)) return "re_reviewing";
-  // A cheap verification round handed this diff to a full review round that has
-  // not run yet, so the reviewer has not settled on it either.
+  // A verification or reply round handed this diff to a full review round that
+  // has not run yet, so the reviewer has not settled on it either.
   if (review.pending_tier2_reason) return "re_reviewing";
 
   if (

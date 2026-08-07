@@ -487,6 +487,7 @@ export type ReviewRoundReason =
   | "conversation"
   | "tier1_verified"
   | "tier1_escalated"
+  | "reply_resolved"
   | "debouncing"
   | "error_backoff"
   | "up_to_date";
@@ -582,8 +583,9 @@ export function decideReviewRound(
     };
   }
 
-  // A tier-1 round handed this diff on. `fixes_verified` still gets the full
-  // pass: `ready_for_human_approval` may only come from tier 2.
+  // An earlier round handed this diff on. `fixes_verified` and a reply round's
+  // `conversation_resolved` still get the full pass: `ready_for_human_approval`
+  // may only come from tier 2.
   if (tier2Pending) {
     return {
       round: "review",
@@ -591,7 +593,9 @@ export function decideReviewRound(
       reason:
         review.pending_tier2_reason === "fixes_verified"
           ? "tier1_verified"
-          : "tier1_escalated",
+          : review.pending_tier2_reason === "conversation_resolved"
+            ? "reply_resolved"
+            : "tier1_escalated",
     };
   }
 
@@ -2196,6 +2200,13 @@ async function runReviewPhases(
               summary.source === "task" &&
               summary.task_id &&
               summary.agent_review_status === "needs_author_changes" &&
+              // A round that handed this diff to a tier-2 pass preserved the
+              // standing verdict without standing behind it, so the verdict is
+              // not actionable until that pass replaces it. Waking the author
+              // here would send them after a finding the conversation may have
+              // just settled, and the resumed builder runs before review phases
+              // on the next poll, delaying the round that would have said so.
+              !summary.pending_tier2_reason &&
               // Any tier's round covering the current diff is actionable; a
               // tier-1 round reports one without rewriting the summary.
               summaryCoversHead(summary)
