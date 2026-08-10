@@ -26,8 +26,6 @@ EFFORTS = frozenset(
 PERMISSION_MODES = frozenset(
     {"bypassPermissions", "acceptEdits", "auto", "default", "yolo"}
 )
-PROMPT_MODES = frozenset({"initial", "review", "cleanup"})
-REVIEW_DECISIONS = frozenset({"approve", "request-changes", "comment"})
 
 
 @dataclass(frozen=True)
@@ -43,7 +41,6 @@ class Operation:
     body_required: bool = False
     query_values: dict[str, frozenset[str]] = field(default_factory=dict)
     body_values: dict[str, frozenset[str]] = field(default_factory=dict)
-    redact_env: bool = False
 
 
 OPERATIONS: dict[str, Operation] = {
@@ -79,15 +76,6 @@ OPERATIONS: dict[str, Operation] = {
             "effort": EFFORTS, "status": TASK_STATUSES,
         },
     ),
-    "tasks.delete": Operation("DELETE", "/api/tasks/{id}", "Delete a task", needs_id=True),
-    "tasks.instruct": Operation(
-        "POST", "/api/tasks/{id}/instruction", "Queue a manual task instruction", needs_id=True,
-        allowed_body=frozenset({"instruction"}), required_body=frozenset({"instruction"}),
-        body_required=True,
-    ),
-    "tasks.session": Operation(
-        "GET", "/api/tasks/{id}/session", "Read a task session transcript", needs_id=True,
-    ),
     "issues.list": Operation(
         "GET", "/api/issues", "List issues",
         allowed_query=frozenset({"show_resolved", "page", "page_size"}),
@@ -111,25 +99,7 @@ OPERATIONS: dict[str, Operation] = {
         allowed_body=frozenset({"body"}), required_body=frozenset({"body"}), body_required=True,
     ),
     "issues.delete": Operation("DELETE", "/api/issues/{id}", "Delete an issue", needs_id=True),
-    "sessions.list": Operation("GET", "/api/sessions", "List active sessions"),
-    "sessions.kill": Operation(
-        "POST", "/api/sessions", "Kill an active task or review session",
-        allowed_body=frozenset({"task_id", "kind", "run_kind"}),
-        required_body=frozenset({"task_id"}), body_required=True,
-        body_values={
-            "kind": frozenset({"task", "review"}),
-            "run_kind": frozenset({"review", "review_retro"}),
-        },
-    ),
-    "orchestrator.status": Operation("GET", "/api/orchestrator", "Get worker status"),
-    "orchestrator.poll": Operation("POST", "/api/orchestrator", "Request a worker poll"),
     "reviews.list": Operation("GET", "/api/reviews", "List inbound review summaries"),
-    "reviews.regenerate": Operation(
-        "POST", "/api/reviews/summarize", "Regenerate a cached PR review summary",
-        allowed_body=frozenset({"pr_url", "runtime", "effort", "model"}),
-        required_body=frozenset({"pr_url"}), body_required=True,
-        body_values={"runtime": RUNTIMES, "effort": EFFORTS},
-    ),
     "reviews.followups": Operation(
         "GET", "/api/reviews/followup", "List review follow-ups",
         allowed_query=frozenset({"pr_url"}), required_query=frozenset({"pr_url"}),
@@ -139,29 +109,6 @@ OPERATIONS: dict[str, Operation] = {
         allowed_body=frozenset({"pr_url", "question"}),
         required_body=frozenset({"pr_url", "question"}), body_required=True,
     ),
-    "reviews.submit": Operation(
-        "POST", "/api/reviews/submit", "Submit a GitHub PR review or comment",
-        allowed_body=frozenset({"pr_url", "decision", "body"}),
-        required_body=frozenset({"pr_url", "decision"}), body_required=True,
-        body_values={"decision": REVIEW_DECISIONS},
-    ),
-    "config.get": Operation("GET", "/api/config", "Read global configuration"),
-    "review-learnings.get": Operation(
-        "GET", "/api/reviews/learnings", "Read shared reviewer learnings",
-    ),
-    "prompts.get": Operation("GET", "/api/prompts", "Read prompt templates"),
-    "agent-prompt.get": Operation(
-        "GET", "/api/agents/{id}/prompt", "Read an agent prompt", needs_id=True,
-        allowed_query=frozenset({"mode"}), query_values={"mode": PROMPT_MODES},
-    ),
-    "agent-env.get": Operation(
-        "GET", "/api/agents/{id}/env", "List an agent's environment keys with redacted values",
-        needs_id=True, redact_env=True,
-    ),
-    "agent-status.get": Operation(
-        "GET", "/api/agent-status", "Read runtime quota status"
-    ),
-    "cortex-git.get": Operation("GET", "/api/cortex-git", "Read Cortex City git status"),
 }
 
 
@@ -274,7 +221,7 @@ def enforce_settings_boundary(method: str, path: str) -> None:
         fail(f"agent settings writes are prohibited: {method} {path}")
 
 
-def render_payload(raw: bytes, compact: bool, redact_env: bool) -> str:
+def render_payload(raw: bytes, compact: bool) -> str:
     text = raw.decode("utf-8", errors="replace")
     if not text:
         return ""
@@ -282,8 +229,6 @@ def render_payload(raw: bytes, compact: bool, redact_env: bool) -> str:
         value = json.loads(text)
     except json.JSONDecodeError:
         return text
-    if redact_env and isinstance(value, dict) and isinstance(value.get("vars"), dict):
-        value = {**value, "vars": {key: "<redacted>" for key in value["vars"]}}
     if compact:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
@@ -368,12 +313,12 @@ def main() -> int:
 
     try:
         with urlopen(request, timeout=args.timeout) as response:
-            rendered = render_payload(response.read(), args.compact, spec.redact_env)
+            rendered = render_payload(response.read(), args.compact)
             if rendered:
                 print(rendered)
             return 0
     except HTTPError as error:
-        rendered = render_payload(error.read(), args.compact, False)
+        rendered = render_payload(error.read(), args.compact)
         print(f"HTTP {error.code} {error.reason}", file=sys.stderr)
         if rendered:
             print(rendered, file=sys.stderr)

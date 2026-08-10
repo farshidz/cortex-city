@@ -1,11 +1,11 @@
 ---
 name: cortex-city-api
-description: Operate a running Cortex City instance through the same local HTTP API used by its UI. Use when an agent needs to inspect or manage Cortex City tasks, issues, sessions, reviews, worker state, quotas, prompts, or other UI-visible operational data at http://localhost:3001/. Supports guarded writes while prohibiting global settings, agent prompt, agent environment, and reviewer-learning modifications.
+description: Operate a running Cortex City instance through a restricted subset of the local HTTP API used by its UI. Use when an agent needs to list, inspect, create, or update tasks; manage issues; or list reviews and ask review follow-up questions at http://localhost:3001/. Supports guarded writes while excluding session, worker-control, review-submission, review-regeneration, configuration, and status operations.
 ---
 
 # Cortex City API
 
-Use the bundled client instead of writing ad hoc `curl` commands. It provides named UI operations, validates request fields, prints JSON responses, and blocks global-settings writes.
+Use the bundled client instead of writing ad hoc `curl` commands. It provides a restricted set of named UI operations, validates request fields, and prints JSON responses.
 
 ## Run the client
 
@@ -22,7 +22,7 @@ Read data:
 ```bash
 python3 skills/cortex-city-api/scripts/cortex_city_api.py tasks.list --query status=open
 python3 skills/cortex-city-api/scripts/cortex_city_api.py tasks.get --id TASK_ID
-python3 skills/cortex-city-api/scripts/cortex_city_api.py orchestrator.status
+python3 skills/cortex-city-api/scripts/cortex_city_api.py reviews.list
 ```
 
 Preview a write without sending it:
@@ -52,31 +52,28 @@ Use `--data-file PATH` for long JSON bodies. Use `--data-file -` to read JSON fr
 5. Add `--confirm` and execute the named operation. Report the returned object or the API error.
 6. Re-read state after asynchronous operations when the user needs completion status. Poll at a modest interval and stop when the requested terminal condition is reached.
 
-## Respect the settings boundary
+## Respect the operation boundary
 
-Global settings are repository-wide Cortex City configuration and shared reviewer configuration. Keep them read-only.
+Use only operations listed by `--list-operations`. The client excludes:
 
-The client permits `config.get`, `review-learnings.get`, `agent-prompt.get`, and a redacted `agent-env.get`. It blocks writes to:
+- task deletion, manual instructions, and session transcripts
+- active-session and worker-control operations
+- review regeneration and GitHub review submission
+- all configuration, prompt, environment, learning, quota, and status operations
 
-- `/api/config`
-- `/api/reviews/learnings`
-- `/api/agents/{id}/prompt`
-- `/api/agents/{id}/env`
-
-Do not bypass this boundary with `curl`, another HTTP client, or direct file edits. `agent-env.get` replaces every environment value with `<redacted>` before printing it.
+Do not bypass this boundary with `curl`, another HTTP client, or direct file edits.
 
 ## Handle consequential operations
 
 All writes require `--confirm`. Give extra attention to these operations:
 
 - `tasks.create` can be picked up by the worker immediately and consume model quota.
-- `tasks.delete` and `issues.delete` remove stored records. Task deletion can also remove a worktree.
-- `tasks.instruct`, `orchestrator.poll`, `reviews.regenerate`, and `reviews.followup` can launch model work.
-- `sessions.kill` terminates an active run.
-- `reviews.submit` posts an approval, change request, or comment to GitHub.
+- `tasks.update` can remove a worktree when it sets the task status to `merged` or `closed`.
+- `issues.delete` removes a stored issue.
+- `reviews.followup` can launch model work.
 
-Use only IDs and PR URLs returned by Cortex City or explicitly supplied by the user. Preserve user-authored Markdown exactly in descriptions, plans, notes, comments, instructions, and review bodies.
+Use only IDs and PR URLs returned by Cortex City or explicitly supplied by the user. Preserve user-authored Markdown exactly in descriptions, plans, notes, comments, and review questions.
 
 ## Handle failures
 
-The client exits nonzero for validation, connection, and HTTP errors. Preserve the API's status and response body when reporting a failure. Common conflicts include an active task that cannot be deleted, an issue already linked to a task, a review run already in flight, and a manual instruction already pending.
+The client exits nonzero for validation, connection, and HTTP errors. Preserve the API's status and response body when reporting a failure. Common conflicts include an issue already linked to a task and an issue that cannot be deleted while linked.

@@ -1,4 +1,4 @@
 interface:
   display_name: "Cortex City API"
-  short_description: "Operate Cortex City through its local API"
-  default_prompt: "Use $cortex-city-api to inspect and operate Cortex City through its local API."
+  short_description: "Manage Cortex City tasks, issues, and reviews"
+  default_prompt: "Use $cortex-city-api to manage Cortex City tasks, issues, or review follow-ups."
