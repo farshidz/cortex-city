@@ -14,21 +14,21 @@ Run `scripts/cortex_city_api.py` from this skill directory with Python 3. The de
 List supported operations:
 
 ```bash
-python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py --list-operations
+python3 skills/cortex-city-api/scripts/cortex_city_api.py --list-operations
 ```
 
 Read data:
 
 ```bash
-python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py tasks.list --query status=open
-python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py tasks.get --id TASK_ID
-python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py orchestrator.status
+python3 skills/cortex-city-api/scripts/cortex_city_api.py tasks.list --query status=open
+python3 skills/cortex-city-api/scripts/cortex_city_api.py tasks.get --id TASK_ID
+python3 skills/cortex-city-api/scripts/cortex_city_api.py orchestrator.status
 ```
 
 Preview a write without sending it:
 
 ```bash
-python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py issues.create \
+python3 skills/cortex-city-api/scripts/cortex_city_api.py issues.create \
   --data '{"title":"Investigate flaky test","description":"Collect failure patterns"}' \
   --dry-run
 ```
@@ -36,7 +36,7 @@ python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py issues.create 
 Perform a write after confirming it matches the user's intent:
 
 ```bash
-python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py issues.create \
+python3 skills/cortex-city-api/scripts/cortex_city_api.py issues.create \
   --data '{"title":"Investigate flaky test","description":"Collect failure patterns"}' \
   --confirm
 ```

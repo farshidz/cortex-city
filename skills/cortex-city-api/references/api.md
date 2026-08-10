@@ -15,7 +15,7 @@ The bundled client maps named operations to the routes called by the Cortex City
 ## Common syntax
 
 ```bash
-python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py OPERATION \
+python3 skills/cortex-city-api/scripts/cortex_city_api.py OPERATION \
   [--id ID] [--query KEY=VALUE] [--data JSON | --data-file PATH] [--confirm]
 ```
 
@@ -108,10 +108,10 @@ For a task session, `sessions.kill` needs only `task_id`. For a review session, 
 Examples:
 
 ```bash
-python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py reviews.followups \
+python3 skills/cortex-city-api/scripts/cortex_city_api.py reviews.followups \
   --query 'pr_url=https://github.com/example/repo/pull/42'
 
-python3 .agents/skills/cortex-city-api/scripts/cortex_city_api.py reviews.submit \
+python3 skills/cortex-city-api/scripts/cortex_city_api.py reviews.submit \
   --data '{"pr_url":"https://github.com/example/repo/pull/42","decision":"comment","body":"Please add the missing test."}' \
   --confirm
 ```
