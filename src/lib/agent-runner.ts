@@ -3,7 +3,13 @@ import { writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
 import path from "path";
 import os from "os";
 import { nanoid } from "nanoid";
-import { getCortexPath, getTask, readConfig, updateTask, createTask } from "./store";
+import {
+  getCortexPath,
+  readConfig,
+  updateTask,
+  updateTaskAtomically,
+  createTask,
+} from "./store";
 import {
   buildInitialPrompt,
   buildReviewPrompt,
@@ -219,6 +225,7 @@ function execCommand(
   options: {
     env?: NodeJS.ProcessEnv;
     timeoutMs?: number;
+    signal?: AbortSignal;
   } = {}
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -231,6 +238,7 @@ function execCommand(
         maxBuffer: GIT_MAX_BUFFER_BYTES,
         env: options.env,
         timeout: options.timeoutMs,
+        signal: options.signal,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -629,7 +637,10 @@ export async function spawnAgentSession(
   const shouldPersistLivePullRequests =
     mode === "initial" &&
     (runReason === "initial" || runReason === "resume_after_kill");
-  let livePullRequestUpdate = Promise.resolve();
+  let livePullRequestUpdatePending = false;
+  let livePullRequestUpdateRunning = false;
+  let livePullRequestUpdatesOpen = true;
+  const livePullRequestAbortController = new AbortController();
   let capturedSessionId = false;
   let didTimeout = false;
   let didFinalize = false;
@@ -645,6 +656,12 @@ export async function spawnAgentSession(
     if (didFinalize) return;
     didFinalize = true;
     clearRunTimers();
+    // The final structured report is authoritative once the runtime exits.
+    // Stop best-effort live lookups so queued network work cannot delay
+    // completion or write provisional state after final reconciliation.
+    livePullRequestUpdatesOpen = false;
+    livePullRequestUpdatePending = false;
+    livePullRequestAbortController.abort();
     if (runtime === "codex") {
       codexEventBuffer = flushCodexEventBuffer("\n", codexEventBuffer, (event) => {
         const normalizedEvent = withCodexReceivedAt(event);
@@ -652,11 +669,43 @@ export async function spawnAgentSession(
         handleCodexEvent(normalizedEvent, codexAccumulator, sessionLog.transcript);
       });
     }
-    await livePullRequestUpdate;
     sessionLog.machine.end();
     sessionLog.transcript.end();
     await handler();
     await onComplete(task.id);
+  };
+
+  const queueLivePullRequestUpdate = () => {
+    livePullRequestUpdatePending = true;
+    if (livePullRequestUpdateRunning || !livePullRequestUpdatesOpen) return;
+
+    livePullRequestUpdateRunning = true;
+    void (async () => {
+      try {
+        while (livePullRequestUpdatesOpen && livePullRequestUpdatePending) {
+          livePullRequestUpdatePending = false;
+          await persistLivePullRequestProgress(
+            task.id,
+            cwd,
+            [...livePullRequestUrls],
+            agentEnv,
+            () => livePullRequestUpdatesOpen,
+            livePullRequestAbortController.signal
+          );
+        }
+      } catch (error) {
+        if (livePullRequestUpdatesOpen) {
+          console.warn(
+            `[agent-runner] Could not persist live PR progress for task ${task.id}: ${getExecErrorMessage(error)}`
+          );
+        }
+      } finally {
+        livePullRequestUpdateRunning = false;
+        if (livePullRequestUpdatesOpen && livePullRequestUpdatePending) {
+          queueLivePullRequestUpdate();
+        }
+      }
+    })();
   };
 
   const handleCodexEvent = (
@@ -674,14 +723,7 @@ export async function spawnAgentSession(
       for (const prUrl of createdPullRequestUrls) {
         livePullRequestUrls.add(prUrl);
       }
-      const urls = [...livePullRequestUrls];
-      livePullRequestUpdate = livePullRequestUpdate
-        .then(() => persistLivePullRequestProgress(task.id, cwd, urls, agentEnv))
-        .catch((error) => {
-          console.warn(
-            `[agent-runner] Could not persist live PR progress for task ${task.id}: ${getExecErrorMessage(error)}`
-          );
-        });
+      queueLivePullRequestUpdate();
     }
     if (!capturedSessionId && event.type === "thread.started" && event.thread_id) {
       capturedSessionId = true;
@@ -963,7 +1005,8 @@ function pullRequestUrlsCreatedByCodex(event: CodexEvent): string[] {
 async function inspectLivePullRequest(
   cwd: string,
   prUrl: string,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  signal?: AbortSignal
 ): Promise<LivePullRequest | undefined> {
   try {
     const output = await execCommand(
@@ -979,6 +1022,7 @@ async function inspectLivePullRequest(
       {
         env,
         timeoutMs: LIVE_PULL_REQUEST_LOOKUP_TIMEOUT_MS,
+        signal,
       }
     );
     const parsed = JSON.parse(output) as Partial<LivePullRequest>;
@@ -996,6 +1040,7 @@ async function inspectLivePullRequest(
       title: parsed.title?.trim() || headRefName,
     };
   } catch (error) {
+    if (signal?.aborted) return undefined;
     console.warn(
       `[agent-runner] Could not inspect live PR ${prUrl}: ${getExecErrorMessage(error)}`
     );
@@ -1039,55 +1084,61 @@ async function persistLivePullRequestProgress(
   taskId: string,
   cwd: string,
   prUrls: string[],
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  canPersist: () => boolean = () => true,
+  signal?: AbortSignal
 ): Promise<void> {
-  const currentTask = await getTask(taskId);
-  if (!currentTask) return;
+  if (!canPersist()) return;
 
   const inspected = await Promise.all(
-    prUrls.map((prUrl) => inspectLivePullRequest(cwd, prUrl, env))
+    prUrls.map((prUrl) => inspectLivePullRequest(cwd, prUrl, env, signal))
   );
   if (inspected.some((pullRequest) => !pullRequest)) return;
   const pullRequests = inspected as LivePullRequest[];
 
   const ordered = orderLivePullRequestStack(pullRequests);
-  if (ordered) {
-    if (currentTask.stacked_prs?.some((entry) => !entry.provisional)) return;
-    const stack = ordered.map((pullRequest, index) => ({
-      position: index + 1,
+  await updateTaskAtomically(taskId, (currentTask) => {
+    if (!canPersist() || currentTask.status !== "in_progress") return undefined;
+
+    if (ordered) {
+      if (currentTask.stacked_prs?.some((entry) => !entry.provisional)) {
+        return undefined;
+      }
+      const stack = ordered.map((pullRequest, index) => ({
+        position: index + 1,
+        pr_url: pullRequest.url,
+        branch_name: pullRequest.headRefName,
+        base_branch: pullRequest.baseRefName,
+        scope: pullRequest.title,
+        state: "open" as const,
+        provisional: true,
+      }));
+      const frontier = frontierStackedPR(stack);
+      return {
+        stacked_prs: stack,
+        pr_url: frontier?.pr_url,
+        branch_name: frontier?.branch_name,
+        pr_url_provisional: true,
+      };
+    }
+
+    if ((currentTask.stacked_prs?.length ?? 0) > 0) return undefined;
+    if (currentTask.pr_url && !currentTask.pr_url_provisional) return undefined;
+    const pullRequest = currentTask.pr_url
+      ? pullRequests.find((candidate) => candidate.url === currentTask.pr_url)
+      : pullRequests[0];
+    if (!pullRequest) return undefined;
+    if (
+      currentTask.pr_url === pullRequest.url &&
+      currentTask.branch_name === pullRequest.headRefName
+    ) {
+      return undefined;
+    }
+    return {
       pr_url: pullRequest.url,
       branch_name: pullRequest.headRefName,
-      base_branch: pullRequest.baseRefName,
-      scope: pullRequest.title,
-      state: "open" as const,
-      provisional: true,
-    }));
-    const frontier = frontierStackedPR(stack);
-    await updateTask(taskId, {
-      stacked_prs: stack,
-      pr_url: frontier?.pr_url,
-      branch_name: frontier?.branch_name,
       pr_url_provisional: true,
-    });
-    return;
-  }
-
-  if ((currentTask.stacked_prs?.length ?? 0) > 0) return;
-  if (currentTask.pr_url && !currentTask.pr_url_provisional) return;
-  const pullRequest = currentTask.pr_url
-    ? pullRequests.find((candidate) => candidate.url === currentTask.pr_url)
-    : pullRequests[0];
-  if (!pullRequest) return;
-  if (
-    currentTask.pr_url === pullRequest.url &&
-    currentTask.branch_name === pullRequest.headRefName
-  ) {
-    return;
-  }
-  await updateTask(taskId, {
-    pr_url: pullRequest.url,
-    branch_name: pullRequest.headRefName,
-    pr_url_provisional: true,
+    };
   });
 }
 

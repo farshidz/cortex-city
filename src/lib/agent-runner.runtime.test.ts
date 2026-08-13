@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 
 import type { OrchestratorConfig, Task } from "./types";
@@ -66,7 +72,7 @@ function runAgentRunnerScript(
     workspace,
     [
       `import { spawnAgentSession, removeWorktree, __testUtils } from ${JSON.stringify(AGENT_RUNNER_MODULE_URL)};`,
-      `import { createTask, readTasks } from ${JSON.stringify(STORE_MODULE_URL)};`,
+      `import { createTask, readTasks, updateTask } from ${JSON.stringify(STORE_MODULE_URL)};`,
     ],
     body,
     env
@@ -876,7 +882,7 @@ test("spawnAgentSession exposes a growing PR stack before Codex exits", () => {
           })}\n`,
         },
       ],
-      sleepMs: 250,
+      sleepMs: 2000,
     },
   });
 
@@ -897,7 +903,7 @@ test("spawnAgentSession exposes a growing PR stack before Codex exits", () => {
       });
 
       let firstPrTask;
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
         const candidate = readTasks()[0];
         if (candidate.pr_url) {
           firstPrTask = JSON.parse(JSON.stringify(candidate));
@@ -906,7 +912,7 @@ test("spawnAgentSession exposes a growing PR stack before Codex exits", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       let liveTask;
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
         liveTask = readTasks()[0];
         if (liveTask.stacked_prs?.length === 2) break;
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -970,6 +976,91 @@ test("spawnAgentSession exposes a growing PR stack before Codex exits", () => {
       },
     ]
   );
+});
+
+test("spawnAgentSession does not wait for queued live PR lookups at exit", () => {
+  const { workspace } = setupWorkspace();
+  const scenarioFile = path.join(workspace, "agent-scenario.json");
+  const ghStateFile = path.join(workspace, "gh-queued-live-pr-state.json");
+  const callsFile = path.join(workspace, "gh-queued-live-pr-calls.jsonl");
+  const pullRequests = Array.from({ length: 5 }, (_, index) => {
+    const number = 90 + index;
+    return {
+      number,
+      url: `https://github.com/farshidz/marqo-cortex-city/pull/${number}`,
+      branch: `agent/queued-${index + 1}`,
+      base: index === 0 ? "main" : `agent/queued-${index}`,
+    };
+  });
+  writeJson(ghStateFile, {
+    prs: Object.fromEntries(
+      pullRequests.map((pullRequest) => [
+        `farshidz/marqo-cortex-city#${pullRequest.number}`,
+        {
+          url: pullRequest.url,
+          headRefName: pullRequest.branch,
+          baseRefName: pullRequest.base,
+          title: `Queued slice ${pullRequest.number}`,
+        },
+      ])
+    ),
+  });
+  writeJson(scenarioFile, {
+    codex: {
+      stdoutChunks: [
+        {
+          text: pullRequests
+            .map((pullRequest) =>
+              JSON.stringify({
+                type: "item.completed",
+                item: {
+                  type: "command_execution",
+                  command: "gh pr create --base main",
+                  aggregated_output: `${pullRequest.url}\n`,
+                  status: "completed",
+                },
+              })
+            )
+            .join("\n") + "\n",
+        },
+      ],
+      sleepMs: 150,
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        worktree_path: workspace,
+      }))};
+      await createTask(task);
+      const startedAt = Date.now();
+      await new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined)).catch(reject);
+      });
+      console.log(JSON.stringify({
+        elapsedMs: Date.now() - startedAt,
+        tasks: readTasks(),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+      FAKE_GH_CALLS_FILE: callsFile,
+      FAKE_GH_PR_VIEW_DELAY_MS: "4000",
+    }
+  );
+  const ghCalls = existsSync(callsFile)
+    ? readFileSync(callsFile, "utf-8").trim().split(/\r?\n/).filter(Boolean)
+    : [];
+
+  assert.ok(result.elapsedMs < 1500, `completion took ${result.elapsedMs}ms`);
+  assert.ok(ghCalls.length <= 1, `expected one coalesced lookup, saw ${ghCalls.length}`);
+  assert.equal(result.tasks[0].status, "in_progress");
+  assert.equal(result.tasks[0].pr_url, undefined);
 });
 
 test("live PR discovery rejects partial GitHub inspection results", () => {
@@ -1050,6 +1141,82 @@ test("live PR discovery rejects partial GitHub inspection results", () => {
   assert.equal(result.tasks[0].branch_name, "agent/partial-stack");
 });
 
+test("live PR discovery cannot overwrite state after review ownership begins", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-live-status-handoff-state.json");
+  const firstPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/71";
+  const secondPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/72";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#71": {
+        url: firstPrUrl,
+        headRefName: "agent/handoff-one",
+        baseRefName: "main",
+        title: "Lower slice",
+      },
+      "farshidz/marqo-cortex-city#72": {
+        url: secondPrUrl,
+        headRefName: "agent/handoff-two",
+        baseRefName: "agent/handoff-one",
+        title: "Upper slice",
+      },
+    },
+  });
+  const lifecycleStack = [
+    {
+      position: 1,
+      pr_url: firstPrUrl,
+      branch_name: "agent/handoff-one",
+      base_branch: "main",
+      scope: "Lower slice",
+      state: "merged",
+      merge_commit_sha: "merge-71",
+    },
+    {
+      position: 2,
+      pr_url: secondPrUrl,
+      branch_name: "agent/handoff-two",
+      base_branch: "agent/worker-updated-base",
+      scope: "Upper slice",
+      state: "open",
+      pending_restack_of: firstPrUrl,
+    },
+  ];
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({ status: "in_progress" }))};
+      await createTask(task);
+      const pending = __testUtils.persistLivePullRequestProgress(
+        task.id,
+        ${JSON.stringify(workspace)},
+        ${JSON.stringify([firstPrUrl, secondPrUrl])},
+        process.env
+      );
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      await updateTask(task.id, {
+        status: "in_review",
+        pr_url: ${JSON.stringify(secondPrUrl)},
+        branch_name: "agent/handoff-two",
+        stacked_prs: ${JSON.stringify(lifecycleStack)},
+      });
+      await pending;
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+      FAKE_GH_PR_VIEW_DELAY_MS: "500",
+    }
+  );
+
+  assert.equal(result.tasks[0].status, "in_review");
+  assert.equal(result.tasks[0].pr_url, secondPrUrl);
+  assert.equal(result.tasks[0].branch_name, "agent/handoff-two");
+  assert.deepEqual(result.tasks[0].stacked_prs, lifecycleStack);
+});
+
 test("final reports retract provisional stack entries they do not confirm", () => {
   const { workspace } = setupWorkspace();
   const scenarioFile = path.join(workspace, "agent-scenario.json");
@@ -1125,7 +1292,7 @@ test("final reports retract provisional stack entries they do not confirm", () =
           })}\n`,
         },
         {
-          delayMs: 125,
+          delayMs: 1500,
           text: `${JSON.stringify({
             type: "item.completed",
             item: {
@@ -1154,7 +1321,7 @@ test("final reports retract provisional stack entries they do not confirm", () =
         spawnAgentSession(task, "initial", () => resolve(undefined)).catch(reject);
       });
       let provisionalTask;
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
         const candidate = readTasks()[0];
         if (candidate.stacked_prs?.length === 2) {
           provisionalTask = JSON.parse(JSON.stringify(candidate));

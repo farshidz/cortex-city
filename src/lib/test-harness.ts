@@ -490,6 +490,7 @@ if (args[0] === "pr" && args[1] === "checks") {
 }
 
 if (args[0] === "pr" && args[1] === "view") {
+  blockFor(Number(process.env.FAKE_GH_PR_VIEW_DELAY_MS || 0));
   const prInfo = parsePrUrl(args[2]);
   if (!prInfo) process.exit(0);
   const pr = getPr(state, prInfo.owner, prInfo.repo, prInfo.number);
