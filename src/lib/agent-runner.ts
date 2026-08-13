@@ -3,7 +3,7 @@ import { writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
 import path from "path";
 import os from "os";
 import { nanoid } from "nanoid";
-import { getCortexPath, readConfig, updateTask, createTask } from "./store";
+import { getCortexPath, getTask, readConfig, updateTask, createTask } from "./store";
 import {
   buildInitialPrompt,
   buildReviewPrompt,
@@ -214,7 +214,8 @@ function getExecErrorMessage(error: unknown): string {
 function execCommand(
   cwd: string,
   command: string,
-  args: string[]
+  args: string[],
+  env?: NodeJS.ProcessEnv
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -224,6 +225,7 @@ function execCommand(
         cwd,
         encoding: "utf-8",
         maxBuffer: GIT_MAX_BUFFER_BYTES,
+        env,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -598,9 +600,10 @@ export async function spawnAgentSession(
   const runTimeoutMs = resolveTaskRunTimeoutMs(config);
 
   const envFile = resolveEnvPath(agentConfig, task.agent);
+  const agentEnv = buildEnv(envFile);
   const child = spawn(runtime === "codex" ? "codex" : "claude", args, {
     cwd,
-    env: buildEnv(envFile),
+    env: agentEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -611,6 +614,11 @@ export async function spawnAgentSession(
   const stderrBuffer: BoundedTextBuffer = { value: "", truncated: false };
   const codexAccumulator = createCodexResultAccumulator();
   let codexEventBuffer = "";
+  const livePullRequestUrls = new Set([
+    ...(task.stacked_prs?.map((entry) => entry.pr_url) ?? []),
+    ...(task.pr_url ? [task.pr_url] : []),
+  ]);
+  let livePullRequestUpdate = Promise.resolve();
   let capturedSessionId = false;
   let didTimeout = false;
   let didFinalize = false;
@@ -633,6 +641,7 @@ export async function spawnAgentSession(
         handleCodexEvent(normalizedEvent, codexAccumulator, sessionLog.transcript);
       });
     }
+    await livePullRequestUpdate;
     sessionLog.machine.end();
     sessionLog.transcript.end();
     await handler();
@@ -647,6 +656,20 @@ export async function spawnAgentSession(
     const rendered = formatCodexEventForTranscript(event);
     if (rendered) transcript.write(rendered);
     updateCodexResultAccumulator(accumulator, event);
+    const createdPullRequestUrls = pullRequestUrlsCreatedByCodex(event);
+    if (createdPullRequestUrls.length > 0) {
+      for (const prUrl of createdPullRequestUrls) {
+        livePullRequestUrls.add(prUrl);
+      }
+      const urls = [...livePullRequestUrls];
+      livePullRequestUpdate = livePullRequestUpdate
+        .then(() => persistLivePullRequestProgress(task.id, cwd, urls, agentEnv))
+        .catch((error) => {
+          console.warn(
+            `[agent-runner] Could not persist live PR progress for task ${task.id}: ${getExecErrorMessage(error)}`
+          );
+        });
+    }
     if (!capturedSessionId && event.type === "thread.started" && event.thread_id) {
       capturedSessionId = true;
       void updateTask(task.id, { session_id: event.thread_id });
@@ -888,12 +911,169 @@ interface CodexEvent {
     text?: string;
     command?: string;
     aggregated_output?: string;
+    status?: string;
   };
   usage?: {
     input_tokens?: number;
     cached_input_tokens?: number;
     output_tokens?: number;
   };
+}
+
+interface LivePullRequest {
+  url: string;
+  headRefName: string;
+  baseRefName: string;
+  title: string;
+}
+
+const GITHUB_PULL_REQUEST_URL_PATTERN =
+  /https:\/\/github\.com\/[^/\s"'<>]+\/[^/\s"'<>]+\/pull\/\d+/g;
+
+function pullRequestUrlsCreatedByCodex(event: CodexEvent): string[] {
+  if (
+    event.type !== "item.completed" ||
+    event.item?.type !== "command_execution" ||
+    !/\bgh\s+pr\s+create\b/.test(event.item.command || "")
+  ) {
+    return [];
+  }
+
+  return [
+    ...new Set(
+      (event.item.aggregated_output || "").match(GITHUB_PULL_REQUEST_URL_PATTERN) ?? []
+    ),
+  ];
+}
+
+async function inspectLivePullRequest(
+  cwd: string,
+  prUrl: string,
+  env: NodeJS.ProcessEnv
+): Promise<LivePullRequest | undefined> {
+  try {
+    const output = await execCommand(
+      cwd,
+      "gh",
+      [
+        "pr",
+        "view",
+        prUrl,
+        "--json",
+        "url,headRefName,baseRefName,title",
+      ],
+      env
+    );
+    const parsed = JSON.parse(output) as Partial<LivePullRequest>;
+    const url = parsed.url?.trim() || prUrl;
+    const headRefName = parsed.headRefName?.trim();
+    const baseRefName = parsed.baseRefName?.trim();
+    if (!url.match(/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/)) {
+      return undefined;
+    }
+    if (!headRefName || !baseRefName) return undefined;
+    return {
+      url,
+      headRefName,
+      baseRefName,
+      title: parsed.title?.trim() || headRefName,
+    };
+  } catch (error) {
+    console.warn(
+      `[agent-runner] Could not inspect live PR ${prUrl}: ${getExecErrorMessage(error)}`
+    );
+    return undefined;
+  }
+}
+
+function orderLivePullRequestStack(
+  pullRequests: LivePullRequest[]
+): LivePullRequest[] | undefined {
+  if (pullRequests.length < 2) return undefined;
+
+  const byHead = new Map<string, LivePullRequest>();
+  for (const pullRequest of pullRequests) {
+    if (byHead.has(pullRequest.headRefName)) return undefined;
+    byHead.set(pullRequest.headRefName, pullRequest);
+  }
+
+  const bottoms = pullRequests.filter(
+    (pullRequest) => !byHead.has(pullRequest.baseRefName)
+  );
+  if (bottoms.length !== 1) return undefined;
+
+  const ordered = [bottoms[0]];
+  const used = new Set([bottoms[0].url]);
+  while (ordered.length < pullRequests.length) {
+    const current = ordered[ordered.length - 1];
+    const candidates = pullRequests.filter(
+      (pullRequest) =>
+        pullRequest.baseRefName === current.headRefName &&
+        !used.has(pullRequest.url)
+    );
+    if (candidates.length !== 1) return undefined;
+    ordered.push(candidates[0]);
+    used.add(candidates[0].url);
+  }
+  return ordered;
+}
+
+async function persistLivePullRequestProgress(
+  taskId: string,
+  cwd: string,
+  prUrls: string[],
+  env: NodeJS.ProcessEnv
+): Promise<void> {
+  const currentTask = await getTask(taskId);
+  if (!currentTask) return;
+
+  const pullRequests = (
+    await Promise.all(
+      prUrls.map((prUrl) => inspectLivePullRequest(cwd, prUrl, env))
+    )
+  ).filter((pullRequest): pullRequest is LivePullRequest => Boolean(pullRequest));
+  if (pullRequests.length === 0) return;
+
+  const ordered = orderLivePullRequestStack(pullRequests);
+  if (ordered) {
+    const reconciled = reconcileStackedPRs(
+      currentTask.stacked_prs,
+      ordered.map((pullRequest, index) => ({
+        position: index + 1,
+        pr_url: pullRequest.url,
+        branch_name: pullRequest.headRefName,
+        base_branch: pullRequest.baseRefName,
+        scope: pullRequest.title,
+      }))
+    );
+    if (!reconciled || reconciled.stack.length === 0) return;
+    for (const warning of reconciled.warnings) {
+      console.warn(`[agent-runner] Task ${taskId}: ${warning}`);
+    }
+    const frontier = frontierStackedPR(reconciled.stack);
+    await updateTask(taskId, {
+      stacked_prs: reconciled.stack,
+      pr_url: frontier?.pr_url,
+      branch_name: frontier?.branch_name,
+    });
+    return;
+  }
+
+  if ((currentTask.stacked_prs?.length ?? 0) > 0) return;
+  const pullRequest = currentTask.pr_url
+    ? pullRequests.find((candidate) => candidate.url === currentTask.pr_url)
+    : pullRequests[0];
+  if (!pullRequest) return;
+  if (
+    currentTask.pr_url === pullRequest.url &&
+    currentTask.branch_name === pullRequest.headRefName
+  ) {
+    return;
+  }
+  await updateTask(taskId, {
+    pr_url: pullRequest.url,
+    branch_name: pullRequest.headRefName,
+  });
 }
 
 interface CodexResultAccumulator {

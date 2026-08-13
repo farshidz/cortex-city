@@ -824,6 +824,148 @@ test("spawnAgentSession marks timed out runs resumable", () => {
   assert.equal(result.tasks[0].current_run_pid, undefined);
 });
 
+test("spawnAgentSession exposes a growing PR stack before Codex exits", () => {
+  const { workspace } = setupWorkspace();
+  const scenarioFile = path.join(workspace, "agent-scenario.json");
+  const ghStateFile = path.join(workspace, "gh-live-pr-state.json");
+  const firstPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/31";
+  const secondPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/32";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#31": {
+        url: firstPrUrl,
+        headRefName: "agent/live-stack",
+        baseRefName: "main",
+        title: "Add live PR discovery",
+      },
+      "farshidz/marqo-cortex-city#32": {
+        url: secondPrUrl,
+        headRefName: "agent/live-stack-2",
+        baseRefName: "agent/live-stack",
+        title: "Show live stacks in the task UI",
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    codex: {
+      stdoutChunks: [
+        {
+          text: `${JSON.stringify({
+            type: "thread.started",
+            thread_id: "thread-live-stack",
+          })}\n${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "/bin/bash -lc 'gh pr create --base main'",
+              aggregated_output: `${firstPrUrl}\n`,
+              status: "completed",
+            },
+          })}\n`,
+        },
+        {
+          delayMs: 100,
+          text: `${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "/bin/bash -lc 'gh pr create --base agent/live-stack'",
+              aggregated_output: `${secondPrUrl}\n`,
+              status: "completed",
+            },
+          })}\n`,
+        },
+      ],
+      sleepMs: 250,
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        worktree_path: workspace,
+      }))};
+      await createTask(task);
+      let completed = false;
+      const completion = new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => {
+          completed = true;
+          resolve(undefined);
+        }).catch(reject);
+      });
+
+      let firstPrTask;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const candidate = readTasks()[0];
+        if (candidate.pr_url) {
+          firstPrTask = JSON.parse(JSON.stringify(candidate));
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      let liveTask;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        liveTask = readTasks()[0];
+        if (liveTask.stacked_prs?.length === 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const duringRun = JSON.parse(JSON.stringify(liveTask));
+      const completedDuringObservation = completed;
+      await completion;
+      console.log(JSON.stringify({
+        firstPrTask,
+        duringRun,
+        completedDuringObservation,
+        tasks: readTasks(),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.completedDuringObservation, false);
+  assert.equal(result.firstPrTask.status, "in_progress");
+  assert.equal(result.firstPrTask.pr_url, firstPrUrl);
+  assert.equal(result.firstPrTask.branch_name, "agent/live-stack");
+  assert.equal(result.firstPrTask.stacked_prs, undefined);
+  assert.equal(result.duringRun.status, "in_progress");
+  assert.equal(result.duringRun.pr_url, firstPrUrl);
+  assert.equal(result.duringRun.branch_name, "agent/live-stack");
+  assert.deepEqual(
+    result.duringRun.stacked_prs.map((entry: NonNullable<Task["stacked_prs"]>[number]) => ({
+      position: entry.position,
+      pr_url: entry.pr_url,
+      branch_name: entry.branch_name,
+      base_branch: entry.base_branch,
+      scope: entry.scope,
+      state: entry.state,
+    })),
+    [
+      {
+        position: 1,
+        pr_url: firstPrUrl,
+        branch_name: "agent/live-stack",
+        base_branch: "main",
+        scope: "Add live PR discovery",
+        state: "open",
+      },
+      {
+        position: 2,
+        pr_url: secondPrUrl,
+        branch_name: "agent/live-stack-2",
+        base_branch: "agent/live-stack",
+        scope: "Show live stacks in the task UI",
+        state: "open",
+      },
+    ]
+  );
+});
+
 test("handleRunComplete uses Codex session deltas instead of re-adding cumulative usage", () => {
   const { workspace } = setupWorkspace();
   const result = runAgentRunnerScript(

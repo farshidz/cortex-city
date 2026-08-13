@@ -163,12 +163,27 @@ const stdout = scenario.stdout ?? process.env.FAKE_AGENT_STDOUT ?? "";
 const stderr = scenario.stderr ?? process.env.FAKE_AGENT_STDERR ?? "";
 const exitCode = Number(scenario.exitCode ?? process.env.FAKE_AGENT_EXIT_CODE ?? 0);
 const sleepMs = Number(scenario.sleepMs ?? process.env.FAKE_AGENT_SLEEP_MS ?? 0);
+const stdoutChunks = Array.isArray(scenario.stdoutChunks)
+  ? scenario.stdoutChunks
+  : null;
 
-setTimeout(() => {
-  if (stderr) process.stderr.write(stderr);
-  if (stdout) process.stdout.write(stdout);
-  process.exit(exitCode);
-}, sleepMs);
+if (stdoutChunks) {
+  let elapsedMs = 0;
+  for (const chunk of stdoutChunks) {
+    elapsedMs += Number(chunk.delayMs || 0);
+    setTimeout(() => process.stdout.write(String(chunk.text || "")), elapsedMs);
+  }
+  setTimeout(() => {
+    if (stderr) process.stderr.write(stderr);
+    process.exit(exitCode);
+  }, elapsedMs + sleepMs);
+} else {
+  setTimeout(() => {
+    if (stderr) process.stderr.write(stderr);
+    if (stdout) process.stdout.write(stdout);
+    process.exit(exitCode);
+  }, sleepMs);
+}
 `
   );
   chmodSync(binaryPath, 0o755);
@@ -479,8 +494,11 @@ if (args[0] === "pr" && args[1] === "view") {
   if (!prInfo) process.exit(0);
   const pr = getPr(state, prInfo.owner, prInfo.repo, prInfo.number);
   output({
+    url: pr.url || args[2],
+    headRefName: pr.headRefName || "",
     headRefOid: pr.headRefOid || "",
     baseRefName: pr.baseRefName || "",
+    title: pr.title || "",
     statusCheckRollup: pr.statusCheckRollup || pr.checks || [],
   });
 }
