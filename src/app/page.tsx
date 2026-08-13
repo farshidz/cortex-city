@@ -203,7 +203,8 @@ export default function TasksPage() {
                       Close
                     </Button>
                   )}
-                  {task.status === "in_review" && task.pr_url && (
+                  {(task.status === "in_progress" || task.status === "in_review") &&
+                    task.pr_url && (
                     <a
                       href={task.pr_url}
                       target="_blank"
@@ -211,15 +212,17 @@ export default function TasksPage() {
                     >
                       <Button size="sm" variant="outline">
                         {(task.stacked_prs?.length ?? 0) > 0
-                          ? `PR ${
-                              task.stacked_prs!.filter(
-                                (entry) => entry.state === "merged"
-                              ).length
-                            }/${task.stacked_prs!.length}`
+                          ? task.status === "in_progress"
+                            ? `${task.stacked_prs!.length} PRs`
+                            : `PR ${
+                                task.stacked_prs!.filter(
+                                  (entry) => entry.state === "merged"
+                                ).length
+                              }/${task.stacked_prs!.length}`
                           : "PR"}
                       </Button>
                     </a>
-                  )}
+                    )}
                   {task.status !== "merged" && task.status !== "closed" && (
                     <Switch
                       size="sm"

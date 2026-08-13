@@ -617,6 +617,57 @@ test("app pages render their initial state", () => {
   }
 });
 
+test("tasks page exposes provisional PR progress during active runs", () => {
+  const output = runRenderScript(`
+    const originalData = globalThis.__SWR_DATA__;
+    const livePrUrl = "https://github.com/acme/widget/pull/81";
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/tasks": [
+        {
+          ...task,
+          id: "task-live-pr",
+          status: "in_progress",
+          pr_url: livePrUrl,
+          pr_url_provisional: true,
+          stacked_prs: [
+            {
+              position: 1,
+              pr_url: livePrUrl,
+              branch_name: "agent/live-one",
+              base_branch: "main",
+              scope: "First slice",
+              state: "open",
+              provisional: true,
+            },
+            {
+              position: 2,
+              pr_url: "https://github.com/acme/widget/pull/82",
+              branch_name: "agent/live-two",
+              base_branch: "agent/live-one",
+              scope: "Second slice",
+              state: "open",
+              provisional: true,
+            },
+          ],
+        },
+      ],
+    };
+
+    const html = await renderPage("./src/app/page.tsx");
+    globalThis.__SWR_DATA__ = originalData;
+    console.log(JSON.stringify({
+      hasLivePrHref: html.includes('href="' + livePrUrl + '"'),
+      hasStackCount: html.includes("2 PRs"),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    hasLivePrHref: true,
+    hasStackCount: true,
+  });
+});
+
 test("sessions page renders quota status returned by both agent runtimes", () => {
   const output = runRenderScript(`
     const html = await renderPage("./src/app/sessions/page.tsx");
