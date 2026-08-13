@@ -830,7 +830,7 @@ test("spawnAgentSession marks timed out runs resumable", () => {
   assert.equal(result.tasks[0].current_run_pid, undefined);
 });
 
-test("spawnAgentSession exposes a growing PR stack before Codex exits", () => {
+test("initial-mode manual instructions expose a growing PR stack before Codex exits", () => {
   const { workspace } = setupWorkspace();
   const scenarioFile = path.join(workspace, "agent-scenario.json");
   const ghStateFile = path.join(workspace, "gh-live-pr-state.json");
@@ -891,6 +891,7 @@ test("spawnAgentSession exposes a growing PR stack before Codex exits", () => {
     `
       const task = ${JSON.stringify(sampleTask({
         status: "in_progress",
+        pending_manual_instruction: "Open the stacked PRs now",
         worktree_path: workspace,
       }))};
       await createTask(task);

@@ -633,10 +633,9 @@ export async function spawnAgentSession(
   ]);
   // During review runs the worker owns stack lifecycle fields and may refresh
   // them concurrently. The final structured report already reconciles those
-  // runs, so live discovery is limited to the pre-review implementation phase.
-  const shouldPersistLivePullRequests =
-    mode === "initial" &&
-    (runReason === "initial" || runReason === "resume_after_kill");
+  // runs, so live discovery is limited to the pre-review implementation phase,
+  // including manual instructions handled in initial mode.
+  const shouldPersistLivePullRequests = mode === "initial";
   let livePullRequestUpdatePending = false;
   let livePullRequestUpdateRunning = false;
   let livePullRequestUpdatesOpen = true;

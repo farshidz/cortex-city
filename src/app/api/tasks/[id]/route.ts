@@ -110,13 +110,14 @@ export async function PUT(
       body.reviewer_agent_enabled = body.reviewer_agent_enabled !== false;
     }
 
-    // The implementation worker owns status until it clears current_run_pid
-    // after final reconciliation. Rejecting external handoffs during that
-    // interval prevents the web process from moving the task to in_review
-    // while the worker can still publish provisional live PR state.
+    // The implementation worker owns status from its pre-spawn launch marker
+    // until it clears the run metadata after final reconciliation. Rejecting
+    // external handoffs during that interval prevents the web process from
+    // moving the task to in_review while the worker can still publish
+    // provisional live PR state.
     if (
       task.status === "in_progress" &&
-      task.current_run_pid != null &&
+      (task.current_run_mode != null || task.current_run_pid != null) &&
       "status" in body &&
       body.status !== task.status
     ) {
