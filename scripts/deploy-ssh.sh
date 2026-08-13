@@ -214,16 +214,16 @@ $SUDO find $(quote "$REMOTE_STAGING_BASE") -mindepth 1 -maxdepth 1 -type d -mtim
 
 log "Syncing application files to staging release $RELEASE_ID"
 rsync -az --delete \
-  --exclude='.git/' \
-  --exclude='.next/' \
-  --exclude='node_modules/' \
-  --exclude='.env' \
-  --exclude='.env.*' \
-  --exclude='.cortex/' \
-  --exclude='.deploy/' \
-  --exclude='.tmp/' \
-  --exclude='tmp/' \
-  --exclude='logs/' \
+  --exclude='/.git/' \
+  --exclude='/.next/' \
+  --exclude='/node_modules/' \
+  --exclude='/.env' \
+  --exclude='/.env.*' \
+  --exclude='/.cortex/' \
+  --exclude='/.deploy/' \
+  --exclude='/.tmp/' \
+  --exclude='/tmp/' \
+  --exclude='/logs/' \
   --exclude='.DS_Store' \
   --rsync-path="$SUDO rsync" \
   -e "$rsync_rsh" \
@@ -253,17 +253,19 @@ $SUDO install -D -m 644 $(quote "$REMOTE_RENDER_DIR/$DISK_HYGIENE_TIMER_NAME") $
 $SUDO touch $(quote "$WEB_ENV_FILE") $(quote "$WORKER_ENV_FILE") $(quote "$CONFIG_DIR/host-metrics.env") $(quote "$DISK_HYGIENE_ENV_FILE")
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME") $(quote "$DISK_HYGIENE_TIMER_NAME")
+# Slash-prefixed filters preserve app-level runtime state while allowing nested stale workspaces to be deleted.
 $SUDO rsync -a --delete-delay --delay-updates \
-  --exclude='.cortex/' \
-  --exclude='.deploy/' \
-  --exclude='.tmp/' \
-  --exclude='tmp/' \
-  --exclude='.env' \
-  --exclude='.env.*' \
-  --exclude='logs/' \
+  --exclude='/.cortex/' \
+  --exclude='/.deploy/' \
+  --exclude='/.tmp/' \
+  --exclude='/tmp/' \
+  --exclude='/.env' \
+  --exclude='/.env.*' \
+  --exclude='/logs/' \
   $(quote "$REMOTE_STAGING_DIR/") $(quote "$APP_DIR/")
 $SUDO install -d -m 700 -o $(quote "$SYSTEMD_USER") -g $(quote "$SYSTEMD_GROUP") $(quote "$SERVICE_TMP_DIR")
-$SUDO chown -R $(quote "$SYSTEMD_USER:$SYSTEMD_GROUP") $(quote "$APP_DIR")
+# Release files retain the staged owner's identity through rsync; avoid traversing live runtime state here.
+$SUDO chown $(quote "$SYSTEMD_USER:$SYSTEMD_GROUP") $(quote "$APP_DIR")
 $SUDO systemctl restart $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME")
 $SUDO systemctl restart $(quote "$DISK_HYGIENE_TIMER_NAME")
 $SUDO systemctl --no-pager --full --lines=0 status $(quote "$WEB_SERVICE_NAME") $(quote "$WORKER_SERVICE_NAME") $(quote "$HOST_METRICS_SERVICE_NAME") $(quote "$DISK_HYGIENE_TIMER_NAME")
