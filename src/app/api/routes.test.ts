@@ -885,6 +885,85 @@ test("task detail route updates task metadata with normalized permissions", () =
   );
 });
 
+test("task detail route keeps status owned by an active implementation run", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
+      const blockedHandoff = await json(
+        await taskRoute.PUT(
+          request("http://localhost/api/tasks/active-1", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              status: "in_review",
+              pr_url: "https://github.com/acme/widget/pull/81",
+              stacked_prs: [
+                {
+                  position: 1,
+                  pr_url: "https://github.com/acme/widget/pull/81",
+                  branch_name: "agent/active-run",
+                  base_branch: "main",
+                  scope: "Active slice",
+                  state: "merged",
+                  merge_commit_sha: "merge-81",
+                },
+              ],
+            }),
+          }),
+          { params: Promise.resolve({ id: "active-1" }) }
+        )
+      );
+      assert.equal(blockedHandoff.status, 409);
+      assert.deepEqual(blockedHandoff.body, {
+        error: "Cannot change status while the implementation run is active",
+      });
+
+      const afterBlockedHandoff = readJson(path.join(cortexDir, "tasks.json"))
+        .find((task) => task.id === "active-1");
+      assert.equal(afterBlockedHandoff.status, "in_progress");
+      assert.equal(afterBlockedHandoff.current_run_pid, process.pid);
+      assert.equal(afterBlockedHandoff.pr_url, undefined);
+      assert.equal(afterBlockedHandoff.stacked_prs, undefined);
+
+      const metadataOnly = await json(
+        await taskRoute.PUT(
+          request("http://localhost/api/tasks/active-1", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ notes: "Worker still owns status" }),
+          }),
+          { params: Promise.resolve({ id: "active-1" }) }
+        )
+      );
+      assert.equal(metadataOnly.status, 200);
+      assert.equal(metadataOnly.body.status, "in_progress");
+      assert.equal(metadataOnly.body.notes, "Worker still owns status");
+
+      const tasksPath = path.join(cortexDir, "tasks.json");
+      const tasks = readJson(tasksPath);
+      const activeIndex = tasks.findIndex((task) => task.id === "active-1");
+      tasks[activeIndex] = {
+        ...tasks[activeIndex],
+        current_run_pid: undefined,
+      };
+      writeJson(tasksPath, tasks);
+
+      const completedHandoff = await json(
+        await taskRoute.PUT(
+          request("http://localhost/api/tasks/active-1", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status: "in_review" }),
+          }),
+          { params: Promise.resolve({ id: "active-1" }) }
+        )
+      );
+      assert.equal(completedHandoff.status, 200);
+      assert.equal(completedHandoff.body.status, "in_review");
+    `)
+  );
+});
+
 test("task detail route clears worktree paths when finalizing tasks", () => {
   runRouteAssertions(
     withCortexState(`
