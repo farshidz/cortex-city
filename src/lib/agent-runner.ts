@@ -47,6 +47,7 @@ const FORCE_KILL_GRACE_MS = 5_000;
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const MAX_RUNTIME_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_STDERR_BYTES = 1 * 1024 * 1024;
+const LIVE_PULL_REQUEST_LOOKUP_TIMEOUT_MS = 10_000;
 
 const AGENT_REPORT_SCHEMA = JSON.stringify({
   type: "object",
@@ -215,7 +216,10 @@ function execCommand(
   cwd: string,
   command: string,
   args: string[],
-  env?: NodeJS.ProcessEnv
+  options: {
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+  } = {}
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -225,7 +229,8 @@ function execCommand(
         cwd,
         encoding: "utf-8",
         maxBuffer: GIT_MAX_BUFFER_BYTES,
-        env,
+        env: options.env,
+        timeout: options.timeoutMs,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -615,9 +620,15 @@ export async function spawnAgentSession(
   const codexAccumulator = createCodexResultAccumulator();
   let codexEventBuffer = "";
   const livePullRequestUrls = new Set([
-    ...(task.stacked_prs?.map((entry) => entry.pr_url) ?? []),
+    ...openStackedPRs(task.stacked_prs ?? []).map((entry) => entry.pr_url),
     ...(task.pr_url ? [task.pr_url] : []),
   ]);
+  // During review runs the worker owns stack lifecycle fields and may refresh
+  // them concurrently. The final structured report already reconciles those
+  // runs, so live discovery is limited to the pre-review implementation phase.
+  const shouldPersistLivePullRequests =
+    mode === "initial" &&
+    (runReason === "initial" || runReason === "resume_after_kill");
   let livePullRequestUpdate = Promise.resolve();
   let capturedSessionId = false;
   let didTimeout = false;
@@ -656,7 +667,9 @@ export async function spawnAgentSession(
     const rendered = formatCodexEventForTranscript(event);
     if (rendered) transcript.write(rendered);
     updateCodexResultAccumulator(accumulator, event);
-    const createdPullRequestUrls = pullRequestUrlsCreatedByCodex(event);
+    const createdPullRequestUrls = shouldPersistLivePullRequests
+      ? pullRequestUrlsCreatedByCodex(event)
+      : [];
     if (createdPullRequestUrls.length > 0) {
       for (const prUrl of createdPullRequestUrls) {
         livePullRequestUrls.add(prUrl);
@@ -934,6 +947,7 @@ function pullRequestUrlsCreatedByCodex(event: CodexEvent): string[] {
   if (
     event.type !== "item.completed" ||
     event.item?.type !== "command_execution" ||
+    event.item.status !== "completed" ||
     !/\bgh\s+pr\s+create\b/.test(event.item.command || "")
   ) {
     return [];
@@ -962,7 +976,10 @@ async function inspectLivePullRequest(
         "--json",
         "url,headRefName,baseRefName,title",
       ],
-      env
+      {
+        env,
+        timeoutMs: LIVE_PULL_REQUEST_LOOKUP_TIMEOUT_MS,
+      }
     );
     const parsed = JSON.parse(output) as Partial<LivePullRequest>;
     const url = parsed.url?.trim() || prUrl;
@@ -1027,12 +1044,11 @@ async function persistLivePullRequestProgress(
   const currentTask = await getTask(taskId);
   if (!currentTask) return;
 
-  const pullRequests = (
-    await Promise.all(
-      prUrls.map((prUrl) => inspectLivePullRequest(cwd, prUrl, env))
-    )
-  ).filter((pullRequest): pullRequest is LivePullRequest => Boolean(pullRequest));
-  if (pullRequests.length === 0) return;
+  const inspected = await Promise.all(
+    prUrls.map((prUrl) => inspectLivePullRequest(cwd, prUrl, env))
+  );
+  if (inspected.some((pullRequest) => !pullRequest)) return;
+  const pullRequests = inspected as LivePullRequest[];
 
   const ordered = orderLivePullRequestStack(pullRequests);
   if (ordered) {
@@ -1690,6 +1706,7 @@ export const __testUtils = {
   createFollowupTasks,
   ensureManagedRepo,
   ensureWorktree,
+  execCommand,
   flushCodexEventBuffer,
   formatCodexEventForTranscript,
   formatStructuredAgentMessage,
@@ -1701,7 +1718,9 @@ export const __testUtils = {
   handleRunTimeout,
   isBranchCheckedOutError,
   parseCodexResult,
+  persistLivePullRequestProgress,
   preRunCommentIdsFor,
+  pullRequestUrlsCreatedByCodex,
   trackedCommentSnapshotUrls,
   resolveAgentWorkingDirectory,
   sanitizeManagedRepoName,
