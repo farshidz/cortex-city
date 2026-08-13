@@ -1052,30 +1052,28 @@ async function persistLivePullRequestProgress(
 
   const ordered = orderLivePullRequestStack(pullRequests);
   if (ordered) {
-    const reconciled = reconcileStackedPRs(
-      currentTask.stacked_prs,
-      ordered.map((pullRequest, index) => ({
-        position: index + 1,
-        pr_url: pullRequest.url,
-        branch_name: pullRequest.headRefName,
-        base_branch: pullRequest.baseRefName,
-        scope: pullRequest.title,
-      }))
-    );
-    if (!reconciled || reconciled.stack.length === 0) return;
-    for (const warning of reconciled.warnings) {
-      console.warn(`[agent-runner] Task ${taskId}: ${warning}`);
-    }
-    const frontier = frontierStackedPR(reconciled.stack);
+    if (currentTask.stacked_prs?.some((entry) => !entry.provisional)) return;
+    const stack = ordered.map((pullRequest, index) => ({
+      position: index + 1,
+      pr_url: pullRequest.url,
+      branch_name: pullRequest.headRefName,
+      base_branch: pullRequest.baseRefName,
+      scope: pullRequest.title,
+      state: "open" as const,
+      provisional: true,
+    }));
+    const frontier = frontierStackedPR(stack);
     await updateTask(taskId, {
-      stacked_prs: reconciled.stack,
+      stacked_prs: stack,
       pr_url: frontier?.pr_url,
       branch_name: frontier?.branch_name,
+      pr_url_provisional: true,
     });
     return;
   }
 
   if ((currentTask.stacked_prs?.length ?? 0) > 0) return;
+  if (currentTask.pr_url && !currentTask.pr_url_provisional) return;
   const pullRequest = currentTask.pr_url
     ? pullRequests.find((candidate) => candidate.url === currentTask.pr_url)
     : pullRequests[0];
@@ -1089,6 +1087,7 @@ async function persistLivePullRequestProgress(
   await updateTask(taskId, {
     pr_url: pullRequest.url,
     branch_name: pullRequest.headRefName,
+    pr_url_provisional: true,
   });
 }
 
@@ -1551,12 +1550,21 @@ async function handleRunComplete(
 
     // Parse structured agent report
     const report: AgentReport | undefined = result.structured_output;
+    const trackedStack = currentTask?.stacked_prs;
+    const confirmedStack = trackedStack?.filter((entry) => !entry.provisional);
+    const hadProvisionalStack = Boolean(
+      trackedStack && confirmedStack?.length !== trackedStack.length
+    );
+    const hadProvisionalPr = currentTask?.pr_url_provisional === true;
     if (report) {
       updates.last_agent_report = report;
+      if (hadProvisionalPr) updates.pr_url_provisional = undefined;
 
       // Use structured fields for PR URL and branch
       if (report.pr_url) {
         updates.pr_url = report.pr_url;
+      } else if (hadProvisionalPr) {
+        updates.pr_url = undefined;
       }
       if (report.branch_name) {
         updates.branch_name = report.branch_name;
@@ -1568,7 +1576,7 @@ async function handleRunComplete(
       const reconciled =
         runReason === "cleanup"
           ? undefined
-          : reconcileStackedPRs(currentTask?.stacked_prs, report.stacked_prs);
+          : reconcileStackedPRs(confirmedStack, report.stacked_prs);
       if (reconciled) {
         for (const warning of reconciled.warnings) {
           console.warn(`[agent-runner] Task ${taskId}: ${warning}`);
@@ -1582,7 +1590,15 @@ async function handleRunComplete(
             updates.pr_url = frontier.pr_url;
             updates.branch_name = frontier.branch_name;
           }
+        } else if (hadProvisionalStack) {
+          updates.stacked_prs =
+            confirmedStack && confirmedStack.length > 0
+              ? confirmedStack
+              : undefined;
         }
+      } else if (hadProvisionalStack) {
+        updates.stacked_prs =
+          confirmedStack && confirmedStack.length > 0 ? confirmedStack : undefined;
       }
 
       // Auto-transition status based on agent report
@@ -1602,6 +1618,13 @@ async function handleRunComplete(
       );
       if (prMatch && runReason !== "cleanup") {
         updates.pr_url = prMatch[0];
+        if (hadProvisionalPr) updates.pr_url_provisional = undefined;
+        if (hadProvisionalStack) {
+          updates.stacked_prs =
+            confirmedStack && confirmedStack.length > 0
+              ? confirmedStack
+              : undefined;
+        }
         updates.status = "in_review";
       }
     }
@@ -1621,8 +1644,15 @@ async function handleRunComplete(
       }
     }
 
-    const prUrl = updates.pr_url || currentTask?.pr_url;
-    const stackAfterRun = updates.stacked_prs ?? currentTask?.stacked_prs;
+    const prUrl = Object.prototype.hasOwnProperty.call(updates, "pr_url")
+      ? updates.pr_url
+      : currentTask?.pr_url;
+    const stackAfterRun = Object.prototype.hasOwnProperty.call(
+      updates,
+      "stacked_prs"
+    )
+      ? updates.stacked_prs
+      : currentTask?.stacked_prs;
 
     // Capture GH state hashes AFTER run so we don't re-trigger on our own
     // changes. If new submitted comments appeared mid-run, skip that PR's hash

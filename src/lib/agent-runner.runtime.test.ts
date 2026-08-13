@@ -936,6 +936,12 @@ test("spawnAgentSession exposes a growing PR stack before Codex exits", () => {
   assert.equal(result.duringRun.status, "in_progress");
   assert.equal(result.duringRun.pr_url, firstPrUrl);
   assert.equal(result.duringRun.branch_name, "agent/live-stack");
+  assert.equal(result.duringRun.pr_url_provisional, true);
+  assert.ok(
+    result.duringRun.stacked_prs.every(
+      (entry: NonNullable<Task["stacked_prs"]>[number]) => entry.provisional
+    )
+  );
   assert.deepEqual(
     result.duringRun.stacked_prs.map((entry: NonNullable<Task["stacked_prs"]>[number]) => ({
       position: entry.position,
@@ -1001,6 +1007,7 @@ test("live PR discovery rejects partial GitHub inspection results", () => {
       base_branch: "main",
       scope: "Slice one",
       state: "open",
+      provisional: true,
     },
     {
       position: 2,
@@ -1009,6 +1016,7 @@ test("live PR discovery rejects partial GitHub inspection results", () => {
       base_branch: "agent/partial-stack",
       scope: "Slice two",
       state: "open",
+      provisional: true,
     },
   ];
 
@@ -1020,6 +1028,7 @@ test("live PR discovery rejects partial GitHub inspection results", () => {
         pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/41",
         branch_name: "agent/partial-stack",
         stacked_prs: trackedStack as Task["stacked_prs"],
+        pr_url_provisional: true,
       }))};
       await createTask(task);
       await __testUtils.persistLivePullRequestProgress(
@@ -1039,6 +1048,140 @@ test("live PR discovery rejects partial GitHub inspection results", () => {
   assert.deepEqual(result.tasks[0].stacked_prs, trackedStack);
   assert.equal(result.tasks[0].pr_url, firstPrUrl);
   assert.equal(result.tasks[0].branch_name, "agent/partial-stack");
+});
+
+test("final reports retract provisional stack entries they do not confirm", () => {
+  const { workspace } = setupWorkspace();
+  const scenarioFile = path.join(workspace, "agent-scenario.json");
+  const ghStateFile = path.join(workspace, "gh-retracted-live-pr-state.json");
+  const firstPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/61";
+  const secondPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/62";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#61": {
+        url: firstPrUrl,
+        headRefName: "agent/retracted-stack",
+        headRefOid: "head-61",
+        baseRefName: "main",
+        title: "Confirmed single PR",
+        state: "open",
+        merged: false,
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        checks: [],
+      },
+      "farshidz/marqo-cortex-city#62": {
+        url: secondPrUrl,
+        headRefName: "agent/retracted-stack-2",
+        headRefOid: "head-62",
+        baseRefName: "agent/retracted-stack",
+        title: "Unconfirmed upper PR",
+        state: "open",
+        merged: false,
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        checks: [],
+      },
+    },
+  });
+  const finalReport = {
+    status: "completed",
+    summary: "Confirmed only the bottom PR",
+    pr_url: firstPrUrl,
+    branch_name: "agent/retracted-stack",
+    stacked_prs: null,
+    files_changed: [],
+    assumptions: [],
+    blockers: [],
+    next_steps: [],
+    tool_calls: null,
+  };
+  writeJson(scenarioFile, {
+    codex: {
+      stdoutChunks: [
+        {
+          text: `${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "gh pr create --base main",
+              aggregated_output: `${firstPrUrl}\n`,
+              status: "completed",
+            },
+          })}\n`,
+        },
+        {
+          delayMs: 75,
+          text: `${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "gh pr create --base agent/retracted-stack",
+              aggregated_output: `${secondPrUrl}\n`,
+              status: "completed",
+            },
+          })}\n`,
+        },
+        {
+          delayMs: 125,
+          text: `${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "agent_message",
+              text: JSON.stringify(finalReport),
+            },
+          })}\n${JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: 3, cached_input_tokens: 0, output_tokens: 2 },
+          })}\n`,
+        },
+      ],
+      sleepMs: 25,
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        worktree_path: workspace,
+      }))};
+      await createTask(task);
+      const completion = new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined)).catch(reject);
+      });
+      let provisionalTask;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const candidate = readTasks()[0];
+        if (candidate.stacked_prs?.length === 2) {
+          provisionalTask = JSON.parse(JSON.stringify(candidate));
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await completion;
+      console.log(JSON.stringify({ provisionalTask, tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.provisionalTask.stacked_prs.length, 2);
+  assert.ok(
+    result.provisionalTask.stacked_prs.every(
+      (entry: NonNullable<Task["stacked_prs"]>[number]) => entry.provisional
+    )
+  );
+  assert.equal(result.tasks[0].status, "in_review");
+  assert.equal(result.tasks[0].pr_url, firstPrUrl);
+  assert.equal(result.tasks[0].pr_url_provisional, undefined);
+  assert.equal(result.tasks[0].stacked_prs, undefined);
 });
 
 test("review runs leave live PR discovery to the final report", () => {
