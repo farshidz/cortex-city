@@ -3,7 +3,13 @@ import { writeFileSync, mkdirSync, existsSync, mkdtempSync } from "fs";
 import path from "path";
 import os from "os";
 import { nanoid } from "nanoid";
-import { getCortexPath, readConfig, updateTask, createTask } from "./store";
+import {
+  getCortexPath,
+  readConfig,
+  updateTask,
+  updateTaskAtomically,
+  createTask,
+} from "./store";
 import {
   buildInitialPrompt,
   buildReviewPrompt,
@@ -47,6 +53,7 @@ const FORCE_KILL_GRACE_MS = 5_000;
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const MAX_RUNTIME_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_STDERR_BYTES = 1 * 1024 * 1024;
+const LIVE_PULL_REQUEST_LOOKUP_TIMEOUT_MS = 10_000;
 
 const AGENT_REPORT_SCHEMA = JSON.stringify({
   type: "object",
@@ -214,7 +221,12 @@ function getExecErrorMessage(error: unknown): string {
 function execCommand(
   cwd: string,
   command: string,
-  args: string[]
+  args: string[],
+  options: {
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  } = {}
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -224,6 +236,9 @@ function execCommand(
         cwd,
         encoding: "utf-8",
         maxBuffer: GIT_MAX_BUFFER_BYTES,
+        env: options.env,
+        timeout: options.timeoutMs,
+        signal: options.signal,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -598,9 +613,10 @@ export async function spawnAgentSession(
   const runTimeoutMs = resolveTaskRunTimeoutMs(config);
 
   const envFile = resolveEnvPath(agentConfig, task.agent);
+  const agentEnv = buildEnv(envFile);
   const child = spawn(runtime === "codex" ? "codex" : "claude", args, {
     cwd,
-    env: buildEnv(envFile),
+    env: agentEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -611,6 +627,19 @@ export async function spawnAgentSession(
   const stderrBuffer: BoundedTextBuffer = { value: "", truncated: false };
   const codexAccumulator = createCodexResultAccumulator();
   let codexEventBuffer = "";
+  const livePullRequestUrls = new Set([
+    ...openStackedPRs(task.stacked_prs ?? []).map((entry) => entry.pr_url),
+    ...(task.pr_url ? [task.pr_url] : []),
+  ]);
+  // During review runs the worker owns stack lifecycle fields and may refresh
+  // them concurrently. The final structured report already reconciles those
+  // runs, so live discovery is limited to the pre-review implementation phase,
+  // including manual instructions handled in initial mode.
+  const shouldPersistLivePullRequests = mode === "initial";
+  let livePullRequestUpdatePending = false;
+  let livePullRequestUpdateRunning = false;
+  let livePullRequestUpdatesOpen = true;
+  const livePullRequestAbortController = new AbortController();
   let capturedSessionId = false;
   let didTimeout = false;
   let didFinalize = false;
@@ -626,6 +655,12 @@ export async function spawnAgentSession(
     if (didFinalize) return;
     didFinalize = true;
     clearRunTimers();
+    // The final structured report is authoritative once the runtime exits.
+    // Stop best-effort live lookups so queued network work cannot delay
+    // completion or write provisional state after final reconciliation.
+    livePullRequestUpdatesOpen = false;
+    livePullRequestUpdatePending = false;
+    livePullRequestAbortController.abort();
     if (runtime === "codex") {
       codexEventBuffer = flushCodexEventBuffer("\n", codexEventBuffer, (event) => {
         const normalizedEvent = withCodexReceivedAt(event);
@@ -639,6 +674,39 @@ export async function spawnAgentSession(
     await onComplete(task.id);
   };
 
+  const queueLivePullRequestUpdate = () => {
+    livePullRequestUpdatePending = true;
+    if (livePullRequestUpdateRunning || !livePullRequestUpdatesOpen) return;
+
+    livePullRequestUpdateRunning = true;
+    void (async () => {
+      try {
+        while (livePullRequestUpdatesOpen && livePullRequestUpdatePending) {
+          livePullRequestUpdatePending = false;
+          await persistLivePullRequestProgress(
+            task.id,
+            cwd,
+            [...livePullRequestUrls],
+            agentEnv,
+            () => livePullRequestUpdatesOpen,
+            livePullRequestAbortController.signal
+          );
+        }
+      } catch (error) {
+        if (livePullRequestUpdatesOpen) {
+          console.warn(
+            `[agent-runner] Could not persist live PR progress for task ${task.id}: ${getExecErrorMessage(error)}`
+          );
+        }
+      } finally {
+        livePullRequestUpdateRunning = false;
+        if (livePullRequestUpdatesOpen && livePullRequestUpdatePending) {
+          queueLivePullRequestUpdate();
+        }
+      }
+    })();
+  };
+
   const handleCodexEvent = (
     event: CodexEvent,
     accumulator: CodexResultAccumulator,
@@ -647,6 +715,15 @@ export async function spawnAgentSession(
     const rendered = formatCodexEventForTranscript(event);
     if (rendered) transcript.write(rendered);
     updateCodexResultAccumulator(accumulator, event);
+    const createdPullRequestUrls = shouldPersistLivePullRequests
+      ? pullRequestUrlsCreatedByCodex(event)
+      : [];
+    if (createdPullRequestUrls.length > 0) {
+      for (const prUrl of createdPullRequestUrls) {
+        livePullRequestUrls.add(prUrl);
+      }
+      queueLivePullRequestUpdate();
+    }
     if (!capturedSessionId && event.type === "thread.started" && event.thread_id) {
       capturedSessionId = true;
       void updateTask(task.id, { session_id: event.thread_id });
@@ -888,12 +965,180 @@ interface CodexEvent {
     text?: string;
     command?: string;
     aggregated_output?: string;
+    status?: string;
   };
   usage?: {
     input_tokens?: number;
     cached_input_tokens?: number;
     output_tokens?: number;
   };
+}
+
+interface LivePullRequest {
+  url: string;
+  headRefName: string;
+  baseRefName: string;
+  title: string;
+}
+
+const GITHUB_PULL_REQUEST_URL_PATTERN =
+  /https:\/\/github\.com\/[^/\s"'<>]+\/[^/\s"'<>]+\/pull\/\d+/g;
+
+function pullRequestUrlsCreatedByCodex(event: CodexEvent): string[] {
+  if (
+    event.type !== "item.completed" ||
+    event.item?.type !== "command_execution" ||
+    event.item.status !== "completed" ||
+    !/\bgh\s+pr\s+create\b/.test(event.item.command || "")
+  ) {
+    return [];
+  }
+
+  return [
+    ...new Set(
+      (event.item.aggregated_output || "").match(GITHUB_PULL_REQUEST_URL_PATTERN) ?? []
+    ),
+  ];
+}
+
+async function inspectLivePullRequest(
+  cwd: string,
+  prUrl: string,
+  env: NodeJS.ProcessEnv,
+  signal?: AbortSignal
+): Promise<LivePullRequest | undefined> {
+  try {
+    const output = await execCommand(
+      cwd,
+      "gh",
+      [
+        "pr",
+        "view",
+        prUrl,
+        "--json",
+        "url,headRefName,baseRefName,title",
+      ],
+      {
+        env,
+        timeoutMs: LIVE_PULL_REQUEST_LOOKUP_TIMEOUT_MS,
+        signal,
+      }
+    );
+    const parsed = JSON.parse(output) as Partial<LivePullRequest>;
+    const url = parsed.url?.trim() || prUrl;
+    const headRefName = parsed.headRefName?.trim();
+    const baseRefName = parsed.baseRefName?.trim();
+    if (!url.match(/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/)) {
+      return undefined;
+    }
+    if (!headRefName || !baseRefName) return undefined;
+    return {
+      url,
+      headRefName,
+      baseRefName,
+      title: parsed.title?.trim() || headRefName,
+    };
+  } catch (error) {
+    if (signal?.aborted) return undefined;
+    console.warn(
+      `[agent-runner] Could not inspect live PR ${prUrl}: ${getExecErrorMessage(error)}`
+    );
+    return undefined;
+  }
+}
+
+function orderLivePullRequestStack(
+  pullRequests: LivePullRequest[]
+): LivePullRequest[] | undefined {
+  if (pullRequests.length < 2) return undefined;
+
+  const byHead = new Map<string, LivePullRequest>();
+  for (const pullRequest of pullRequests) {
+    if (byHead.has(pullRequest.headRefName)) return undefined;
+    byHead.set(pullRequest.headRefName, pullRequest);
+  }
+
+  const bottoms = pullRequests.filter(
+    (pullRequest) => !byHead.has(pullRequest.baseRefName)
+  );
+  if (bottoms.length !== 1) return undefined;
+
+  const ordered = [bottoms[0]];
+  const used = new Set([bottoms[0].url]);
+  while (ordered.length < pullRequests.length) {
+    const current = ordered[ordered.length - 1];
+    const candidates = pullRequests.filter(
+      (pullRequest) =>
+        pullRequest.baseRefName === current.headRefName &&
+        !used.has(pullRequest.url)
+    );
+    if (candidates.length !== 1) return undefined;
+    ordered.push(candidates[0]);
+    used.add(candidates[0].url);
+  }
+  return ordered;
+}
+
+async function persistLivePullRequestProgress(
+  taskId: string,
+  cwd: string,
+  prUrls: string[],
+  env: NodeJS.ProcessEnv,
+  canPersist: () => boolean = () => true,
+  signal?: AbortSignal
+): Promise<void> {
+  if (!canPersist()) return;
+
+  const inspected = await Promise.all(
+    prUrls.map((prUrl) => inspectLivePullRequest(cwd, prUrl, env, signal))
+  );
+  if (inspected.some((pullRequest) => !pullRequest)) return;
+  const pullRequests = inspected as LivePullRequest[];
+
+  const ordered = orderLivePullRequestStack(pullRequests);
+  await updateTaskAtomically(taskId, (currentTask) => {
+    if (!canPersist() || currentTask.status !== "in_progress") return undefined;
+
+    if (ordered) {
+      if (currentTask.stacked_prs?.some((entry) => !entry.provisional)) {
+        return undefined;
+      }
+      const stack = ordered.map((pullRequest, index) => ({
+        position: index + 1,
+        pr_url: pullRequest.url,
+        branch_name: pullRequest.headRefName,
+        base_branch: pullRequest.baseRefName,
+        scope: pullRequest.title,
+        state: "open" as const,
+        provisional: true,
+      }));
+      const frontier = frontierStackedPR(stack);
+      return {
+        stacked_prs: stack,
+        pr_url: frontier?.pr_url,
+        branch_name: frontier?.branch_name,
+        pr_url_provisional: true,
+      };
+    }
+
+    if ((currentTask.stacked_prs?.length ?? 0) > 0) return undefined;
+    if (currentTask.pr_url && !currentTask.pr_url_provisional) return undefined;
+    const pullRequest = currentTask.pr_url
+      ? pullRequests.find((candidate) => candidate.url === currentTask.pr_url)
+      : pullRequests[0];
+    if (!pullRequest) return undefined;
+    if (
+      currentTask.pr_url === pullRequest.url &&
+      currentTask.branch_name === pullRequest.headRefName
+    ) {
+      return undefined;
+    }
+    return {
+      pr_url: pullRequest.url,
+      branch_name: pullRequest.headRefName,
+      pr_url_provisional: true,
+    };
+  });
 }
 
 interface CodexResultAccumulator {
@@ -1355,12 +1600,21 @@ async function handleRunComplete(
 
     // Parse structured agent report
     const report: AgentReport | undefined = result.structured_output;
+    const trackedStack = currentTask?.stacked_prs;
+    const confirmedStack = trackedStack?.filter((entry) => !entry.provisional);
+    const hadProvisionalStack = Boolean(
+      trackedStack && confirmedStack?.length !== trackedStack.length
+    );
+    const hadProvisionalPr = currentTask?.pr_url_provisional === true;
     if (report) {
       updates.last_agent_report = report;
+      if (hadProvisionalPr) updates.pr_url_provisional = undefined;
 
       // Use structured fields for PR URL and branch
       if (report.pr_url) {
         updates.pr_url = report.pr_url;
+      } else if (hadProvisionalPr) {
+        updates.pr_url = undefined;
       }
       if (report.branch_name) {
         updates.branch_name = report.branch_name;
@@ -1372,7 +1626,7 @@ async function handleRunComplete(
       const reconciled =
         runReason === "cleanup"
           ? undefined
-          : reconcileStackedPRs(currentTask?.stacked_prs, report.stacked_prs);
+          : reconcileStackedPRs(confirmedStack, report.stacked_prs);
       if (reconciled) {
         for (const warning of reconciled.warnings) {
           console.warn(`[agent-runner] Task ${taskId}: ${warning}`);
@@ -1386,7 +1640,15 @@ async function handleRunComplete(
             updates.pr_url = frontier.pr_url;
             updates.branch_name = frontier.branch_name;
           }
+        } else if (hadProvisionalStack) {
+          updates.stacked_prs =
+            confirmedStack && confirmedStack.length > 0
+              ? confirmedStack
+              : undefined;
         }
+      } else if (hadProvisionalStack) {
+        updates.stacked_prs =
+          confirmedStack && confirmedStack.length > 0 ? confirmedStack : undefined;
       }
 
       // Auto-transition status based on agent report
@@ -1406,6 +1668,13 @@ async function handleRunComplete(
       );
       if (prMatch && runReason !== "cleanup") {
         updates.pr_url = prMatch[0];
+        if (hadProvisionalPr) updates.pr_url_provisional = undefined;
+        if (hadProvisionalStack) {
+          updates.stacked_prs =
+            confirmedStack && confirmedStack.length > 0
+              ? confirmedStack
+              : undefined;
+        }
         updates.status = "in_review";
       }
     }
@@ -1425,8 +1694,15 @@ async function handleRunComplete(
       }
     }
 
-    const prUrl = updates.pr_url || currentTask?.pr_url;
-    const stackAfterRun = updates.stacked_prs ?? currentTask?.stacked_prs;
+    const prUrl = Object.prototype.hasOwnProperty.call(updates, "pr_url")
+      ? updates.pr_url
+      : currentTask?.pr_url;
+    const stackAfterRun = Object.prototype.hasOwnProperty.call(
+      updates,
+      "stacked_prs"
+    )
+      ? updates.stacked_prs
+      : currentTask?.stacked_prs;
 
     // Capture GH state hashes AFTER run so we don't re-trigger on our own
     // changes. If new submitted comments appeared mid-run, skip that PR's hash
@@ -1510,6 +1786,7 @@ export const __testUtils = {
   createFollowupTasks,
   ensureManagedRepo,
   ensureWorktree,
+  execCommand,
   flushCodexEventBuffer,
   formatCodexEventForTranscript,
   formatStructuredAgentMessage,
@@ -1521,7 +1798,9 @@ export const __testUtils = {
   handleRunTimeout,
   isBranchCheckedOutError,
   parseCodexResult,
+  persistLivePullRequestProgress,
   preRunCommentIdsFor,
+  pullRequestUrlsCreatedByCodex,
   trackedCommentSnapshotUrls,
   resolveAgentWorkingDirectory,
   sanitizeManagedRepoName,

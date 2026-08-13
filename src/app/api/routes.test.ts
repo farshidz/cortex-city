@@ -885,6 +885,187 @@ test("task detail route updates task metadata with normalized permissions", () =
   );
 });
 
+test("task detail route keeps status owned by an active implementation run", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
+      const blockedHandoff = await json(
+        await taskRoute.PUT(
+          request("http://localhost/api/tasks/active-1", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              status: "in_review",
+              pr_url: "https://github.com/acme/widget/pull/81",
+              stacked_prs: [
+                {
+                  position: 1,
+                  pr_url: "https://github.com/acme/widget/pull/81",
+                  branch_name: "agent/active-run",
+                  base_branch: "main",
+                  scope: "Active slice",
+                  state: "merged",
+                  merge_commit_sha: "merge-81",
+                },
+              ],
+            }),
+          }),
+          { params: Promise.resolve({ id: "active-1" }) }
+        )
+      );
+      assert.equal(blockedHandoff.status, 409);
+      assert.deepEqual(blockedHandoff.body, {
+        error: "Cannot change status while the implementation run is active",
+      });
+
+      const afterBlockedHandoff = readJson(path.join(cortexDir, "tasks.json"))
+        .find((task) => task.id === "active-1");
+      assert.equal(afterBlockedHandoff.status, "in_progress");
+      assert.equal(afterBlockedHandoff.current_run_pid, process.pid);
+      assert.equal(afterBlockedHandoff.pr_url, undefined);
+      assert.equal(afterBlockedHandoff.stacked_prs, undefined);
+
+      const metadataOnly = await json(
+        await taskRoute.PUT(
+          request("http://localhost/api/tasks/active-1", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ notes: "Worker still owns status" }),
+          }),
+          { params: Promise.resolve({ id: "active-1" }) }
+        )
+      );
+      assert.equal(metadataOnly.status, 200);
+      assert.equal(metadataOnly.body.status, "in_progress");
+      assert.equal(metadataOnly.body.notes, "Worker still owns status");
+
+      const tasksPath = path.join(cortexDir, "tasks.json");
+      const tasks = readJson(tasksPath);
+      const activeIndex = tasks.findIndex((task) => task.id === "active-1");
+      tasks[activeIndex] = {
+        ...tasks[activeIndex],
+        current_run_pid: undefined,
+      };
+      writeJson(tasksPath, tasks);
+
+      const completedHandoff = await json(
+        await taskRoute.PUT(
+          request("http://localhost/api/tasks/active-1", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status: "in_review" }),
+          }),
+          { params: Promise.resolve({ id: "active-1" }) }
+        )
+      );
+      assert.equal(completedHandoff.status, 200);
+      assert.equal(completedHandoff.body.status, "in_review");
+    `)
+  );
+});
+
+test("task status handoff stays blocked while an implementation run is launching", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
+      const workerRuntime = await loadRoute("./src/lib/orchestrator-worker-runtime.ts");
+      const store = await loadRoute("./src/lib/store.ts");
+      const launchingTask = {
+        ...baseTask,
+        id: "launching-task",
+        title: "Launching task",
+      };
+      writeJson(path.join(cortexDir, "tasks.json"), [launchingTask]);
+
+      let markSpawnStarted;
+      const spawnStarted = new Promise((resolve) => {
+        markSpawnStarted = resolve;
+      });
+      let releaseSpawn;
+      const spawnReleased = new Promise((resolve) => {
+        releaseSpawn = resolve;
+      });
+      const deps = {
+        deleteReviewSummary: async () => {},
+        deleteTask: store.deleteTask,
+        getPRStateHash: async () => "",
+        getPRStatus: async () => "unknown",
+        getReviewRequestedPRs: async () => [],
+        getTask: store.getTask,
+        isPRMergedOrClosed: async () => null,
+        isPidRunning: () => true,
+        logger: { log: () => {}, error: () => {} },
+        readConfig: () => config,
+        readReviewLearnings: () => "",
+        readReviewSummaries: () => [],
+        readReviewSummaryMap: () => ({}),
+        readTasks: store.readTasks,
+        removeWorktree: async () => {},
+        removeFinalReviewWorkspace: async () => true,
+        spawnAgentSession: async () => {
+          markSpawnStarted();
+          await spawnReleased;
+          return { pid: 8080, child: {} };
+        },
+        spawnReviewRetro: async () => ({
+          pid: 0,
+          child: {},
+          done: Promise.resolve(),
+        }),
+        spawnReviewSummary: async () => ({
+          pid: 0,
+          child: {},
+          done: new Promise(() => {}),
+        }),
+        updateTask: store.updateTask,
+        upsertReviewSummary: async (summary) => summary,
+      };
+
+      const poll = workerRuntime.pollOnce(new Map(), deps, new Map());
+      await spawnStarted;
+
+      const duringLaunch = await store.getTask("launching-task");
+      assert.equal(duringLaunch.status, "in_progress");
+      assert.equal(duringLaunch.current_run_pid, undefined);
+      assert.equal(duringLaunch.current_run_mode, "initial");
+
+      const blockedHandoff = await json(
+        await taskRoute.PUT(
+          request("http://localhost/api/tasks/launching-task", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status: "in_review" }),
+          }),
+          { params: Promise.resolve({ id: "launching-task" }) }
+        )
+      );
+      assert.equal(blockedHandoff.status, 409);
+      assert.equal((await store.getTask("launching-task")).status, "in_progress");
+
+      releaseSpawn();
+      await poll;
+      const launched = await store.getTask("launching-task");
+      assert.equal(launched.current_run_pid, 8080);
+      assert.equal(launched.current_run_mode, "initial");
+
+      const failedTask = {
+        ...baseTask,
+        id: "failed-launch",
+        title: "Failed launch",
+      };
+      writeJson(path.join(cortexDir, "tasks.json"), [failedTask]);
+      deps.spawnAgentSession = async () => {
+        throw new Error("spawn failed");
+      };
+      await workerRuntime.pollOnce(new Map(), deps, new Map());
+      const rolledBack = await store.getTask("failed-launch");
+      assert.equal(rolledBack.status, "open");
+      assert.equal(rolledBack.current_run_pid, undefined);
+      assert.equal(rolledBack.current_run_mode, undefined);
+    `)
+  );
+});
+
 test("task detail route clears worktree paths when finalizing tasks", () => {
   runRouteAssertions(
     withCortexState(`

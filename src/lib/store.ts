@@ -272,6 +272,32 @@ export async function updateTask(id: string, updates: Partial<Task>): Promise<Ta
   });
 }
 
+export async function updateTaskAtomically(
+  id: string,
+  buildUpdates: (current: Task) => Partial<Task> | undefined
+): Promise<Task | undefined> {
+  return withWriteLock(async () => {
+    const tasks = readTasks();
+    const index = tasks.findIndex((task) => task.id === id);
+    if (index === -1) return undefined;
+
+    const updates = buildUpdates(tasks[index]);
+    if (!updates) return undefined;
+
+    tasks[index] = {
+      ...tasks[index],
+      ...updates,
+      updated_at: new Date().toISOString(),
+    };
+    writeTasksLocked(tasks);
+    const updated = tasks[index];
+    if (updated.issue_id) {
+      await syncIssueFromTask(updated);
+    }
+    return updated;
+  });
+}
+
 export async function deleteTask(id: string): Promise<void> {
   return withWriteLock(() => {
     const tasks = readTasks();

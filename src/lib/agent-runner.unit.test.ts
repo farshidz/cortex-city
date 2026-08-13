@@ -19,6 +19,7 @@ const {
   buildUsageAccounting,
   computeCodexUsageDelta,
   createCodexResultAccumulator,
+  execCommand,
   flushCodexEventBuffer,
   formatCodexEventForTranscript,
   formatStructuredAgentMessage,
@@ -28,6 +29,7 @@ const {
   getGitHubRepoSlug,
   isBranchCheckedOutError,
   parseCodexResult,
+  pullRequestUrlsCreatedByCodex,
   resolveAgentWorkingDirectory,
   sanitizeManagedRepoName,
   shouldClearCompletedRunPid,
@@ -141,6 +143,47 @@ test("parseCodexResult tolerates malformed lines", () => {
   ].join("\n");
   const result = parseCodexResult(stdout);
   assert.equal(result.session_id, "thr-9");
+});
+
+test("pullRequestUrlsCreatedByCodex accepts only successful PR creation commands", () => {
+  const prUrl = "https://github.com/acme/widget/pull/42";
+  const event = {
+    type: "item.completed",
+    item: {
+      type: "command_execution",
+      command: "gh pr create --base main",
+      aggregated_output: `${prUrl}\n`,
+      status: "completed",
+    },
+  };
+  assert.deepEqual(pullRequestUrlsCreatedByCodex(event), [prUrl]);
+  assert.deepEqual(
+    pullRequestUrlsCreatedByCodex({
+      ...event,
+      item: { ...event.item, status: "failed" },
+    }),
+    []
+  );
+  assert.deepEqual(
+    pullRequestUrlsCreatedByCodex({
+      ...event,
+      item: { ...event.item, command: "gh pr view 42" },
+    }),
+    []
+  );
+});
+
+test("execCommand bounds best-effort subprocesses", async () => {
+  const startedAt = Date.now();
+  await assert.rejects(
+    execCommand(
+      process.cwd(),
+      process.execPath,
+      ["-e", "setTimeout(() => {}, 5000)"],
+      { timeoutMs: 20 }
+    )
+  );
+  assert.ok(Date.now() - startedAt < 1_000);
 });
 
 test("buildUsageAccounting computes per-run + cumulative token deltas", () => {

@@ -616,9 +616,13 @@ async function launchTaskRun(
   try {
     assertSufficientDiskSpace(`launching ${options.mode} run for task ${task.id}`);
 
-    if (options.preSpawnUpdates) {
-      await deps.updateTask(task.id, options.preSpawnUpdates);
-    }
+    // Persist the run mode as a launch marker in the same write that applies
+    // pre-spawn state. The API treats this marker as worker ownership until a
+    // PID is recorded or launch rollback clears it.
+    await deps.updateTask(task.id, {
+      ...options.preSpawnUpdates,
+      current_run_mode: options.mode,
+    });
 
     const launchState: { pid?: number } = {};
     const { pid } = await deps.spawnAgentSession(task, options.mode, async (taskId) => {
@@ -642,9 +646,11 @@ async function launchTaskRun(
       `[worker] Failed to start ${options.mode} run for task ${task.id}:`,
       error
     );
-    if (options.rollbackOnError) {
-      await deps.updateTask(task.id, options.rollbackOnError);
-    }
+    await deps.updateTask(task.id, {
+      current_run_pid: undefined,
+      current_run_mode: undefined,
+      ...options.rollbackOnError,
+    });
     return false;
   }
 }
@@ -963,6 +969,12 @@ export async function pollOnce(
     if (!task.current_run_pid) {
       activePids.delete(task.id);
       deadOwnedPids.delete(task.id);
+      if (task.current_run_mode != null) {
+        deps.logger.log(
+          `[worker] Clearing interrupted launch marker for task ${task.id}`
+        );
+        await deps.updateTask(task.id, buildInterruptedTaskUpdates(task));
+      }
       continue;
     }
 

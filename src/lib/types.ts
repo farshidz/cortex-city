@@ -67,6 +67,9 @@ export interface TaskStackedPR {
   base_branch: string;
   scope: string;
   state: TaskStackedPRState;
+  // Set while an implementation run has observed the PR but its final
+  // structured report has not confirmed stack membership yet.
+  provisional?: boolean;
   pr_status?: PRStatus;
   // Per-PR analog of Task.last_review_gh_state; stacked tasks track review
   // wakeup hashes per entry instead of on the task.
@@ -104,6 +107,9 @@ export interface Task {
   paused?: boolean; // when true, the worker skips this task during polls
   session_id?: string;
   pr_url?: string;
+  // Mirrors the provisional state of a live-discovered pr_url. Completion
+  // clears or confirms it from the final structured report.
+  pr_url_provisional?: boolean;
   branch_name?: string;
   // Present only when the task produced a stack of PRs. pr_url/branch_name
   // then mirror the bottom-most open entry so single-PR consumers keep

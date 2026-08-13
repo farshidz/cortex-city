@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 
 import type { OrchestratorConfig, Task } from "./types";
@@ -66,7 +72,7 @@ function runAgentRunnerScript(
     workspace,
     [
       `import { spawnAgentSession, removeWorktree, __testUtils } from ${JSON.stringify(AGENT_RUNNER_MODULE_URL)};`,
-      `import { createTask, readTasks } from ${JSON.stringify(STORE_MODULE_URL)};`,
+      `import { createTask, readTasks, updateTask } from ${JSON.stringify(STORE_MODULE_URL)};`,
     ],
     body,
     env
@@ -822,6 +828,608 @@ test("spawnAgentSession marks timed out runs resumable", () => {
   assert.equal(result.tasks[0].last_run_result, "timeout");
   assert.equal(result.tasks[0].resume_requested, true);
   assert.equal(result.tasks[0].current_run_pid, undefined);
+});
+
+test("initial-mode manual instructions expose a growing PR stack before Codex exits", () => {
+  const { workspace } = setupWorkspace();
+  const scenarioFile = path.join(workspace, "agent-scenario.json");
+  const ghStateFile = path.join(workspace, "gh-live-pr-state.json");
+  const firstPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/31";
+  const secondPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/32";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#31": {
+        url: firstPrUrl,
+        headRefName: "agent/live-stack",
+        baseRefName: "main",
+        title: "Add live PR discovery",
+      },
+      "farshidz/marqo-cortex-city#32": {
+        url: secondPrUrl,
+        headRefName: "agent/live-stack-2",
+        baseRefName: "agent/live-stack",
+        title: "Show live stacks in the task UI",
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    codex: {
+      stdoutChunks: [
+        {
+          text: `${JSON.stringify({
+            type: "thread.started",
+            thread_id: "thread-live-stack",
+          })}\n${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "/bin/bash -lc 'gh pr create --base main'",
+              aggregated_output: `${firstPrUrl}\n`,
+              status: "completed",
+            },
+          })}\n`,
+        },
+        {
+          delayMs: 100,
+          text: `${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "/bin/bash -lc 'gh pr create --base agent/live-stack'",
+              aggregated_output: `${secondPrUrl}\n`,
+              status: "completed",
+            },
+          })}\n`,
+        },
+      ],
+      sleepMs: 2000,
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        pending_manual_instruction: "Open the stacked PRs now",
+        worktree_path: workspace,
+      }))};
+      await createTask(task);
+      let completed = false;
+      const completion = new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => {
+          completed = true;
+          resolve(undefined);
+        }).catch(reject);
+      });
+
+      let firstPrTask;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const candidate = readTasks()[0];
+        if (candidate.pr_url) {
+          firstPrTask = JSON.parse(JSON.stringify(candidate));
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      let liveTask;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        liveTask = readTasks()[0];
+        if (liveTask.stacked_prs?.length === 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const duringRun = JSON.parse(JSON.stringify(liveTask));
+      const completedDuringObservation = completed;
+      await completion;
+      console.log(JSON.stringify({
+        firstPrTask,
+        duringRun,
+        completedDuringObservation,
+        tasks: readTasks(),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.completedDuringObservation, false);
+  assert.equal(result.firstPrTask.status, "in_progress");
+  assert.equal(result.firstPrTask.pr_url, firstPrUrl);
+  assert.equal(result.firstPrTask.branch_name, "agent/live-stack");
+  assert.equal(result.firstPrTask.stacked_prs, undefined);
+  assert.equal(result.duringRun.status, "in_progress");
+  assert.equal(result.duringRun.pr_url, firstPrUrl);
+  assert.equal(result.duringRun.branch_name, "agent/live-stack");
+  assert.equal(result.duringRun.pr_url_provisional, true);
+  assert.ok(
+    result.duringRun.stacked_prs.every(
+      (entry: NonNullable<Task["stacked_prs"]>[number]) => entry.provisional
+    )
+  );
+  assert.deepEqual(
+    result.duringRun.stacked_prs.map((entry: NonNullable<Task["stacked_prs"]>[number]) => ({
+      position: entry.position,
+      pr_url: entry.pr_url,
+      branch_name: entry.branch_name,
+      base_branch: entry.base_branch,
+      scope: entry.scope,
+      state: entry.state,
+    })),
+    [
+      {
+        position: 1,
+        pr_url: firstPrUrl,
+        branch_name: "agent/live-stack",
+        base_branch: "main",
+        scope: "Add live PR discovery",
+        state: "open",
+      },
+      {
+        position: 2,
+        pr_url: secondPrUrl,
+        branch_name: "agent/live-stack-2",
+        base_branch: "agent/live-stack",
+        scope: "Show live stacks in the task UI",
+        state: "open",
+      },
+    ]
+  );
+});
+
+test("spawnAgentSession does not wait for queued live PR lookups at exit", () => {
+  const { workspace } = setupWorkspace();
+  const scenarioFile = path.join(workspace, "agent-scenario.json");
+  const ghStateFile = path.join(workspace, "gh-queued-live-pr-state.json");
+  const callsFile = path.join(workspace, "gh-queued-live-pr-calls.jsonl");
+  const pullRequests = Array.from({ length: 5 }, (_, index) => {
+    const number = 90 + index;
+    return {
+      number,
+      url: `https://github.com/farshidz/marqo-cortex-city/pull/${number}`,
+      branch: `agent/queued-${index + 1}`,
+      base: index === 0 ? "main" : `agent/queued-${index}`,
+    };
+  });
+  writeJson(ghStateFile, {
+    prs: Object.fromEntries(
+      pullRequests.map((pullRequest) => [
+        `farshidz/marqo-cortex-city#${pullRequest.number}`,
+        {
+          url: pullRequest.url,
+          headRefName: pullRequest.branch,
+          baseRefName: pullRequest.base,
+          title: `Queued slice ${pullRequest.number}`,
+        },
+      ])
+    ),
+  });
+  writeJson(scenarioFile, {
+    codex: {
+      stdoutChunks: [
+        {
+          text: pullRequests
+            .map((pullRequest) =>
+              JSON.stringify({
+                type: "item.completed",
+                item: {
+                  type: "command_execution",
+                  command: "gh pr create --base main",
+                  aggregated_output: `${pullRequest.url}\n`,
+                  status: "completed",
+                },
+              })
+            )
+            .join("\n") + "\n",
+        },
+      ],
+      sleepMs: 150,
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        worktree_path: workspace,
+      }))};
+      await createTask(task);
+      const startedAt = Date.now();
+      await new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined)).catch(reject);
+      });
+      console.log(JSON.stringify({
+        elapsedMs: Date.now() - startedAt,
+        tasks: readTasks(),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+      FAKE_GH_CALLS_FILE: callsFile,
+      FAKE_GH_PR_VIEW_DELAY_MS: "4000",
+    }
+  );
+  const ghCalls = existsSync(callsFile)
+    ? readFileSync(callsFile, "utf-8").trim().split(/\r?\n/).filter(Boolean)
+    : [];
+
+  assert.ok(result.elapsedMs < 1500, `completion took ${result.elapsedMs}ms`);
+  assert.ok(ghCalls.length <= 1, `expected one coalesced lookup, saw ${ghCalls.length}`);
+  assert.equal(result.tasks[0].status, "in_progress");
+  assert.equal(result.tasks[0].pr_url, undefined);
+});
+
+test("live PR discovery rejects partial GitHub inspection results", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-partial-live-pr-state.json");
+  const firstPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/41";
+  const secondPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/42";
+  const thirdPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/43";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#41": {
+        url: firstPrUrl,
+        baseRefName: "main",
+        title: "Unavailable lower PR",
+      },
+      "farshidz/marqo-cortex-city#42": {
+        url: secondPrUrl,
+        headRefName: "agent/partial-stack-2",
+        baseRefName: "agent/partial-stack",
+        title: "Existing upper PR",
+      },
+      "farshidz/marqo-cortex-city#43": {
+        url: thirdPrUrl,
+        headRefName: "agent/partial-stack-3",
+        baseRefName: "agent/partial-stack-2",
+        title: "New top PR",
+      },
+    },
+  });
+  const trackedStack = [
+    {
+      position: 1,
+      pr_url: firstPrUrl,
+      branch_name: "agent/partial-stack",
+      base_branch: "main",
+      scope: "Slice one",
+      state: "open",
+      provisional: true,
+    },
+    {
+      position: 2,
+      pr_url: secondPrUrl,
+      branch_name: "agent/partial-stack-2",
+      base_branch: "agent/partial-stack",
+      scope: "Slice two",
+      state: "open",
+      provisional: true,
+    },
+  ];
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/41",
+        branch_name: "agent/partial-stack",
+        stacked_prs: trackedStack as Task["stacked_prs"],
+        pr_url_provisional: true,
+      }))};
+      await createTask(task);
+      await __testUtils.persistLivePullRequestProgress(
+        task.id,
+        ${JSON.stringify(workspace)},
+        ${JSON.stringify([firstPrUrl, secondPrUrl, thirdPrUrl])},
+        process.env
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(result.tasks[0].stacked_prs, trackedStack);
+  assert.equal(result.tasks[0].pr_url, firstPrUrl);
+  assert.equal(result.tasks[0].branch_name, "agent/partial-stack");
+});
+
+test("live PR discovery cannot overwrite state after review ownership begins", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-live-status-handoff-state.json");
+  const firstPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/71";
+  const secondPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/72";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#71": {
+        url: firstPrUrl,
+        headRefName: "agent/handoff-one",
+        baseRefName: "main",
+        title: "Lower slice",
+      },
+      "farshidz/marqo-cortex-city#72": {
+        url: secondPrUrl,
+        headRefName: "agent/handoff-two",
+        baseRefName: "agent/handoff-one",
+        title: "Upper slice",
+      },
+    },
+  });
+  const lifecycleStack = [
+    {
+      position: 1,
+      pr_url: firstPrUrl,
+      branch_name: "agent/handoff-one",
+      base_branch: "main",
+      scope: "Lower slice",
+      state: "merged",
+      merge_commit_sha: "merge-71",
+    },
+    {
+      position: 2,
+      pr_url: secondPrUrl,
+      branch_name: "agent/handoff-two",
+      base_branch: "agent/worker-updated-base",
+      scope: "Upper slice",
+      state: "open",
+      pending_restack_of: firstPrUrl,
+    },
+  ];
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({ status: "in_progress" }))};
+      await createTask(task);
+      const pending = __testUtils.persistLivePullRequestProgress(
+        task.id,
+        ${JSON.stringify(workspace)},
+        ${JSON.stringify([firstPrUrl, secondPrUrl])},
+        process.env
+      );
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      await updateTask(task.id, {
+        status: "in_review",
+        pr_url: ${JSON.stringify(secondPrUrl)},
+        branch_name: "agent/handoff-two",
+        stacked_prs: ${JSON.stringify(lifecycleStack)},
+      });
+      await pending;
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+      FAKE_GH_PR_VIEW_DELAY_MS: "500",
+    }
+  );
+
+  assert.equal(result.tasks[0].status, "in_review");
+  assert.equal(result.tasks[0].pr_url, secondPrUrl);
+  assert.equal(result.tasks[0].branch_name, "agent/handoff-two");
+  assert.deepEqual(result.tasks[0].stacked_prs, lifecycleStack);
+});
+
+test("final reports retract provisional stack entries they do not confirm", () => {
+  const { workspace } = setupWorkspace();
+  const scenarioFile = path.join(workspace, "agent-scenario.json");
+  const ghStateFile = path.join(workspace, "gh-retracted-live-pr-state.json");
+  const firstPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/61";
+  const secondPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/62";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#61": {
+        url: firstPrUrl,
+        headRefName: "agent/retracted-stack",
+        headRefOid: "head-61",
+        baseRefName: "main",
+        title: "Confirmed single PR",
+        state: "open",
+        merged: false,
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        checks: [],
+      },
+      "farshidz/marqo-cortex-city#62": {
+        url: secondPrUrl,
+        headRefName: "agent/retracted-stack-2",
+        headRefOid: "head-62",
+        baseRefName: "agent/retracted-stack",
+        title: "Unconfirmed upper PR",
+        state: "open",
+        merged: false,
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        checks: [],
+      },
+    },
+  });
+  const finalReport = {
+    status: "completed",
+    summary: "Confirmed only the bottom PR",
+    pr_url: firstPrUrl,
+    branch_name: "agent/retracted-stack",
+    stacked_prs: null,
+    files_changed: [],
+    assumptions: [],
+    blockers: [],
+    next_steps: [],
+    tool_calls: null,
+  };
+  writeJson(scenarioFile, {
+    codex: {
+      stdoutChunks: [
+        {
+          text: `${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "gh pr create --base main",
+              aggregated_output: `${firstPrUrl}\n`,
+              status: "completed",
+            },
+          })}\n`,
+        },
+        {
+          delayMs: 75,
+          text: `${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "gh pr create --base agent/retracted-stack",
+              aggregated_output: `${secondPrUrl}\n`,
+              status: "completed",
+            },
+          })}\n`,
+        },
+        {
+          delayMs: 1500,
+          text: `${JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "agent_message",
+              text: JSON.stringify(finalReport),
+            },
+          })}\n${JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: 3, cached_input_tokens: 0, output_tokens: 2 },
+          })}\n`,
+        },
+      ],
+      sleepMs: 25,
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        worktree_path: workspace,
+      }))};
+      await createTask(task);
+      const completion = new Promise((resolve, reject) => {
+        spawnAgentSession(task, "initial", () => resolve(undefined)).catch(reject);
+      });
+      let provisionalTask;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const candidate = readTasks()[0];
+        if (candidate.stacked_prs?.length === 2) {
+          provisionalTask = JSON.parse(JSON.stringify(candidate));
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await completion;
+      console.log(JSON.stringify({ provisionalTask, tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.provisionalTask.stacked_prs.length, 2);
+  assert.ok(
+    result.provisionalTask.stacked_prs.every(
+      (entry: NonNullable<Task["stacked_prs"]>[number]) => entry.provisional
+    )
+  );
+  assert.equal(result.tasks[0].status, "in_review");
+  assert.equal(result.tasks[0].pr_url, firstPrUrl);
+  assert.equal(result.tasks[0].pr_url_provisional, undefined);
+  assert.equal(result.tasks[0].stacked_prs, undefined);
+});
+
+test("review runs leave live PR discovery to the final report", () => {
+  const { workspace } = setupWorkspace();
+  const scenarioFile = path.join(workspace, "agent-scenario.json");
+  const ghStateFile = path.join(workspace, "gh-review-pr-state.json");
+  const callsFile = path.join(workspace, "gh-review-pr-calls.jsonl");
+  const existingPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/51";
+  const newPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/52";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#51": {
+        url: existingPrUrl,
+        headRefName: "agent/review-existing",
+        headRefOid: "head-51",
+        baseRefName: "main",
+        title: "Existing PR",
+        state: "open",
+        merged: false,
+        reviews: [],
+        comments: [],
+        issueComments: [],
+        checks: [],
+      },
+      "farshidz/marqo-cortex-city#52": {
+        url: newPrUrl,
+        headRefName: "agent/review-new",
+        baseRefName: "agent/review-existing",
+        title: "New PR",
+      },
+    },
+  });
+  writeJson(scenarioFile, {
+    codex: {
+      stdout: `${JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          command: "gh pr create --base agent/review-existing",
+          aggregated_output: `${newPrUrl}\n`,
+          status: "completed",
+        },
+      })}\n`,
+    },
+  });
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_review",
+        pr_url: "https://github.com/farshidz/marqo-cortex-city/pull/51",
+        branch_name: "agent/review-existing",
+        worktree_path: workspace,
+      }))};
+      await createTask(task);
+      await new Promise((resolve, reject) => {
+        spawnAgentSession(task, "review", () => resolve(undefined)).catch(reject);
+      });
+      const calls = require("node:fs").readFileSync(${JSON.stringify(callsFile)}, "utf-8")
+        .trim()
+        .split(/\\n/)
+        .filter(Boolean)
+        .map(JSON.parse);
+      console.log(JSON.stringify({ tasks: readTasks(), calls }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+      FAKE_GH_CALLS_FILE: callsFile,
+    }
+  );
+
+  assert.equal(result.tasks[0].pr_url, existingPrUrl);
+  assert.equal(result.tasks[0].stacked_prs, undefined);
+  assert.equal(
+    result.calls.some((args: string[]) => args.includes(newPrUrl)),
+    false
+  );
 });
 
 test("handleRunComplete uses Codex session deltas instead of re-adding cumulative usage", () => {
