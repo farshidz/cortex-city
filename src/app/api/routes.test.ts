@@ -1066,7 +1066,7 @@ test("task status handoff stays blocked while an implementation run is launching
   );
 });
 
-test("task detail route clears worktree paths when finalizing tasks", () => {
+test("task detail route retains worktree paths for worker-owned final cleanup", () => {
   runRouteAssertions(
     withCortexState(`
       writeJson(path.join(cortexDir, "tasks.json"), [
@@ -1091,7 +1091,10 @@ test("task detail route clears worktree paths when finalizing tasks", () => {
       );
       assert.equal(updatedTask.status, 200);
       assert.equal(updatedTask.body.status, "merged");
-      assert.equal("worktree_path" in updatedTask.body, false);
+      assert.equal(
+        updatedTask.body.worktree_path,
+        path.join(workspace, "missing-worktree")
+      );
     `)
   );
 });
