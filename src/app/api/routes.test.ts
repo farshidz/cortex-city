@@ -964,6 +964,51 @@ test("task detail route keeps status owned by an active implementation run", () 
   );
 });
 
+test("task detail route checks active-run ownership in the status update", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
+      const store = await loadRoute("./src/lib/store.ts");
+      const tasksPath = path.join(cortexDir, "tasks.json");
+      writeJson(tasksPath, [
+        {
+          ...baseTask,
+          id: "handoff-race",
+          title: "Handoff race",
+        },
+      ]);
+
+      let markerWrite;
+      const handoffBody = { status: "in_review" };
+      Object.defineProperty(handoffBody, "agent_runner", {
+        get() {
+          markerWrite ??= store.updateTask("handoff-race", {
+            status: "in_progress",
+            current_run_mode: "initial",
+          });
+          return undefined;
+        },
+      });
+
+      const blockedHandoff = await json(
+        await taskRoute.PUT(
+          { json: async () => handoffBody },
+          { params: Promise.resolve({ id: "handoff-race" }) }
+        )
+      );
+      await markerWrite;
+
+      assert.equal(blockedHandoff.status, 409);
+      assert.deepEqual(blockedHandoff.body, {
+        error: "Cannot change status while the implementation run is active",
+      });
+      const taskAfterHandoff = await store.getTask("handoff-race");
+      assert.equal(taskAfterHandoff.status, "in_progress");
+      assert.equal(taskAfterHandoff.current_run_mode, "initial");
+    `)
+  );
+});
+
 test("task status handoff stays blocked while an implementation run is launching", () => {
   runRouteAssertions(
     withCortexState(`
