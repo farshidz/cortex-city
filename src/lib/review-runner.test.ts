@@ -4282,7 +4282,12 @@ test("summarizePR does not attach a launch failure to newer review context", () 
   const request = sampleRequest({
     source: "task",
     task_id: "task-launch-race",
+    task_title: "Original task title",
+    task_description: "Original goal",
     task_plan: "Original plan",
+    task_stack_position: 1,
+    task_stack_size: 2,
+    task_pr_scope: "Original stack slice",
     pr_url: "https://github.com/acme/widget/pull/303",
     pr_number: 303,
   });
@@ -4301,7 +4306,12 @@ test("summarizePR does not attach a launch failure to newer review context", () 
       process.env.CORTEX_TEST_OVERSIZED_ENV = "x".repeat(4 * 1024 * 1024);
       const contextUpdate = Promise.resolve().then(() =>
         patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+          task_title: "Updated task title",
+          task_description: "Updated goal",
           task_plan: "Updated plan",
+          task_stack_position: 2,
+          task_stack_size: 3,
+          task_pr_scope: "Updated stack slice",
           updated_at: "2026-05-01T00:30:00.000Z",
         })
       );
@@ -4321,8 +4331,63 @@ test("summarizePR does not attach a launch failure to newer review context", () 
   );
 
   assert.match(result.thrown, /E2BIG|argument list too long/i);
+  assert.equal(result.persisted.task_title, "Updated task title");
+  assert.equal(result.persisted.task_description, "Updated goal");
   assert.equal(result.persisted.task_plan, "Updated plan");
+  assert.equal(result.persisted.task_stack_position, 2);
+  assert.equal(result.persisted.task_stack_size, 3);
+  assert.equal(result.persisted.task_pr_scope, "Updated stack slice");
   assert.equal(result.persisted.updated_at, "2026-05-01T00:30:00.000Z");
+  assert.equal(result.persisted.error, undefined);
+  assert.equal(result.persisted.error_at, undefined);
+});
+
+test("summarizePR does not reopen a review finalized before a launch failure", () => {
+  const workspace = setupRunnerWorkspace("review-runner-launch-final-race-");
+  const request = sampleRequest({
+    pr_url: "https://github.com/acme/widget/pull/304",
+    pr_number: 304,
+  });
+  const finalAt = "2026-05-01T00:30:00.000Z";
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary, readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "",
+        generated_at: "",
+      });
+      process.env.CORTEX_TEST_OVERSIZED_ENV = "x".repeat(4 * 1024 * 1024);
+      const finalUpdate = Promise.resolve().then(() =>
+        patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+          final_at: ${JSON.stringify(finalAt)},
+          final_state: "merged",
+        })
+      );
+      let thrown;
+      try {
+        await summarizePR(${JSON.stringify(request)}, { runtime: "codex" });
+      } catch (error) {
+        thrown = error instanceof Error ? error.message : String(error);
+      }
+      await finalUpdate;
+      console.log(JSON.stringify({
+        thrown,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    prependBinToPath(workspace)
+  );
+
+  assert.match(result.thrown, /E2BIG|argument list too long/i);
+  assert.equal(result.persisted.final_at, finalAt);
+  assert.equal(result.persisted.final_state, "merged");
+  assert.equal(result.persisted.review_status, "final");
+  assert.equal(result.persisted.review_state, "archived");
   assert.equal(result.persisted.error, undefined);
   assert.equal(result.persisted.error_at, undefined);
 });

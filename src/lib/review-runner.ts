@@ -1738,6 +1738,8 @@ export async function spawnReviewSummary(
       );
       if (
         targetChanged ||
+        current?.final_at ||
+        current?.final_state ||
         (current?.current_run_pid && isProcessRunning(current.current_run_pid))
       ) {
         return undefined;
