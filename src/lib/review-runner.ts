@@ -1744,8 +1744,17 @@ export async function spawnReviewSummary(
       ) {
         return undefined;
       }
+      const transitionToTarget = Boolean(
+        current && currentMatchesPreparedState && !currentMatchesTarget
+      );
       return {
-        ...baseEntry,
+        // Reconciliation and interactive follow-ups may update lifecycle,
+        // delivery, diff, or session state during launch. A failed launch owns
+        // only its error and run markers. Start from the newest row, applying a
+        // target request snapshot only when this launch was prepared to move
+        // from the cached review context to a different target context.
+        ...(current || baseEntry),
+        ...(transitionToTarget ? reviewRequestSnapshot(target) : {}),
         my_last_review_sha: current
           ? current.my_last_review_sha
           : target.my_last_review_sha,
@@ -1757,18 +1766,8 @@ export async function spawnReviewSummary(
           : target.my_changes_requested_sha,
         error: message,
         error_at: failedAt,
-        reviewer_comment_receipts: current
-          ? current.reviewer_comment_receipts
-          : cachedBefore?.reviewer_comment_receipts,
-        reviewer_comment_cancellations: current
-          ? current.reviewer_comment_cancellations
-          : cachedBefore?.reviewer_comment_cancellations,
-        pending_reviewer_comment_delivery: current
-          ? current.pending_reviewer_comment_delivery
-          : cachedBefore?.pending_reviewer_comment_delivery,
         current_run_pid: undefined,
         current_run_id: undefined,
-        ...retroFields(current || cachedBefore),
       };
     });
     throw error;

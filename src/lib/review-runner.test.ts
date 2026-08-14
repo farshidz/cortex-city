@@ -4392,6 +4392,89 @@ test("summarizePR does not reopen a review finalized before a launch failure", (
   assert.equal(result.persisted.error_at, undefined);
 });
 
+test("summarizePR preserves newer nonterminal state on launch failure", () => {
+  const workspace = setupRunnerWorkspace("review-runner-launch-state-race-");
+  const request = sampleRequest({
+    label_only: true,
+    self_authored: true,
+    pr_url: "https://github.com/acme/widget/pull/305",
+    pr_number: 305,
+  });
+  const followups = [
+    {
+      asked_at: "2026-05-01T00:20:00.000Z",
+      question: "Does the retry preserve state?",
+      answered_at: "2026-05-01T00:20:05.000Z",
+      answer: "Yes.",
+      session_id: "followup-session",
+    },
+  ];
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary, readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "",
+        generated_at: "",
+      });
+      process.env.CORTEX_TEST_OVERSIZED_ENV = "x".repeat(4 * 1024 * 1024);
+      const concurrentUpdate = Promise.resolve().then(() =>
+        patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+          label_only: false,
+          updated_at: "2026-05-01T00:30:00.000Z",
+          effective_diff_hash: "new-diff",
+          effective_diff_head_sha: ${JSON.stringify(request.head_sha)},
+          final_state_lookup_started_at: "2026-05-01T00:25:00.000Z",
+          final_state_lookup_error_started_at: "2026-05-01T00:26:00.000Z",
+          final_state_lookup_error: "GitHub unavailable",
+          pending_review_error: "Pending review repair in progress",
+          followups: ${JSON.stringify(followups)},
+          session_id: "new-session",
+        })
+      );
+      let thrown;
+      try {
+        await summarizePR(${JSON.stringify(request)}, { runtime: "codex" });
+      } catch (error) {
+        thrown = error instanceof Error ? error.message : String(error);
+      }
+      await concurrentUpdate;
+      console.log(JSON.stringify({
+        thrown,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    prependBinToPath(workspace)
+  );
+
+  assert.match(result.thrown, /E2BIG|argument list too long/i);
+  assert.equal(result.persisted.label_only, false);
+  assert.equal(result.persisted.updated_at, "2026-05-01T00:30:00.000Z");
+  assert.equal(result.persisted.effective_diff_hash, "new-diff");
+  assert.equal(result.persisted.effective_diff_head_sha, request.head_sha);
+  assert.equal(
+    result.persisted.final_state_lookup_started_at,
+    "2026-05-01T00:25:00.000Z"
+  );
+  assert.equal(
+    result.persisted.final_state_lookup_error_started_at,
+    "2026-05-01T00:26:00.000Z"
+  );
+  assert.equal(result.persisted.final_state_lookup_error, "GitHub unavailable");
+  assert.equal(
+    result.persisted.pending_review_error,
+    "Pending review repair in progress"
+  );
+  assert.deepEqual(result.persisted.followups, followups);
+  assert.equal(result.persisted.session_id, "new-session");
+  assert.equal(result.persisted.error, result.thrown);
+  assert.equal(typeof result.persisted.error_at, "string");
+});
+
 test("spawnRuntime terminates a running reviewer when it crosses the reserve", async () => {
   const workspace = setupRunnerWorkspace("review-runner-disk-monitor-");
   const descendantMarker = path.join(workspace, "descendant-survived");
