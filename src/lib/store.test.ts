@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -81,7 +82,7 @@ test("readConfig creates defaults when no config file exists", () => {
   assert.deepEqual(JSON.parse(readFileSync(configFile, "utf-8")), config);
   assert.equal(
     readFileSync(gitignoreFile, "utf-8"),
-    ".tasks.write.lock\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
+    ".tasks.write.lock.*\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
   );
 });
 
@@ -95,7 +96,7 @@ test("readConfig appends missing default cortex gitignore entries", () => {
 
   assert.equal(
     readFileSync(gitignoreFile, "utf-8"),
-    "custom-state.json\n.tasks.write.lock\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
+    "custom-state.json\n.tasks.write.lock.*\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
   );
 });
 
@@ -197,6 +198,171 @@ test("updateTask merges concurrent writes without dropping earlier fields", () =
     result.pr_url,
     "https://github.com/farshidz/marqo-cortex-city/pull/456"
   );
+});
+
+test("dead task-lock recovery cannot unlink a replacement owner", async () => {
+  const workspace = createTempWorkspace();
+  const cortexDir = path.join(workspace, ".cortex");
+  mkdirSync(cortexDir, { recursive: true });
+  writeFileSync(
+    path.join(cortexDir, "tasks.json"),
+    JSON.stringify([sampleTask()], null, 2)
+  );
+
+  const deadOwnerHeld = path.join(workspace, "dead-owner-held");
+  const recoveryObserved = path.join(workspace, "recovery-observed");
+  const contenderAEntered = path.join(workspace, "contender-a-entered");
+  const contenderBEntered = path.join(workspace, "contender-b-entered");
+  const releaseContenderB = path.join(workspace, "release-contender-b");
+  const children: ReturnType<typeof spawn>[] = [];
+  const stderr = new Map<ReturnType<typeof spawn>, string>();
+
+  const spawnStoreScript = (body: string, args: string[] = []) => {
+    const child = spawn(
+      TSX_BIN,
+      [
+        "--eval",
+        [
+          "(async () => {",
+          body,
+          "})().catch((error) => {",
+          "  console.error(error);",
+          "  process.exit(1);",
+          "});",
+        ].join("\n"),
+        ...args,
+      ],
+      { cwd: workspace, stdio: ["ignore", "ignore", "pipe"] }
+    );
+    children.push(child);
+    stderr.set(child, "");
+    child.stderr?.on("data", (chunk) => {
+      stderr.set(child, `${stderr.get(child)}${chunk.toString()}`);
+    });
+    return child;
+  };
+
+  const waitForPath = async (target: string, child?: ReturnType<typeof spawn>) => {
+    for (let attempt = 0; attempt < 500; attempt++) {
+      if (existsSync(target)) return;
+      if (child && (child.exitCode !== null || child.signalCode !== null)) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(
+      `Timed out waiting for ${path.basename(target)}${
+        child ? `: ${stderr.get(child)}` : ""
+      }`
+    );
+  };
+
+  const waitForExit = (child: ReturnType<typeof spawn>) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return Promise.resolve(child.exitCode);
+    }
+    return new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", resolve);
+    });
+  };
+
+  const importStore = [
+    `const importedStore = await import(${JSON.stringify(STORE_MODULE_URL)});`,
+    "const store = importedStore.default || importedStore;",
+  ].join("\n");
+
+  let contenderA;
+  let contenderB;
+  try {
+    const deadOwner = spawnStoreScript(
+      [
+        'const fs = require("node:fs");',
+        importStore,
+        'await store.updateTaskAtomically("task-1", () => {',
+        '  fs.writeFileSync(process.argv[1], "held");',
+        '  process.kill(process.pid, "SIGKILL");',
+        "});",
+      ].join("\n"),
+      [deadOwnerHeld]
+    );
+    await waitForPath(deadOwnerHeld, deadOwner);
+    await waitForExit(deadOwner);
+
+    contenderA = spawnStoreScript(
+      [
+        'const fs = require("node:fs");',
+        'const path = require("node:path");',
+        'const realUnlinkSync = fs.unlinkSync.bind(fs);',
+        'const waitArray = new Int32Array(new SharedArrayBuffer(4));',
+        'let delayedRecovery = false;',
+        'fs.unlinkSync = (target, ...args) => {',
+        '  if (!delayedRecovery && path.basename(String(target)).startsWith(".tasks.write.lock")) {',
+        '    delayedRecovery = true;',
+        '    fs.writeFileSync(process.argv[1], "observed");',
+        '    while (!fs.existsSync(process.argv[2])) {',
+        '      Atomics.wait(waitArray, 0, 0, 10);',
+        '    }',
+        '  }',
+        '  return realUnlinkSync(target, ...args);',
+        '};',
+        importStore,
+        'await store.updateTaskAtomically("task-1", () => {',
+        '  fs.writeFileSync(process.argv[3], "entered");',
+        '  return { session_id: "session-a" };',
+        '});',
+      ].join("\n"),
+      [recoveryObserved, contenderBEntered, contenderAEntered]
+    );
+    await waitForPath(recoveryObserved, contenderA);
+
+    contenderB = spawnStoreScript(
+      [
+        'const fs = require("node:fs");',
+        importStore,
+        'const waitArray = new Int32Array(new SharedArrayBuffer(4));',
+        'await store.updateTaskAtomically("task-1", () => {',
+        '  fs.writeFileSync(process.argv[1], "entered");',
+        '  while (!fs.existsSync(process.argv[2])) {',
+        '    Atomics.wait(waitArray, 0, 0, 10);',
+        '  }',
+        '  return { pr_url: "https://github.com/acme/widget/pull/2" };',
+        '});',
+      ].join("\n"),
+      [contenderBEntered, releaseContenderB]
+    );
+    await waitForPath(contenderBEntered, contenderB);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const overlappedReplacementOwner = existsSync(contenderAEntered);
+
+    writeFileSync(releaseContenderB, "release");
+    const [contenderAExit, contenderBExit] = await Promise.all([
+      waitForExit(contenderA),
+      waitForExit(contenderB),
+    ]);
+
+    assert.equal(contenderAExit, 0, stderr.get(contenderA));
+    assert.equal(contenderBExit, 0, stderr.get(contenderB));
+    assert.equal(overlappedReplacementOwner, false);
+    const [stored] = JSON.parse(
+      readFileSync(path.join(cortexDir, "tasks.json"), "utf-8")
+    );
+    assert.equal(stored.session_id, "session-a");
+    assert.equal(stored.pr_url, "https://github.com/acme/widget/pull/2");
+    assert.deepEqual(
+      readdirSync(cortexDir).filter((name) =>
+        name.startsWith(".tasks.write.lock.")
+      ),
+      []
+    );
+  } finally {
+    if (!existsSync(releaseContenderB)) {
+      writeFileSync(releaseContenderB, "release");
+    }
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+    }
+  }
 });
 
 test("readTasks clears legacy reviewer state without disturbing builder review state", () => {

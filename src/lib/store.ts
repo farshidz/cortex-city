@@ -5,8 +5,8 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -22,12 +22,12 @@ import { assertSufficientDiskSpace } from "./disk-guard";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
-const TASKS_WRITE_LOCK_FILE = path.join(CORTEX_DIR, ".tasks.write.lock");
+const TASKS_WRITE_LOCK_PREFIX = ".tasks.write.lock";
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
 const GITIGNORE_FILE = path.join(CORTEX_DIR, ".gitignore");
 const BACKUPS_DIR = path.join(CORTEX_DIR, "backups");
 const DEFAULT_CORTEX_GITIGNORE_ENTRIES = [
-  ".tasks.write.lock",
+  ".tasks.write.lock.*",
   "orchestrator-state.json",
   ".env.*",
   ".env",
@@ -36,7 +36,6 @@ const DEFAULT_CORTEX_GITIGNORE_ENTRIES = [
 ];
 const DEFAULT_CORTEX_GITIGNORE = `${DEFAULT_CORTEX_GITIGNORE_ENTRIES.join("\n")}\n`;
 const TASKS_WRITE_LOCK_RETRY_MS = 10;
-const TASKS_WRITE_LOCK_STALE_MS = 30_000;
 type StoredConfig = Partial<OrchestratorConfig> & {
   agent_runner?: OrchestratorConfig["default_agent_runner"];
   permission_mode?: OrchestratorConfig["default_permission_mode"];
@@ -182,10 +181,15 @@ function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
   return result;
 }
 
-interface TasksWriteLockOwner {
+interface TasksWriteLockRecordBase {
   pid: number;
   token: string;
+  path: string;
 }
+
+type TasksWriteLockRecord =
+  | (TasksWriteLockRecordBase & { kind: "choosing" })
+  | (TasksWriteLockRecordBase & { kind: "ticket"; ticket: number });
 
 function isErrnoException(error: unknown, code: string): boolean {
   return (
@@ -204,93 +208,138 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
-function parseTasksWriteLockOwner(raw: string): TasksWriteLockOwner | undefined {
-  try {
-    const parsed = JSON.parse(raw) as Partial<TasksWriteLockOwner>;
-    if (
-      typeof parsed.pid !== "number" ||
-      !Number.isInteger(parsed.pid) ||
-      parsed.pid <= 0 ||
-      typeof parsed.token !== "string" ||
-      !parsed.token
-    ) {
-      return undefined;
-    }
-    return { pid: parsed.pid, token: parsed.token };
-  } catch {
+function parseTasksWriteLockRecord(name: string): TasksWriteLockRecord | undefined {
+  const choosing = name.match(
+    /^\.tasks\.write\.lock\.choosing\.(\d+)\.([0-9a-f-]+)$/
+  );
+  if (choosing) {
+    const pid = Number(choosing[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+    return {
+      kind: "choosing",
+      pid,
+      token: choosing[2],
+      path: path.join(CORTEX_DIR, name),
+    };
+  }
+
+  const ticket = name.match(
+    /^\.tasks\.write\.lock\.ticket\.(\d+)\.(\d+)\.([0-9a-f-]+)$/
+  );
+  if (!ticket) return undefined;
+  const number = Number(ticket[1]);
+  const pid = Number(ticket[2]);
+  if (
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0
+  ) {
     return undefined;
   }
+  return {
+    kind: "ticket",
+    pid,
+    token: ticket[3],
+    ticket: number,
+    path: path.join(CORTEX_DIR, name),
+  };
 }
 
-function clearAbandonedTasksWriteLock(): void {
-  let observed: string;
-  let ageMs: number;
+function removeTasksWriteLockRecord(recordPath: string): void {
   try {
-    observed = readFileSync(TASKS_WRITE_LOCK_FILE, "utf-8");
-    ageMs = Date.now() - statSync(TASKS_WRITE_LOCK_FILE).mtimeMs;
-  } catch (error) {
-    if (isErrnoException(error, "ENOENT")) return;
-    throw error;
-  }
-
-  const owner = parseTasksWriteLockOwner(observed);
-  if (owner ? isProcessRunning(owner.pid) : ageMs < TASKS_WRITE_LOCK_STALE_MS) {
-    return;
-  }
-
-  try {
-    // A new owner can replace an abandoned lock between the observations. The
-    // token comparison prevents this process from unlinking that new lock.
-    if (readFileSync(TASKS_WRITE_LOCK_FILE, "utf-8") === observed) {
-      unlinkSync(TASKS_WRITE_LOCK_FILE);
-    }
+    unlinkSync(recordPath);
   } catch (error) {
     if (!isErrnoException(error, "ENOENT")) throw error;
   }
 }
 
+function readLiveTasksWriteLockRecords(): TasksWriteLockRecord[] {
+  const live: TasksWriteLockRecord[] = [];
+  for (const name of readdirSync(CORTEX_DIR)) {
+    const record = parseTasksWriteLockRecord(name);
+    if (!record) continue;
+    if (isProcessRunning(record.pid)) {
+      live.push(record);
+    } else {
+      // Each contender uses a unique pathname for its entire lifetime. Removing
+      // a dead contender therefore cannot unlink a live replacement owner.
+      removeTasksWriteLockRecord(record.path);
+    }
+  }
+  return live;
+}
+
+function createTasksWriteLockRecord(recordPath: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(recordPath, "wx", 0o600);
+    fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 async function acquireTasksWriteLock(): Promise<() => void> {
   ensureCortexDir();
-  const owner: TasksWriteLockOwner = {
-    pid: process.pid,
-    token: randomUUID(),
-  };
-  const encodedOwner = `${JSON.stringify(owner)}\n`;
+  const pid = process.pid;
+  const token = randomUUID();
+  const choosingPath = path.join(
+    CORTEX_DIR,
+    `${TASKS_WRITE_LOCK_PREFIX}.choosing.${pid}.${token}`
+  );
+  let ticketPath: string;
+
+  // Clear dead records before entering the bakery doorway. This keeps stale
+  // recovery outside the ordering protocol while every pathname remains tied
+  // to exactly one contender.
+  readLiveTasksWriteLockRecords();
+  createTasksWriteLockRecord(choosingPath);
+  try {
+    const ticket =
+      readLiveTasksWriteLockRecords().reduce(
+        (highest, record) =>
+          record.kind === "ticket" ? Math.max(highest, record.ticket) : highest,
+        0
+      ) + 1;
+    ticketPath = path.join(
+      CORTEX_DIR,
+      `${TASKS_WRITE_LOCK_PREFIX}.ticket.${ticket}.${pid}.${token}`
+    );
+    createTasksWriteLockRecord(ticketPath);
+  } finally {
+    removeTasksWriteLockRecord(choosingPath);
+  }
+
+  const ownTicket = parseTasksWriteLockRecord(path.basename(ticketPath));
+  if (!ownTicket || ownTicket.kind !== "ticket") {
+    removeTasksWriteLockRecord(ticketPath);
+    throw new Error("Failed to create task write lock ticket");
+  }
 
   while (true) {
-    let fd: number;
-    try {
-      fd = openSync(TASKS_WRITE_LOCK_FILE, "wx", 0o600);
-    } catch (error) {
-      if (!isErrnoException(error, "EEXIST")) throw error;
-      clearAbandonedTasksWriteLock();
-      await new Promise((resolve) => setTimeout(resolve, TASKS_WRITE_LOCK_RETRY_MS));
-      continue;
-    }
-
-    try {
-      writeSync(fd, encodedOwner);
-      fsyncSync(fd);
-    } catch (error) {
-      try {
-        unlinkSync(TASKS_WRITE_LOCK_FILE);
-      } catch {}
-      throw error;
-    } finally {
-      closeSync(fd);
-    }
-
-    return () => {
-      try {
-        const current = readFileSync(TASKS_WRITE_LOCK_FILE, "utf-8");
-        if (parseTasksWriteLockOwner(current)?.token === owner.token) {
-          unlinkSync(TASKS_WRITE_LOCK_FILE);
-        }
-      } catch (error) {
-        if (!isErrnoException(error, "ENOENT")) throw error;
+    const records = readLiveTasksWriteLockRecords();
+    const anotherContenderIsChoosing = records.some(
+      (record) =>
+        record.kind === "choosing" &&
+        (record.pid !== ownTicket.pid || record.token !== ownTicket.token)
+    );
+    const earlierTicketExists = records.some((record) => {
+      if (record.kind !== "ticket") return false;
+      if (record.pid === ownTicket.pid && record.token === ownTicket.token) {
+        return false;
       }
-    };
+      if (record.ticket !== ownTicket.ticket) {
+        return record.ticket < ownTicket.ticket;
+      }
+      if (record.pid !== ownTicket.pid) return record.pid < ownTicket.pid;
+      return record.token < ownTicket.token;
+    });
+    if (!anotherContenderIsChoosing && !earlierTicketExists) break;
+    await new Promise((resolve) => setTimeout(resolve, TASKS_WRITE_LOCK_RETRY_MS));
   }
+
+  return () => removeTasksWriteLockRecord(ticketPath);
 }
 
 function withTasksWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
