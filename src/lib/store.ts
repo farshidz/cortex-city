@@ -6,10 +6,12 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from "fs";
+import { randomUUID } from "crypto";
 import path from "path";
 import type { Task, OrchestratorConfig } from "./types";
 import { snapshotCortex } from "./cortex-git";
@@ -20,10 +22,12 @@ import { assertSufficientDiskSpace } from "./disk-guard";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
+const TASKS_WRITE_LOCK_FILE = path.join(CORTEX_DIR, ".tasks.write.lock");
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
 const GITIGNORE_FILE = path.join(CORTEX_DIR, ".gitignore");
 const BACKUPS_DIR = path.join(CORTEX_DIR, "backups");
 const DEFAULT_CORTEX_GITIGNORE_ENTRIES = [
+  ".tasks.write.lock",
   "orchestrator-state.json",
   ".env.*",
   ".env",
@@ -31,6 +35,8 @@ const DEFAULT_CORTEX_GITIGNORE_ENTRIES = [
   "backups/",
 ];
 const DEFAULT_CORTEX_GITIGNORE = `${DEFAULT_CORTEX_GITIGNORE_ENTRIES.join("\n")}\n`;
+const TASKS_WRITE_LOCK_RETRY_MS = 10;
+const TASKS_WRITE_LOCK_STALE_MS = 30_000;
 type StoredConfig = Partial<OrchestratorConfig> & {
   agent_runner?: OrchestratorConfig["default_agent_runner"];
   permission_mode?: OrchestratorConfig["default_permission_mode"];
@@ -176,6 +182,128 @@ function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
   return result;
 }
 
+interface TasksWriteLockOwner {
+  pid: number;
+  token: string;
+}
+
+function isErrnoException(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code
+  );
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isErrnoException(error, "ESRCH");
+  }
+}
+
+function parseTasksWriteLockOwner(raw: string): TasksWriteLockOwner | undefined {
+  try {
+    const parsed = JSON.parse(raw) as Partial<TasksWriteLockOwner>;
+    if (
+      typeof parsed.pid !== "number" ||
+      !Number.isInteger(parsed.pid) ||
+      parsed.pid <= 0 ||
+      typeof parsed.token !== "string" ||
+      !parsed.token
+    ) {
+      return undefined;
+    }
+    return { pid: parsed.pid, token: parsed.token };
+  } catch {
+    return undefined;
+  }
+}
+
+function clearAbandonedTasksWriteLock(): void {
+  let observed: string;
+  let ageMs: number;
+  try {
+    observed = readFileSync(TASKS_WRITE_LOCK_FILE, "utf-8");
+    ageMs = Date.now() - statSync(TASKS_WRITE_LOCK_FILE).mtimeMs;
+  } catch (error) {
+    if (isErrnoException(error, "ENOENT")) return;
+    throw error;
+  }
+
+  const owner = parseTasksWriteLockOwner(observed);
+  if (owner ? isProcessRunning(owner.pid) : ageMs < TASKS_WRITE_LOCK_STALE_MS) {
+    return;
+  }
+
+  try {
+    // A new owner can replace an abandoned lock between the observations. The
+    // token comparison prevents this process from unlinking that new lock.
+    if (readFileSync(TASKS_WRITE_LOCK_FILE, "utf-8") === observed) {
+      unlinkSync(TASKS_WRITE_LOCK_FILE);
+    }
+  } catch (error) {
+    if (!isErrnoException(error, "ENOENT")) throw error;
+  }
+}
+
+async function acquireTasksWriteLock(): Promise<() => void> {
+  ensureCortexDir();
+  const owner: TasksWriteLockOwner = {
+    pid: process.pid,
+    token: randomUUID(),
+  };
+  const encodedOwner = `${JSON.stringify(owner)}\n`;
+
+  while (true) {
+    let fd: number;
+    try {
+      fd = openSync(TASKS_WRITE_LOCK_FILE, "wx", 0o600);
+    } catch (error) {
+      if (!isErrnoException(error, "EEXIST")) throw error;
+      clearAbandonedTasksWriteLock();
+      await new Promise((resolve) => setTimeout(resolve, TASKS_WRITE_LOCK_RETRY_MS));
+      continue;
+    }
+
+    try {
+      writeSync(fd, encodedOwner);
+      fsyncSync(fd);
+    } catch (error) {
+      try {
+        unlinkSync(TASKS_WRITE_LOCK_FILE);
+      } catch {}
+      throw error;
+    } finally {
+      closeSync(fd);
+    }
+
+    return () => {
+      try {
+        const current = readFileSync(TASKS_WRITE_LOCK_FILE, "utf-8");
+        if (parseTasksWriteLockOwner(current)?.token === owner.token) {
+          unlinkSync(TASKS_WRITE_LOCK_FILE);
+        }
+      } catch (error) {
+        if (!isErrnoException(error, "ENOENT")) throw error;
+      }
+    };
+  }
+}
+
+function withTasksWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  return withWriteLock(async () => {
+    const release = await acquireTasksWriteLock();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  });
+}
+
 // --- Tasks ---
 
 const LEGACY_REVIEWER_TASK_FIELDS = [
@@ -235,7 +363,7 @@ function writeTasksLocked(tasks: Task[]): void {
 }
 
 export function writeTasks(tasks: Task[]): Promise<void> {
-  return withWriteLock(() => {
+  return withTasksWriteLock(() => {
     writeTasksLocked(tasks);
   });
 }
@@ -245,7 +373,7 @@ export async function getTask(id: string): Promise<Task | undefined> {
 }
 
 export async function createTask(task: Task): Promise<Task> {
-  return withWriteLock(() => {
+  return withTasksWriteLock(() => {
     const tasks = readTasks();
     tasks.push(task);
     writeTasksLocked(tasks);
@@ -254,7 +382,7 @@ export async function createTask(task: Task): Promise<Task> {
 }
 
 export async function updateTask(id: string, updates: Partial<Task>): Promise<Task> {
-  return withWriteLock(async () => {
+  return withTasksWriteLock(async () => {
     const tasks = readTasks();
     const index = tasks.findIndex((t) => t.id === id);
     if (index === -1) throw new Error(`Task ${id} not found`);
@@ -276,7 +404,7 @@ export async function updateTaskAtomically(
   id: string,
   buildUpdates: (current: Task) => Partial<Task> | undefined
 ): Promise<Task | undefined> {
-  return withWriteLock(async () => {
+  return withTasksWriteLock(async () => {
     const tasks = readTasks();
     const index = tasks.findIndex((task) => task.id === id);
     if (index === -1) return undefined;
@@ -299,7 +427,7 @@ export async function updateTaskAtomically(
 }
 
 export async function deleteTask(id: string): Promise<void> {
-  return withWriteLock(() => {
+  return withTasksWriteLock(() => {
     const tasks = readTasks();
     const filtered = tasks.filter((t) => t.id !== id);
     if (filtered.length === tasks.length) throw new Error(`Task ${id} not found`);
