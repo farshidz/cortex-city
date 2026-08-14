@@ -4277,6 +4277,56 @@ test("summarizePR persists synchronous runtime launch failures", () => {
   assert.equal(result.persisted.current_run_pid, undefined);
 });
 
+test("summarizePR does not attach a launch failure to newer review context", () => {
+  const workspace = setupRunnerWorkspace("review-runner-launch-context-race-");
+  const request = sampleRequest({
+    source: "task",
+    task_id: "task-launch-race",
+    task_plan: "Original plan",
+    pr_url: "https://github.com/acme/widget/pull/303",
+    pr_number: 303,
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary, readReviewSummaryMap, upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      await upsertReviewSummary({
+        ...${JSON.stringify(request)},
+        summary: "",
+        generated_at: "",
+      });
+      process.env.CORTEX_TEST_OVERSIZED_ENV = "x".repeat(4 * 1024 * 1024);
+      const contextUpdate = Promise.resolve().then(() =>
+        patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+          task_plan: "Updated plan",
+          updated_at: "2026-05-01T00:30:00.000Z",
+        })
+      );
+      let thrown;
+      try {
+        await summarizePR(${JSON.stringify(request)}, { runtime: "codex" });
+      } catch (error) {
+        thrown = error instanceof Error ? error.message : String(error);
+      }
+      await contextUpdate;
+      console.log(JSON.stringify({
+        thrown,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    prependBinToPath(workspace)
+  );
+
+  assert.match(result.thrown, /E2BIG|argument list too long/i);
+  assert.equal(result.persisted.task_plan, "Updated plan");
+  assert.equal(result.persisted.updated_at, "2026-05-01T00:30:00.000Z");
+  assert.equal(result.persisted.error, undefined);
+  assert.equal(result.persisted.error_at, undefined);
+});
+
 test("spawnRuntime terminates a running reviewer when it crosses the reserve", async () => {
   const workspace = setupRunnerWorkspace("review-runner-disk-monitor-");
   const descendantMarker = path.join(workspace, "descendant-survived");

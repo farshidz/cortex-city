@@ -1722,10 +1722,23 @@ export async function spawnReviewSummary(
     const failedAt = new Date().toISOString();
     const message = error instanceof Error ? error.message : String(error);
     await mutateReviewSummary(target.pr_url, (current) => {
-      if (
+      const currentMatchesPreparedState = Boolean(
         current &&
-        (current.head_sha !== target.head_sha ||
-          (current.current_run_pid && isProcessRunning(current.current_run_pid)))
+          cachedBefore &&
+          current.head_sha === cachedBefore.head_sha &&
+          sameReviewContext(current, cachedBefore)
+      );
+      const currentMatchesTarget = Boolean(
+        current &&
+          current.head_sha === target.head_sha &&
+          sameReviewContext(current, target)
+      );
+      const targetChanged = Boolean(
+        current && !currentMatchesPreparedState && !currentMatchesTarget
+      );
+      if (
+        targetChanged ||
+        (current?.current_run_pid && isProcessRunning(current.current_run_pid))
       ) {
         return undefined;
       }
