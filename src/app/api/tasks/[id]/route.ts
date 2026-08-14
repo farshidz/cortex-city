@@ -127,13 +127,6 @@ export async function PUT(
       );
     }
 
-    // If transitioning to a final status, clean up the worktree
-    if (body.status === "merged" || body.status === "closed") {
-      if (task?.worktree_path) {
-        await removeWorktree(task);
-        body.worktree_path = undefined;
-      }
-    }
     const updated = await updateTask(id, body);
     return NextResponse.json(updated);
   } catch {

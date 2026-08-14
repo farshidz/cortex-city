@@ -7,13 +7,13 @@ export function isFinalTask(task: Pick<Task, "status">): boolean {
 export function shouldClearMissingFinalWorktreePath(
   task: Task,
   hasActivePid: boolean,
-  hasWorktreeDirectory: boolean
+  hasClearableWorktreePath: boolean
 ): boolean {
   return Boolean(
     isFinalTask(task) &&
       task.worktree_path &&
       !hasActivePid &&
-      !hasWorktreeDirectory
+      hasClearableWorktreePath
   );
 }
 
