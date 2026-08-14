@@ -216,8 +216,12 @@ function getProcessInstance(pid: number): string | undefined {
     try {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
       const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      if (/^\d+$/.test(fields[19] || "")) {
-        startedAt = `linux:${fields[19]}`;
+      const bootId = readFileSync(
+        "/proc/sys/kernel/random/boot_id",
+        "utf-8"
+      ).trim();
+      if (/^\d+$/.test(fields[19] || "") && bootId) {
+        startedAt = `linux:${bootId}:${fields[19]}`;
       }
     } catch {}
   }

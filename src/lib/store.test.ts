@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
@@ -449,6 +450,60 @@ test("task-lock recovery rejects a reused live PID", async () => {
     assert.equal(exitCode, 0, helperStderr);
   }
 });
+
+test(
+  "task-lock recovery rejects a prior-boot Linux process instance",
+  { skip: process.platform !== "linux" },
+  () => {
+    const workspace = createTempWorkspace();
+    const cortexDir = path.join(workspace, ".cortex");
+    mkdirSync(cortexDir, { recursive: true });
+    writeFileSync(
+      path.join(cortexDir, "tasks.json"),
+      JSON.stringify([sampleTask()], null, 2)
+    );
+
+    const stat = readFileSync(`/proc/${process.pid}/stat`, "utf-8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const startTicks = fields[19];
+    assert.match(startTicks, /^\d+$/);
+    const currentBootId = readFileSync(
+      "/proc/sys/kernel/random/boot_id",
+      "utf-8"
+    ).trim();
+    const priorBootId =
+      currentBootId === "00000000-0000-4000-8000-000000000000"
+        ? "11111111-1111-4111-8111-111111111111"
+        : "00000000-0000-4000-8000-000000000000";
+    const priorBootInstance = createHash("sha256")
+      .update(`linux:${priorBootId}:${startTicks}`)
+      .digest("hex");
+    const staleRecord = path.join(
+      cortexDir,
+      [
+        ".tasks.write.lock.ticket.1",
+        process.pid,
+        priorBootInstance,
+        "00000000-0000-4000-8000-000000000000",
+      ].join(".")
+    );
+    writeFileSync(staleRecord, "");
+
+    const updated = runStoreScript(
+      workspace,
+      `
+        const updated = await store.updateTask("task-1", {
+          session_id: "current-boot",
+        });
+        console.log(JSON.stringify(updated));
+      `,
+      5000
+    );
+
+    assert.equal(updated.session_id, "current-boot");
+    assert.equal(existsSync(staleRecord), false);
+  }
+);
 
 test("readTasks clears legacy reviewer state without disturbing builder review state", () => {
   const workspace = createTempWorkspace();
