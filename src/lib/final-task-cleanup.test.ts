@@ -65,7 +65,7 @@ test("shouldClearMissingFinalWorktreePath allows inactive final tasks to drop st
         worktree_path: "/tmp/missing-worktree",
       }),
       false,
-      false
+      true
     ),
     true
   );
@@ -75,7 +75,7 @@ test("shouldClearMissingFinalWorktreePath allows inactive final tasks to drop st
         worktree_path: "/tmp/missing-worktree",
       }),
       true,
-      false
+      true
     ),
     false
   );
@@ -86,7 +86,7 @@ test("shouldClearMissingFinalWorktreePath allows inactive final tasks to drop st
         worktree_path: "/tmp/missing-worktree",
       }),
       false,
-      false
+      true
     ),
     false
   );

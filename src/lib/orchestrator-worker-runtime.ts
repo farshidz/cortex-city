@@ -161,16 +161,32 @@ function errorMessage(error: unknown): string {
   return "Unknown error";
 }
 
-function isDirectory(target: string): boolean {
+type WorktreeStat = (target: string) => { isDirectory(): boolean };
+
+export type WorktreePathState =
+  | "directory"
+  | "missing"
+  | "not_directory"
+  | "indeterminate";
+
+export function getWorktreePathState(
+  target: string,
+  statPath: WorktreeStat = statSync
+): WorktreePathState {
   try {
-    return statSync(target).isDirectory();
-  } catch {
-    return false;
+    // A non-directory cannot be retried as a worktree, so it is stale metadata
+    // that the worker may clear just like a confirmed missing path.
+    return statPath(target).isDirectory() ? "directory" : "not_directory";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") return "missing";
+    if (code === "ENOTDIR") return "not_directory";
+    return "indeterminate";
   }
 }
 
-function hasWorktreeDirectory(task: Pick<Task, "worktree_path">): boolean {
-  return Boolean(task.worktree_path && isDirectory(task.worktree_path));
+function isClearableWorktreePathState(state: WorktreePathState): boolean {
+  return state === "missing" || state === "not_directory";
 }
 
 interface WorkerLogger {
@@ -207,6 +223,7 @@ export interface WorkerRuntimeDeps {
   readReviewSummaryMap: typeof readReviewSummaryMap;
   readReviewLearnings: typeof readReviewLearnings;
   readTasks: typeof readTasks;
+  statWorktreePath?: WorktreeStat;
   removeWorktree: typeof removeWorktree;
   removeFinalReviewWorkspace: typeof removeFinalReviewWorkspace;
   spawnReviewRetro: typeof spawnReviewRetro;
@@ -956,6 +973,11 @@ export async function pollOnce(
   );
   const pruneAfterMetadataCleanupTaskIds = new Set<string>();
 
+  const worktreePathState = (task: Pick<Task, "worktree_path">) =>
+    task.worktree_path
+      ? getWorktreePathState(task.worktree_path, deps.statWorktreePath)
+      : "missing";
+
   const rememberPruneEligibility = (task: Task) => {
     const updatedAt = initialTaskUpdatedAt.get(task.id);
     if (updatedAt !== undefined && pollStartedAt - updatedAt > PRUNE_AGE_MS) {
@@ -1021,7 +1043,10 @@ export async function pollOnce(
     deps.logger.log(
       `[worker] Resetting stale final cleanup state for task "${task.title}" (${task.id})`
     );
-    if (!task.worktree_path || !hasWorktreeDirectory(task)) {
+    if (
+      !task.worktree_path ||
+      isClearableWorktreePathState(worktreePathState(task))
+    ) {
       rememberPruneEligibility(task);
     }
     await deps.updateTask(task.id, {
@@ -1037,7 +1062,7 @@ export async function pollOnce(
       !shouldClearMissingFinalWorktreePath(
         task,
         activePids.has(task.id),
-        hasWorktreeDirectory(task)
+        isClearableWorktreePathState(worktreePathState(task))
       )
     ) {
       continue;
@@ -1062,7 +1087,7 @@ export async function pollOnce(
       !shouldStartFinalCleanup(
         task,
         activePids.has(task.id),
-        hasWorktreeDirectory(task)
+        worktreePathState(task) === "directory"
       )
     ) {
       continue;
@@ -1081,7 +1106,7 @@ export async function pollOnce(
         });
         if (currentTask.worktree_path) {
           await deps.removeWorktree(currentTask);
-          if (!hasWorktreeDirectory(currentTask)) {
+          if (isClearableWorktreePathState(worktreePathState(currentTask))) {
             await deps.updateTask(taskId, {
               worktree_path: undefined,
             });
@@ -1107,7 +1132,7 @@ export async function pollOnce(
 
     deps.logger.log(`[worker] Removing leftover worktree for task "${task.title}" (${task.id})`);
     await deps.removeWorktree(task);
-    if (!hasWorktreeDirectory(task)) {
+    if (isClearableWorktreePathState(worktreePathState(task))) {
       await deps.updateTask(task.id, {
         worktree_path: undefined,
       });

@@ -7,6 +7,7 @@ import path from "node:path";
 
 import {
   DEAD_OWNED_PID_GRACE_MS,
+  getWorktreePathState,
   pollOnce,
   shouldFinalizeCleanupWorktree,
   shouldResetStaleFinalCleanup,
@@ -148,6 +149,31 @@ test("shouldResetStaleFinalCleanup detects running-but-orphaned cleanup state", 
   );
 });
 
+test("getWorktreePathState distinguishes missing and indeterminate stat failures", () => {
+  assert.equal(
+    getWorktreePathState("/tmp/missing", () => {
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    }),
+    "missing"
+  );
+  assert.equal(
+    getWorktreePathState("/tmp/inaccessible", () => {
+      throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    }),
+    "indeterminate"
+  );
+  assert.equal(
+    getWorktreePathState("/tmp/file", () => ({ isDirectory: () => false })),
+    "not_directory"
+  );
+  assert.equal(
+    getWorktreePathState("/tmp/file/child", () => {
+      throw Object.assign(new Error("not a directory"), { code: "ENOTDIR" });
+    }),
+    "not_directory"
+  );
+});
+
 test("cleanup completion retains the worktree path after removal failure and retries", async () => {
   const workspace = mkdtempSync(path.join(os.tmpdir(), "worker-cleanup-retry-"));
   const worktreePath = path.join(workspace, "worktree");
@@ -214,6 +240,37 @@ test("finished cleanup retains the worktree path after removal failure and retri
 
   assert.equal(removalAttempts, 2);
   assert.equal(tasks[0].worktree_path, undefined);
+});
+
+test("indeterminate worktree stats retain cleanup retries and block pruning", async () => {
+  const workspace = mkdtempSync(path.join(os.tmpdir(), "worker-stat-retry-"));
+  const worktreePath = path.join(workspace, "worktree");
+  mkdirSync(worktreePath);
+  let removalAttempts = 0;
+  const { deps, tasks } = makeFinalCleanupHarness(
+    sample({
+      id: "stat-retry",
+      final_cleanup_state: "finished",
+      worktree_path: worktreePath,
+      updated_at: "2026-01-01T00:00:00.000Z",
+    }),
+    async () => {
+      removalAttempts++;
+    }
+  );
+  let deleteAttempts = 0;
+  deps.deleteTask = async () => {
+    deleteAttempts++;
+  };
+  deps.statWorktreePath = () => {
+    throw Object.assign(new Error("I/O error"), { code: "EIO" });
+  };
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.equal(removalAttempts, 1);
+  assert.equal(tasks[0].worktree_path, worktreePath);
+  assert.equal(deleteAttempts, 0);
 });
 
 test("shouldWaitForDeadOwnedPid only delays pids owned by this worker", () => {
