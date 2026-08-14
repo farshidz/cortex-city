@@ -1242,7 +1242,6 @@ function unreceiptedReviewerComments(
 }
 
 function buildClaudeArgs(
-  prompt: string,
   opts: SpawnOpts,
   resumeSessionId?: string
 ): string[] {
@@ -1250,14 +1249,13 @@ function buildClaudeArgs(
   if (resumeSessionId) {
     args.push("--resume", resumeSessionId);
   }
-  args.push("-p", prompt, "--output-format", "json");
+  args.push("-p", "--output-format", "json");
   args.push(...buildReviewPermissionArgs("claude"));
   args.push(...buildModelArgsWith("claude", opts.model, opts.effort));
   return args;
 }
 
 function buildCodexArgs(
-  prompt: string,
   opts: SpawnOpts,
   resumeSessionId?: string
 ): string[] {
@@ -1270,7 +1268,9 @@ function buildCodexArgs(
   if (resumeSessionId) {
     args.push(resumeSessionId);
   }
-  args.push(prompt);
+  // Codex documents `-` as the explicit stdin prompt. Keeping the prompt out
+  // of argv also avoids Linux's per-argument MAX_ARG_STRLEN limit.
+  args.push("-");
   return args;
 }
 
@@ -1346,8 +1346,8 @@ export function spawnRuntime(
   const command = runtime === "codex" ? "codex" : "claude";
   const args =
     runtime === "codex"
-      ? buildCodexArgs(prompt, opts, resumeSessionId)
-      : buildClaudeArgs(prompt, opts, resumeSessionId);
+      ? buildCodexArgs(opts, resumeSessionId)
+      : buildClaudeArgs(opts, resumeSessionId);
 
   const startedAt = Date.now();
   const workspace = createReviewWorkspace(runtime, reviewKey);
@@ -1385,10 +1385,9 @@ export function spawnRuntime(
     releaseReviewWorkspaceBeforeStart(workspace);
     throw new Error(`Failed to start ${command}`);
   }
-  child.stdin?.end();
-
   let stdout = "";
   let stderr = "";
+  let stdinError = "";
   let codexCarry = "";
   const codexResult: CodexEvent[] = [];
 
@@ -1464,6 +1463,12 @@ export function spawnRuntime(
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
+    child.stdin?.on("error", (err) => {
+      // The process close/error event remains authoritative, but consuming the
+      // stream error prevents an early runtime exit from becoming an unhandled
+      // EPIPE in the worker.
+      stdinError = err.message || String(err);
+    });
     child.on("error", (err) => {
       finish({
         result_text: "",
@@ -1511,6 +1516,8 @@ export function spawnRuntime(
             ? `Run timed out after ${runTimeoutMs}ms`
             : code !== 0
               ? stderr.trim() || `codex exited with code ${code}`
+              : stdinError
+                ? `Failed to send the review prompt to codex: ${stdinError}`
               : undefined),
           termination_reason: lowDiskFailure
             ? "low_disk"
@@ -1541,6 +1548,8 @@ export function spawnRuntime(
             ? `Run timed out after ${runTimeoutMs}ms`
             : code !== 0 || parsed.is_error
               ? stderr.trim() || `claude exited with code ${code}`
+              : stdinError
+                ? `Failed to send the review prompt to claude: ${stdinError}`
               : undefined),
           termination_reason: lowDiskFailure
             ? "low_disk"
@@ -1553,6 +1562,8 @@ export function spawnRuntime(
           ? `Run timed out after ${runTimeoutMs}ms`
           : code !== 0
             ? stderr.trim() || `claude exited with code ${code}`
+            : stdinError
+              ? `Failed to send the review prompt to claude: ${stdinError}`
             : `Failed to parse claude output: ${(err as Error).message}`);
         finish({
           result_text: stdout,
@@ -1568,6 +1579,8 @@ export function spawnRuntime(
         });
       }
     });
+
+    child.stdin?.end(prompt);
   });
 
   const done = runtimeDone.finally(async () => {
@@ -1693,7 +1706,7 @@ export async function spawnReviewSummary(
 
   const runLock = await acquireReviewRunLock(target.pr_url);
   const runStartedAt = new Date().toISOString();
-  let spawned!: SpawnResult;
+  let spawned: SpawnResult;
   try {
     spawned = spawnRuntime(
       opts.runtime,
@@ -1704,6 +1717,49 @@ export async function spawnReviewSummary(
       {},
       target.pr_url
     );
+  } catch (error) {
+    await releaseReviewRunLock(runLock);
+    const failedAt = new Date().toISOString();
+    const message = error instanceof Error ? error.message : String(error);
+    await mutateReviewSummary(target.pr_url, (current) => {
+      if (
+        current &&
+        (current.head_sha !== target.head_sha ||
+          (current.current_run_pid && isProcessRunning(current.current_run_pid)))
+      ) {
+        return undefined;
+      }
+      return {
+        ...baseEntry,
+        my_last_review_sha: current
+          ? current.my_last_review_sha
+          : target.my_last_review_sha,
+        my_approval_sha: current
+          ? current.my_approval_sha
+          : target.my_approval_sha,
+        my_changes_requested_sha: current
+          ? current.my_changes_requested_sha
+          : target.my_changes_requested_sha,
+        error: message,
+        error_at: failedAt,
+        reviewer_comment_receipts: current
+          ? current.reviewer_comment_receipts
+          : cachedBefore?.reviewer_comment_receipts,
+        reviewer_comment_cancellations: current
+          ? current.reviewer_comment_cancellations
+          : cachedBefore?.reviewer_comment_cancellations,
+        pending_reviewer_comment_delivery: current
+          ? current.pending_reviewer_comment_delivery
+          : cachedBefore?.pending_reviewer_comment_delivery,
+        current_run_pid: undefined,
+        current_run_id: undefined,
+        ...retroFields(current || cachedBefore),
+      };
+    });
+    throw error;
+  }
+
+  try {
     assertReviewRunLockHealthy(runLock);
     const claimed = await mutateReviewSummary(target.pr_url, (current) => {
       const currentMatchesPreparedState = Boolean(
@@ -1761,49 +1817,8 @@ export async function spawnReviewSummary(
       throw new Error(`Review target changed before launching ${target.pr_url}`);
     }
   } catch (error) {
-    if (spawned) killReviewRuntimeProcess(spawned.child, "SIGTERM");
+    killReviewRuntimeProcess(spawned.child, "SIGTERM");
     await releaseReviewRunLock(runLock);
-    if (error instanceof LowDiskSpaceError) {
-      const failedAt = new Date().toISOString();
-      await mutateReviewSummary(target.pr_url, (current) => {
-        if (
-          current &&
-          (current.head_sha !== target.head_sha ||
-            (current.current_run_pid && isProcessRunning(current.current_run_pid)))
-        ) {
-          return undefined;
-        }
-        return {
-          ...baseEntry,
-          my_last_review_sha: current
-            ? current.my_last_review_sha
-            : target.my_last_review_sha,
-          my_approval_sha: current
-            ? current.my_approval_sha
-            : target.my_approval_sha,
-          my_changes_requested_sha: current
-            ? current.my_changes_requested_sha
-            : target.my_changes_requested_sha,
-          error: error.message,
-          error_at: failedAt,
-          reviewer_comment_receipts:
-            current
-              ? current.reviewer_comment_receipts
-              : cachedBefore?.reviewer_comment_receipts,
-          reviewer_comment_cancellations:
-            current
-              ? current.reviewer_comment_cancellations
-              : cachedBefore?.reviewer_comment_cancellations,
-          pending_reviewer_comment_delivery:
-            current
-              ? current.pending_reviewer_comment_delivery
-              : cachedBefore?.pending_reviewer_comment_delivery,
-          current_run_pid: undefined,
-          current_run_id: undefined,
-          ...retroFields(current || cachedBefore),
-        };
-      });
-    }
     throw error;
   }
   const { pid, child, done } = spawned;

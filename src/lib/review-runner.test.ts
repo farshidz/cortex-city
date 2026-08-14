@@ -1224,6 +1224,8 @@ test("spawnRuntime retains Claude workspaces while restoring bypass mode", () =>
   assert.equal(result.invocation.args.includes("bypassPermissions"), true);
   assert.equal(result.invocation.args.includes("dontAsk"), false);
   assert.equal(result.invocation.args.includes("Bash(gh *)"), false);
+  assert.equal(result.invocation.args.includes("review this PR"), false);
+  assert.equal(result.invocation.stdin, "review this PR");
 });
 
 test("spawnRuntime preserves Codex resume and bypass inside the retained PR workspace", () => {
@@ -1286,11 +1288,82 @@ test("spawnRuntime preserves Codex resume and bypass inside the retained PR work
   assert.ok(result.invocation.args.includes("--skip-git-repo-check"));
   assert.ok(result.invocation.args.includes("resume"));
   assert.ok(result.invocation.args.includes("codex-thread-1"));
-  assert.ok(result.invocation.args.includes("follow up"));
+  assert.ok(result.invocation.args.includes("-"));
+  assert.ok(!result.invocation.args.includes("follow up"));
+  assert.equal(result.invocation.stdin, "follow up");
   assert.ok(
     result.invocation.args.indexOf("--skip-git-repo-check") <
       result.invocation.args.indexOf("resume")
   );
+});
+
+test("spawnRuntime streams prompts larger than the Linux argv limit", () => {
+  const workspace = setupRunnerWorkspace("review-runtime-large-prompt-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const claudeArgsFile = path.join(workspace, "claude-args.json");
+  const codexArgsFile = path.join(workspace, "codex-args.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "large-claude-session",
+        result: "claude received it",
+        is_error: false,
+      }),
+    },
+    codex: {
+      stdout: [
+        JSON.stringify({ type: "thread.started", thread_id: "large-codex-session" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "codex received it" },
+        }),
+        "",
+      ].join("\n"),
+    },
+  });
+
+  const result = runTsxScript(
+    workspace,
+    [`import { spawnRuntime } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`],
+    `
+      const fs = await import("node:fs");
+      const prompt = "x".repeat(160 * 1024);
+      process.env.FAKE_AGENT_ARGS_FILE = ${JSON.stringify(claudeArgsFile)};
+      const claude = await spawnRuntime(
+        "claude",
+        prompt,
+        { runtime: "claude" },
+        undefined,
+        1_000
+      ).done;
+      process.env.FAKE_AGENT_ARGS_FILE = ${JSON.stringify(codexArgsFile)};
+      const codex = await spawnRuntime(
+        "codex",
+        prompt,
+        { runtime: "codex" },
+        undefined,
+        1_000
+      ).done;
+      console.log(JSON.stringify({
+        claude,
+        codex,
+        claudeInvocation: JSON.parse(fs.readFileSync(${JSON.stringify(claudeArgsFile)}, "utf-8")),
+        codexInvocation: JSON.parse(fs.readFileSync(${JSON.stringify(codexArgsFile)}, "utf-8")),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+    }
+  );
+
+  assert.equal(result.claude.error, undefined);
+  assert.equal(result.codex.error, undefined);
+  assert.equal(result.claudeInvocation.stdin.length, 160 * 1024);
+  assert.equal(result.codexInvocation.stdin.length, 160 * 1024);
+  assert.ok(!result.claudeInvocation.args.some((arg: string) => arg.length > 1024));
+  assert.ok(!result.codexInvocation.args.some((arg: string) => arg.length > 1024));
+  assert.ok(result.codexInvocation.args.includes("-"));
 });
 
 test("spawnRuntime removes its workspace when the runtime cannot start", () => {
@@ -1541,7 +1614,7 @@ test("a verified tier-1 round hands the same diff to a tier-2 pass", () => {
   );
 
   assert.ok(result.args.args.includes("claude-cheap"));
-  assert.match(result.args.args.join("\n"), /verification round/i);
+  assert.match(result.args.stdin, /verification round/i);
   // Tier 1 reviewed nothing, so the stored review is untouched.
   assert.equal(result.persisted.summary, "## Summary\nThe standing review.");
   assert.equal(result.persisted.summary_diff_hash, "diff-1");
@@ -1677,7 +1750,7 @@ test("a tier-1 request runs tier 2 while tiering is disabled", () => {
   // A full review round, byte for byte: the standing summary is replaced and no
   // tier is recorded.
   assert.ok(result.args.args.includes("claude-full"));
-  assert.match(result.args.args.join("\n"), /Cortex City review protocol/);
+  assert.match(result.args.stdin, /Cortex City review protocol/);
   assert.match(result.persisted.summary, /^## Summary\nFull review\./);
   assert.equal(result.persisted.summary_diff_hash, "diff-2");
   assert.equal(result.persisted.pending_tier2_reason, undefined);
@@ -1775,7 +1848,7 @@ test("a reply round answers conversation without touching the stored review", ()
     }
   );
 
-  const prompt = result.args.args.join("\n");
+  const prompt = result.args.stdin;
   assert.match(prompt, /Cortex City reply round protocol/);
   assert.doesNotMatch(prompt, /Cortex City review protocol/);
   // The reply round leaves the review of the code exactly as it was.
@@ -2060,7 +2133,7 @@ test("a tier-2 reply round hands a settled verdict on without tiering", () => {
 
   // The round is told which verdict is standing, so `resolved` is usable.
   assert.match(
-    result.args.args.join("\n"),
+    result.args.stdin,
     /Standing verdict from your last review round: `needs_human_decision`/
   );
   assert.equal(
@@ -3864,14 +3937,14 @@ test("summarizePR starts a fresh session for a scheduled follow-up and seeds the
 
   assert.equal(result.args.args.includes("--resume"), false);
   assert.equal(result.args.args.includes("claude-session-1"), false);
-  assert.match(result.args.args.join("\n"), /follow-up round in verification mode/i);
+  assert.match(result.args.stdin, /follow-up round in verification mode/i);
   assert.match(
-    result.args.args.join("\n"),
+    result.args.stdin,
     /Verify each enumerated finding at the current head/i
   );
-  assert.match(result.args.args.join("\n"), /This session is fresh/i);
+  assert.match(result.args.stdin, /This session is fresh/i);
   assert.match(
-    result.args.args.join("\n"),
+    result.args.stdin,
     /<previous_review>\nold summary\n<\/previous_review>/
   );
   assert.equal(result.summary.summary_head_sha, "new-head");
@@ -4169,6 +4242,41 @@ test("summarizePR preserves cancellation state on a low-disk preflight failure",
   );
 });
 
+test("summarizePR persists synchronous runtime launch failures", () => {
+  const workspace = setupRunnerWorkspace("review-runner-launch-failure-");
+  const request = sampleRequest({
+    pr_url: "https://github.com/acme/widget/pull/302",
+    pr_number: 302,
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      process.env.CORTEX_TEST_OVERSIZED_ENV = "x".repeat(4 * 1024 * 1024);
+      let thrown;
+      try {
+        await summarizePR(${JSON.stringify(request)}, { runtime: "codex" });
+      } catch (error) {
+        thrown = error instanceof Error ? error.message : String(error);
+      }
+      console.log(JSON.stringify({
+        thrown,
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+      }));
+    `,
+    prependBinToPath(workspace)
+  );
+
+  assert.match(result.thrown, /E2BIG|argument list too long/i);
+  assert.equal(result.persisted.error, result.thrown);
+  assert.equal(typeof result.persisted.error_at, "string");
+  assert.equal(result.persisted.review_state, "generation_failed");
+  assert.equal(result.persisted.current_run_pid, undefined);
+});
+
 test("spawnRuntime terminates a running reviewer when it crosses the reserve", async () => {
   const workspace = setupRunnerWorkspace("review-runner-disk-monitor-");
   const descendantMarker = path.join(workspace, "descendant-survived");
@@ -4366,11 +4474,10 @@ test("askFollowup allows stale summaries but still throws for active refreshes",
   assert.equal(result.runningError, "Summary is being refreshed for this PR.");
 
   const argsPayload = JSON.parse(readFileSync(argsFile, "utf-8"));
-  const promptIndex = argsPayload.args.indexOf("-p") + 1;
-  assert.match(argsPayload.args[promptIndex], /Summary head SHA: old-head/);
-  assert.match(argsPayload.args[promptIndex], /Current head SHA: new-head/);
+  assert.match(argsPayload.stdin, /Summary head SHA: old-head/);
+  assert.match(argsPayload.stdin, /Current head SHA: new-head/);
   assert.match(
-    argsPayload.args[promptIndex],
+    argsPayload.stdin,
     /Use the `gh` CLI for GitHub inspection and comments/
   );
 });
