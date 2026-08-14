@@ -126,6 +126,14 @@ export function stackTerminalStatus(
 const CANONICAL_PR_URL_PATTERN =
   /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/;
 
+export function githubPullRequestIdentity(prUrl: string): string | undefined {
+  const match = prUrl
+    .trim()
+    .match(/^https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)$/i);
+  if (!match) return undefined;
+  return `${match[1].toLowerCase()}/${match[2].toLowerCase()}#${Number(match[3])}`;
+}
+
 function normalizeReportedEntry(
   entry: AgentReportStackedPR
 ): AgentReportStackedPR | string {
@@ -157,12 +165,18 @@ function validateReportedStack(
   reported: AgentReportStackedPR[]
 ): { entries: AgentReportStackedPR[] } | { error: string } {
   const entries: AgentReportStackedPR[] = [];
-  const seenUrls = new Set<string>();
+  const seenIdentities = new Set<string>();
   const seenPositions = new Set<number>();
   for (const raw of reported) {
     const normalized = normalizeReportedEntry(raw);
     if (typeof normalized === "string") return { error: normalized };
-    if (seenUrls.has(normalized.pr_url)) {
+    const identity = githubPullRequestIdentity(normalized.pr_url);
+    if (!identity) {
+      return {
+        error: `stack entry PR URL ${JSON.stringify(normalized.pr_url)} is not a canonical GitHub pull request URL`,
+      };
+    }
+    if (seenIdentities.has(identity)) {
       return { error: `stack entry ${normalized.pr_url} is listed twice` };
     }
     if (seenPositions.has(normalized.position)) {
@@ -170,7 +184,7 @@ function validateReportedStack(
         error: `stack position ${normalized.position} is listed twice`,
       };
     }
-    seenUrls.add(normalized.pr_url);
+    seenIdentities.add(identity);
     seenPositions.add(normalized.position);
     entries.push(normalized);
   }
@@ -232,15 +246,21 @@ export function reconcileStackedPRs(
   }
 
   const warnings: string[] = [];
-  const existingByUrl = new Map(
-    existing.map((entry) => [entry.pr_url, entry] as const)
+  const existingByIdentity = new Map(
+    existing.map(
+      (entry) => [
+        githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url,
+        entry,
+      ] as const
+    )
   );
-  const reportedUrls = new Set<string>();
+  const reportedIdentities = new Set<string>();
   const merged: TaskStackedPR[] = [];
 
   for (const entry of validated.entries) {
-    reportedUrls.add(entry.pr_url);
-    const tracked = existingByUrl.get(entry.pr_url);
+    const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
+    reportedIdentities.add(identity);
+    const tracked = existingByIdentity.get(identity);
     merged.push({
       ...entry,
       scope: entry.scope || tracked?.scope || "",
@@ -253,7 +273,8 @@ export function reconcileStackedPRs(
   }
 
   for (const entry of existing) {
-    if (reportedUrls.has(entry.pr_url)) continue;
+    const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
+    if (reportedIdentities.has(identity)) continue;
     warnings.push(
       `Agent report dropped stack entry ${entry.pr_url}; keeping it until GitHub reports it merged or closed`
     );

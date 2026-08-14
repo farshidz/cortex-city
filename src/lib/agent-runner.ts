@@ -35,10 +35,12 @@ import type {
   FollowupTaskRequest,
   AgentConfig,
   TaskRunMode,
+  TaskStackedPR,
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
 import {
   frontierStackedPR,
+  githubPullRequestIdentity,
   isStackedTask,
   openStackedPRs,
   reconcileStackedPRs,
@@ -984,14 +986,6 @@ interface LivePullRequest {
 const GITHUB_PULL_REQUEST_URL_PATTERN =
   /https:\/\/github\.com\/[^/\s"'<>]+\/[^/\s"'<>]+\/pull\/\d+/g;
 
-function githubPullRequestIdentity(prUrl: string): string | undefined {
-  const match = prUrl
-    .trim()
-    .match(/^https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)$/i);
-  if (!match) return undefined;
-  return `${match[1].toLowerCase()}/${match[2].toLowerCase()}#${Number(match[3])}`;
-}
-
 function pullRequestUrlsCreatedByCodex(event: CodexEvent): string[] {
   if (
     event.type !== "item.completed" ||
@@ -1108,27 +1102,9 @@ async function persistLivePullRequestProgress(
     if (!canPersist() || currentTask.status !== "in_progress") return undefined;
 
     if (ordered) {
-      const trackedStack = currentTask.stacked_prs ?? [];
-      const trackedByUrl = new Map(
-        trackedStack.map(
-          (entry) => [githubPullRequestIdentity(entry.pr_url), entry] as const
-        )
+      const trackedStack = [...(currentTask.stacked_prs ?? [])].sort(
+        (a, b) => a.position - b.position
       );
-      const orderedIdentities = new Set(
-        ordered.map((pullRequest) => githubPullRequestIdentity(pullRequest.url))
-      );
-      const retainedHistory = trackedStack
-        .filter(
-          (entry) =>
-            entry.state !== "open" &&
-            !orderedIdentities.has(githubPullRequestIdentity(entry.pr_url))
-        )
-        .sort((a, b) => a.position - b.position);
-      if (
-        retainedHistory.some((entry, index) => entry.position !== index + 1)
-      ) {
-        return undefined;
-      }
       const confirmedSinglePrUrl =
         currentTask.pr_url &&
         !currentTask.pr_url_provisional &&
@@ -1138,33 +1114,75 @@ async function persistLivePullRequestProgress(
       const confirmedSinglePrIdentity = confirmedSinglePrUrl
         ? githubPullRequestIdentity(confirmedSinglePrUrl)
         : undefined;
-      const stack = [
-        ...retainedHistory,
-        ...ordered.map((pullRequest, index) => {
-          const tracked = trackedByUrl.get(
-            githubPullRequestIdentity(pullRequest.url)
-          );
-          return {
-            position: retainedHistory.length + index + 1,
-            pr_url: pullRequest.url,
-            branch_name: pullRequest.headRefName,
-            base_branch: pullRequest.baseRefName,
-            scope: tracked?.scope || pullRequest.title,
-            state: tracked?.state ?? ("open" as const),
-            pr_status: tracked?.pr_status,
-            last_review_gh_state: tracked?.last_review_gh_state,
-            merge_commit_sha: tracked?.merge_commit_sha,
-            pending_restack_of: tracked?.pending_restack_of,
-            provisional: tracked
-              ? tracked.provisional
-              : confirmedSinglePrIdentity &&
-                  githubPullRequestIdentity(pullRequest.url) ===
-                    confirmedSinglePrIdentity
-                ? undefined
-                : true,
-          };
-        }),
-      ];
+      const orderedWithIdentity = ordered.map((pullRequest) => ({
+        pullRequest,
+        identity: githubPullRequestIdentity(pullRequest.url),
+      }));
+      if (orderedWithIdentity.some(({ identity }) => !identity)) {
+        return undefined;
+      }
+      const orderedIndexByIdentity = new Map(
+        orderedWithIdentity.map(({ identity }, index) => [identity, index] as const)
+      );
+      const trackedIdentities = new Set(
+        trackedStack
+          .map((entry) => githubPullRequestIdentity(entry.pr_url))
+          .filter((identity): identity is string => Boolean(identity))
+      );
+      const stack: TaskStackedPR[] = [];
+      const appendNewEntry = (pullRequest: LivePullRequest, identity: string) => {
+        stack.push({
+          position: stack.length + 1,
+          pr_url: pullRequest.url,
+          branch_name: pullRequest.headRefName,
+          base_branch: pullRequest.baseRefName,
+          scope: pullRequest.title,
+          state: "open",
+          provisional:
+            confirmedSinglePrIdentity && identity === confirmedSinglePrIdentity
+              ? undefined
+              : true,
+        });
+      };
+
+      let nextOrderedIndex = 0;
+      for (const tracked of trackedStack) {
+        const identity = githubPullRequestIdentity(tracked.pr_url);
+        const orderedIndex = identity
+          ? orderedIndexByIdentity.get(identity)
+          : undefined;
+        if (orderedIndex === undefined) {
+          stack.push({ ...tracked, position: stack.length + 1 });
+          continue;
+        }
+        if (orderedIndex < nextOrderedIndex) return undefined;
+        while (nextOrderedIndex < orderedIndex) {
+          const candidate = orderedWithIdentity[nextOrderedIndex];
+          if (!candidate.identity || trackedIdentities.has(candidate.identity)) {
+            return undefined;
+          }
+          appendNewEntry(candidate.pullRequest, candidate.identity);
+          nextOrderedIndex += 1;
+        }
+        const pullRequest = orderedWithIdentity[orderedIndex].pullRequest;
+        stack.push({
+          ...tracked,
+          position: stack.length + 1,
+          pr_url: pullRequest.url,
+          branch_name: pullRequest.headRefName,
+          base_branch: pullRequest.baseRefName,
+          scope: tracked.scope || pullRequest.title,
+        });
+        nextOrderedIndex = orderedIndex + 1;
+      }
+      while (nextOrderedIndex < orderedWithIdentity.length) {
+        const candidate = orderedWithIdentity[nextOrderedIndex];
+        if (!candidate.identity || trackedIdentities.has(candidate.identity)) {
+          return undefined;
+        }
+        appendNewEntry(candidate.pullRequest, candidate.identity);
+        nextOrderedIndex += 1;
+      }
       const frontier = frontierStackedPR(stack);
       return {
         stacked_prs: stack,
@@ -1237,7 +1255,7 @@ function retractProvisionalTaskUpdates(task: Task | undefined): Partial<Task> {
   }
   if (task.stacked_prs?.some((entry) => entry.provisional)) {
     updates.stacked_prs =
-      confirmedStack && confirmedStack.length > 1 ? confirmedStack : undefined;
+      confirmedStack && confirmedStack.length > 0 ? confirmedStack : undefined;
     const frontier = confirmedStack
       ? frontierStackedPR(confirmedStack)
       : undefined;

@@ -1244,6 +1244,108 @@ test("live PR discovery appends to a confirmed stack without losing lifecycle st
   assert.equal(result.tasks[0].pr_url_provisional, undefined);
 });
 
+test("live PR discovery preserves terminal entries between open replacements", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-replacement-stack-state.json");
+  const lowerPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/91";
+  const closedPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/92";
+  const replacementPrUrl =
+    "https://github.com/farshidz/marqo-cortex-city/pull/93";
+  const newTopPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/94";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#91": {
+        url: lowerPrUrl,
+        headRefName: "agent/replacement-lower",
+        baseRefName: "main",
+        title: "Lower slice",
+      },
+      "farshidz/marqo-cortex-city#93": {
+        url: replacementPrUrl,
+        headRefName: "agent/replacement-upper",
+        baseRefName: "agent/replacement-lower",
+        title: "Replacement upper slice",
+      },
+      "farshidz/marqo-cortex-city#94": {
+        url: newTopPrUrl,
+        headRefName: "agent/replacement-top",
+        baseRefName: "agent/replacement-upper",
+        title: "New top slice",
+      },
+    },
+  });
+  const trackedStack = [
+    {
+      position: 1,
+      pr_url: lowerPrUrl,
+      branch_name: "agent/replacement-lower",
+      base_branch: "main",
+      scope: "Stored lower scope",
+      state: "open",
+      pr_status: "clean",
+      last_review_gh_state: "hash-91",
+    },
+    {
+      position: 2,
+      pr_url: closedPrUrl,
+      branch_name: "agent/closed-upper",
+      base_branch: "agent/replacement-lower",
+      scope: "Closed upper history",
+      state: "closed",
+      pr_status: "checks_failing",
+      last_review_gh_state: "hash-92",
+      pending_restack_of: ["merge-90"],
+    },
+    {
+      position: 3,
+      pr_url: replacementPrUrl,
+      branch_name: "agent/replacement-upper",
+      base_branch: "agent/replacement-lower",
+      scope: "Stored replacement scope",
+      state: "open",
+      pr_status: "needs_approval",
+      last_review_gh_state: "hash-93",
+    },
+  ];
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        pr_url: lowerPrUrl,
+        branch_name: "agent/replacement-lower",
+        stacked_prs: trackedStack as Task["stacked_prs"],
+      }))};
+      await createTask(task);
+      await __testUtils.persistLivePullRequestProgress(
+        task.id,
+        ${JSON.stringify(workspace)},
+        ${JSON.stringify([lowerPrUrl, replacementPrUrl, newTopPrUrl])},
+        process.env
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(result.tasks[0].stacked_prs.slice(0, 3), trackedStack);
+  assert.deepEqual(result.tasks[0].stacked_prs[3], {
+    position: 4,
+    pr_url: newTopPrUrl,
+    branch_name: "agent/replacement-top",
+    base_branch: "agent/replacement-upper",
+    scope: "New top slice",
+    state: "open",
+    provisional: true,
+  });
+  assert.equal(result.tasks[0].pr_url, lowerPrUrl);
+  assert.equal(result.tasks[0].pr_url_provisional, undefined);
+});
+
 test("live PR discovery cannot overwrite state after review ownership begins", () => {
   const { workspace } = setupWorkspace();
   const ghStateFile = path.join(workspace, "gh-live-status-handoff-state.json");
@@ -1741,7 +1843,7 @@ test("handleRunTimeout preserves Codex usage already observed before timeout", (
   assert.equal(result.tasks[0].codex_usage_session_id, "thread-timeout");
 });
 
-test("run finalization retracts unconfirmed live PR state on no-report, failure, and timeout paths", () => {
+test("run finalization retracts unconfirmed live PR state on every terminal path", () => {
   const { workspace } = setupWorkspace();
   const firstPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/81";
   const secondPrUrl = "https://github.com/farshidz/marqo-cortex-city/pull/82";
@@ -1774,6 +1876,26 @@ test("run finalization retracts unconfirmed live PR state on no-report, failure,
   };
   const timeoutConfirmedFirst = { ...confirmedFirst, position: 2 };
   const timeoutConfirmedSecond = { ...confirmedSecond, position: 3 };
+  const soleConfirmedTerminal = {
+    position: 2,
+    pr_url: secondPrUrl,
+    branch_name: "agent/finalize-terminal",
+    base_branch: "agent/finalize-one",
+    scope: "Confirmed terminal history",
+    state: "closed",
+    pr_status: "checks_failing",
+    last_review_gh_state: "hash-terminal",
+    pending_restack_of: ["merge-previous"],
+  };
+  const terminalStack = [provisionalLower, soleConfirmedTerminal];
+  const terminalTask = sampleTask({
+    id: "terminal-template",
+    status: "in_progress",
+    pr_url: thirdPrUrl,
+    branch_name: "agent/finalize-zero",
+    pr_url_provisional: true,
+    stacked_prs: terminalStack as Task["stacked_prs"],
+  });
 
   const result = runAgentRunnerScript(
     workspace,
@@ -1804,6 +1926,14 @@ test("run finalization retracts unconfirmed live PR state on no-report, failure,
           timeoutConfirmedFirst,
         ] as Task["stacked_prs"],
       }))});
+      for (const id of [
+        "terminal-no-report",
+        "terminal-failed",
+        "terminal-exception",
+        "terminal-timeout",
+      ]) {
+        await createTask({ ...${JSON.stringify(terminalTask)}, id });
+      }
 
       const resultWithoutReport = {
         type: "codex",
@@ -1844,6 +1974,39 @@ test("run finalization retracts unconfirmed live PR state on no-report, failure,
         resultWithoutReport
       );
       await __testUtils.handleRunTimeout("timeout", 10, 50);
+      await __testUtils.handleRunComplete(
+        "terminal-no-report",
+        0,
+        "",
+        "",
+        10,
+        [],
+        "codex",
+        "initial",
+        resultWithoutReport
+      );
+      await __testUtils.handleRunComplete(
+        "terminal-failed",
+        1,
+        "",
+        "",
+        10,
+        [],
+        "codex",
+        "initial",
+        resultWithoutReport
+      );
+      await __testUtils.handleRunComplete(
+        "terminal-exception",
+        0,
+        "not-json",
+        "",
+        10,
+        [],
+        "claude",
+        "initial"
+      );
+      await __testUtils.handleRunTimeout("terminal-timeout", 10, 50);
       console.log(JSON.stringify({ tasks: readTasks() }));
     `
   );
@@ -1851,7 +2014,7 @@ test("run finalization retracts unconfirmed live PR state on no-report, failure,
   const byId = Object.fromEntries(result.tasks.map((task: Task) => [task.id, task]));
   assert.equal(byId["no-report"].pr_url, firstPrUrl);
   assert.equal(byId["no-report"].pr_url_provisional, undefined);
-  assert.equal(byId["no-report"].stacked_prs, undefined);
+  assert.deepEqual(byId["no-report"].stacked_prs, [confirmedFirst]);
   assert.equal(byId.failed.pr_url, undefined);
   assert.equal(byId.failed.branch_name, undefined);
   assert.equal(byId.failed.pr_url_provisional, undefined);
@@ -1860,6 +2023,18 @@ test("run finalization retracts unconfirmed live PR state on no-report, failure,
   assert.equal(byId.timeout.branch_name, "agent/finalize-one");
   assert.equal(byId.timeout.pr_url_provisional, undefined);
   assert.equal(byId.timeout.resume_requested, true);
+  const retainedTerminal = [{ ...soleConfirmedTerminal, position: 1 }];
+  for (const id of [
+    "terminal-no-report",
+    "terminal-failed",
+    "terminal-exception",
+    "terminal-timeout",
+  ]) {
+    assert.deepEqual(byId[id].stacked_prs, retainedTerminal);
+    assert.equal(byId[id].pr_url, undefined);
+    assert.equal(byId[id].branch_name, undefined);
+    assert.equal(byId[id].pr_url_provisional, undefined);
+  }
 });
 
 test("spawnAgentSession handles child spawn errors", () => {
