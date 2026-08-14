@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -22,7 +24,7 @@ function createTempWorkspace(): string {
   return mkdtempSync(path.join(os.tmpdir(), "store-test-"));
 }
 
-function runStoreScript(workspace: string, body: string) {
+function runStoreScript(workspace: string, body: string, timeout?: number) {
   const output = execFileSync(
     TSX_BIN,
     [
@@ -40,6 +42,7 @@ function runStoreScript(workspace: string, body: string) {
     {
       cwd: workspace,
       encoding: "utf-8",
+      timeout,
     }
   );
 
@@ -81,7 +84,7 @@ test("readConfig creates defaults when no config file exists", () => {
   assert.deepEqual(JSON.parse(readFileSync(configFile, "utf-8")), config);
   assert.equal(
     readFileSync(gitignoreFile, "utf-8"),
-    "orchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
+    ".tasks.write.lock.*\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
   );
 });
 
@@ -95,7 +98,7 @@ test("readConfig appends missing default cortex gitignore entries", () => {
 
   assert.equal(
     readFileSync(gitignoreFile, "utf-8"),
-    "custom-state.json\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
+    "custom-state.json\n.tasks.write.lock.*\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
   );
 });
 
@@ -198,6 +201,309 @@ test("updateTask merges concurrent writes without dropping earlier fields", () =
     "https://github.com/farshidz/marqo-cortex-city/pull/456"
   );
 });
+
+test("dead task-lock recovery cannot unlink a replacement owner", async () => {
+  const workspace = createTempWorkspace();
+  const cortexDir = path.join(workspace, ".cortex");
+  mkdirSync(cortexDir, { recursive: true });
+  writeFileSync(
+    path.join(cortexDir, "tasks.json"),
+    JSON.stringify([sampleTask()], null, 2)
+  );
+
+  const deadOwnerHeld = path.join(workspace, "dead-owner-held");
+  const recoveryObserved = path.join(workspace, "recovery-observed");
+  const contenderAEntered = path.join(workspace, "contender-a-entered");
+  const contenderBEntered = path.join(workspace, "contender-b-entered");
+  const releaseContenderB = path.join(workspace, "release-contender-b");
+  const children: ReturnType<typeof spawn>[] = [];
+  const stderr = new Map<ReturnType<typeof spawn>, string>();
+
+  const spawnStoreScript = (body: string, args: string[] = []) => {
+    const child = spawn(
+      TSX_BIN,
+      [
+        "--eval",
+        [
+          "(async () => {",
+          body,
+          "})().catch((error) => {",
+          "  console.error(error);",
+          "  process.exit(1);",
+          "});",
+        ].join("\n"),
+        ...args,
+      ],
+      { cwd: workspace, stdio: ["ignore", "ignore", "pipe"] }
+    );
+    children.push(child);
+    stderr.set(child, "");
+    child.stderr?.on("data", (chunk) => {
+      stderr.set(child, `${stderr.get(child)}${chunk.toString()}`);
+    });
+    return child;
+  };
+
+  const waitForPath = async (target: string, child?: ReturnType<typeof spawn>) => {
+    for (let attempt = 0; attempt < 500; attempt++) {
+      if (existsSync(target)) return;
+      if (child && (child.exitCode !== null || child.signalCode !== null)) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(
+      `Timed out waiting for ${path.basename(target)}${
+        child ? `: ${stderr.get(child)}` : ""
+      }`
+    );
+  };
+
+  const waitForExit = (child: ReturnType<typeof spawn>) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return Promise.resolve(child.exitCode);
+    }
+    return new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", resolve);
+    });
+  };
+
+  const importStore = [
+    `const importedStore = await import(${JSON.stringify(STORE_MODULE_URL)});`,
+    "const store = importedStore.default || importedStore;",
+  ].join("\n");
+
+  let contenderA;
+  let contenderB;
+  try {
+    const deadOwner = spawnStoreScript(
+      [
+        'const fs = require("node:fs");',
+        importStore,
+        'await store.updateTaskAtomically("task-1", () => {',
+        '  fs.writeFileSync(process.argv[1], "held");',
+        '  process.kill(process.pid, "SIGKILL");',
+        "});",
+      ].join("\n"),
+      [deadOwnerHeld]
+    );
+    await waitForPath(deadOwnerHeld, deadOwner);
+    await waitForExit(deadOwner);
+
+    contenderA = spawnStoreScript(
+      [
+        'const fs = require("node:fs");',
+        'const path = require("node:path");',
+        'const realUnlinkSync = fs.unlinkSync.bind(fs);',
+        'const waitArray = new Int32Array(new SharedArrayBuffer(4));',
+        'let delayedRecovery = false;',
+        'fs.unlinkSync = (target, ...args) => {',
+        '  if (!delayedRecovery && path.basename(String(target)).startsWith(".tasks.write.lock")) {',
+        '    delayedRecovery = true;',
+        '    fs.writeFileSync(process.argv[1], "observed");',
+        '    while (!fs.existsSync(process.argv[2])) {',
+        '      Atomics.wait(waitArray, 0, 0, 10);',
+        '    }',
+        '  }',
+        '  return realUnlinkSync(target, ...args);',
+        '};',
+        importStore,
+        'await store.updateTaskAtomically("task-1", () => {',
+        '  fs.writeFileSync(process.argv[3], "entered");',
+        '  return { session_id: "session-a" };',
+        '});',
+      ].join("\n"),
+      [recoveryObserved, contenderBEntered, contenderAEntered]
+    );
+    await waitForPath(recoveryObserved, contenderA);
+
+    contenderB = spawnStoreScript(
+      [
+        'const fs = require("node:fs");',
+        importStore,
+        'const waitArray = new Int32Array(new SharedArrayBuffer(4));',
+        'await store.updateTaskAtomically("task-1", () => {',
+        '  fs.writeFileSync(process.argv[1], "entered");',
+        '  while (!fs.existsSync(process.argv[2])) {',
+        '    Atomics.wait(waitArray, 0, 0, 10);',
+        '  }',
+        '  return { pr_url: "https://github.com/acme/widget/pull/2" };',
+        '});',
+      ].join("\n"),
+      [contenderBEntered, releaseContenderB]
+    );
+    await waitForPath(contenderBEntered, contenderB);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const overlappedReplacementOwner = existsSync(contenderAEntered);
+
+    writeFileSync(releaseContenderB, "release");
+    const [contenderAExit, contenderBExit] = await Promise.all([
+      waitForExit(contenderA),
+      waitForExit(contenderB),
+    ]);
+
+    assert.equal(contenderAExit, 0, stderr.get(contenderA));
+    assert.equal(contenderBExit, 0, stderr.get(contenderB));
+    assert.equal(overlappedReplacementOwner, false);
+    const [stored] = JSON.parse(
+      readFileSync(path.join(cortexDir, "tasks.json"), "utf-8")
+    );
+    assert.equal(stored.session_id, "session-a");
+    assert.equal(stored.pr_url, "https://github.com/acme/widget/pull/2");
+    assert.deepEqual(
+      readdirSync(cortexDir).filter((name) =>
+        name.startsWith(".tasks.write.lock.")
+      ),
+      []
+    );
+  } finally {
+    if (!existsSync(releaseContenderB)) {
+      writeFileSync(releaseContenderB, "release");
+    }
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+    }
+  }
+});
+
+test("task-lock recovery rejects a reused live PID", async () => {
+  const workspace = createTempWorkspace();
+  const cortexDir = path.join(workspace, ".cortex");
+  mkdirSync(cortexDir, { recursive: true });
+  writeFileSync(
+    path.join(cortexDir, "tasks.json"),
+    JSON.stringify([sampleTask()], null, 2)
+  );
+
+  const livePidPath = path.join(workspace, "live-pid");
+  const releaseLiveProcess = path.join(workspace, "release-live-process");
+  let helperStderr = "";
+  const liveProcess = spawn(
+    process.execPath,
+    [
+      "--eval",
+      [
+        'const fs = require("node:fs");',
+        'const waitArray = new Int32Array(new SharedArrayBuffer(4));',
+        'fs.writeFileSync(process.argv[1], String(process.pid));',
+        'while (!fs.existsSync(process.argv[2])) {',
+        '  Atomics.wait(waitArray, 0, 0, 10);',
+        '}',
+      ].join("\n"),
+      livePidPath,
+      releaseLiveProcess,
+    ],
+    { cwd: workspace, stdio: ["ignore", "ignore", "pipe"] }
+  );
+  liveProcess.stderr?.on("data", (chunk) => {
+    helperStderr += chunk.toString();
+  });
+
+  const waitForExit = () => {
+    if (liveProcess.exitCode !== null || liveProcess.signalCode !== null) {
+      return Promise.resolve(liveProcess.exitCode);
+    }
+    return new Promise<number | null>((resolve, reject) => {
+      liveProcess.once("error", reject);
+      liveProcess.once("exit", resolve);
+    });
+  };
+
+  try {
+    for (let attempt = 0; attempt < 500 && !existsSync(livePidPath); attempt++) {
+      if (liveProcess.exitCode !== null || liveProcess.signalCode !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(livePidPath), true, helperStderr);
+    const livePid = Number(readFileSync(livePidPath, "utf-8"));
+    assert.equal(Number.isSafeInteger(livePid), true);
+
+    const staleRecord = path.join(
+      cortexDir,
+      [
+        ".tasks.write.lock.ticket.1",
+        livePid,
+        "0".repeat(64),
+        "00000000-0000-4000-8000-000000000000",
+      ].join(".")
+    );
+    writeFileSync(staleRecord, "");
+
+    const updated = runStoreScript(
+      workspace,
+      `
+        const updated = await store.updateTask("task-1", {
+          session_id: "new-process-instance",
+        });
+        console.log(JSON.stringify(updated));
+      `,
+      5000
+    );
+
+    assert.equal(liveProcess.exitCode, null);
+    assert.equal(updated.session_id, "new-process-instance");
+    assert.equal(existsSync(staleRecord), false);
+  } finally {
+    writeFileSync(releaseLiveProcess, "release");
+    const exitCode = await waitForExit();
+    assert.equal(exitCode, 0, helperStderr);
+  }
+});
+
+test(
+  "task-lock recovery rejects a prior-boot Linux process instance",
+  { skip: process.platform !== "linux" },
+  () => {
+    const workspace = createTempWorkspace();
+    const cortexDir = path.join(workspace, ".cortex");
+    mkdirSync(cortexDir, { recursive: true });
+    writeFileSync(
+      path.join(cortexDir, "tasks.json"),
+      JSON.stringify([sampleTask()], null, 2)
+    );
+
+    const stat = readFileSync(`/proc/${process.pid}/stat`, "utf-8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const startTicks = fields[19];
+    assert.match(startTicks, /^\d+$/);
+    const currentBootId = readFileSync(
+      "/proc/sys/kernel/random/boot_id",
+      "utf-8"
+    ).trim();
+    const priorBootId =
+      currentBootId === "00000000-0000-4000-8000-000000000000"
+        ? "11111111-1111-4111-8111-111111111111"
+        : "00000000-0000-4000-8000-000000000000";
+    const priorBootInstance = createHash("sha256")
+      .update(`linux:${priorBootId}:${startTicks}`)
+      .digest("hex");
+    const staleRecord = path.join(
+      cortexDir,
+      [
+        ".tasks.write.lock.ticket.1",
+        process.pid,
+        priorBootInstance,
+        "00000000-0000-4000-8000-000000000000",
+      ].join(".")
+    );
+    writeFileSync(staleRecord, "");
+
+    const updated = runStoreScript(
+      workspace,
+      `
+        const updated = await store.updateTask("task-1", {
+          session_id: "current-boot",
+        });
+        console.log(JSON.stringify(updated));
+      `,
+      5000
+    );
+
+    assert.equal(updated.session_id, "current-boot");
+    assert.equal(existsSync(staleRecord), false);
+  }
+);
 
 test("readTasks clears legacy reviewer state without disturbing builder review state", () => {
   const workspace = createTempWorkspace();
@@ -307,7 +613,7 @@ test("readTasks clears legacy reviewer state without disturbing builder review s
   );
 });
 
-test("readTasks restores from last-good backup when tasks file is corrupt", () => {
+test("readTasks falls back without repairing a corrupt primary", () => {
   const workspace = createTempWorkspace();
   const task = sampleTask();
 
@@ -325,17 +631,103 @@ test("readTasks restores from last-good backup when tasks file is corrupt", () =
         "tasks.json.last-good"
       );
       const backupBefore = fs.readFileSync(backupFile, "utf-8");
-      fs.writeFileSync(tasksFile, backupBefore.slice(0, 20));
+      const corruptPrimary = backupBefore.slice(0, 20);
+      fs.writeFileSync(tasksFile, corruptPrimary);
       const recovered = store.readTasks();
       console.log(JSON.stringify({
         recovered,
-        restored: fs.readFileSync(tasksFile, "utf-8") === backupBefore,
+        primaryUnchanged: fs.readFileSync(tasksFile, "utf-8") === corruptPrimary,
       }));
     `
   );
 
   assert.deepEqual(result.recovered, [task]);
-  assert.equal(result.restored, true);
+  assert.equal(result.primaryUnchanged, true);
+});
+
+test("a backup-reading task reader cannot overwrite a locked update", async () => {
+  const workspace = createTempWorkspace();
+  const cortexDir = path.join(workspace, ".cortex");
+  const backupDir = path.join(cortexDir, "backups");
+  mkdirSync(backupDir, { recursive: true });
+  const task = sampleTask();
+  const backupRaw = `${JSON.stringify([task], null, 2)}\n`;
+  writeFileSync(path.join(backupDir, "tasks.json.last-good"), backupRaw);
+  writeFileSync(path.join(cortexDir, "tasks.json"), backupRaw.slice(0, 20));
+
+  const readerParsed = path.join(workspace, "reader-parsed-backup");
+  const updaterDone = path.join(workspace, "updater-done");
+  let readerStderr = "";
+  const reader = spawn(
+    TSX_BIN,
+    [
+      "--eval",
+      [
+        'const fs = require("node:fs");',
+        'const waitArray = new Int32Array(new SharedArrayBuffer(4));',
+        'console.error = () => {',
+        '  fs.writeFileSync(process.argv[1], "parsed");',
+        '  while (!fs.existsSync(process.argv[2])) {',
+        '    Atomics.wait(waitArray, 0, 0, 10);',
+        '  }',
+        '};',
+        '(async () => {',
+        `  const importedStore = await import(${JSON.stringify(STORE_MODULE_URL)});`,
+        '  const store = importedStore.default || importedStore;',
+        '  store.readTasks();',
+        '})().catch((error) => { process.stderr.write(String(error)); process.exit(1); });',
+      ].join("\n"),
+      readerParsed,
+      updaterDone,
+    ],
+    { cwd: workspace, stdio: ["ignore", "ignore", "pipe"] }
+  );
+  reader.stderr?.on("data", (chunk) => {
+    readerStderr += chunk.toString();
+  });
+
+  const waitForReaderExit = () => {
+    if (reader.exitCode !== null || reader.signalCode !== null) {
+      return Promise.resolve(reader.exitCode);
+    }
+    return new Promise<number | null>((resolve, reject) => {
+      reader.once("error", reject);
+      reader.once("exit", resolve);
+    });
+  };
+
+  try {
+    for (let attempt = 0; attempt < 500 && !existsSync(readerParsed); attempt++) {
+      if (reader.exitCode !== null || reader.signalCode !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(readerParsed), true, readerStderr);
+
+    const updated = runStoreScript(
+      workspace,
+      `
+        const updated = await store.updateTask("task-1", {
+          session_id: "locked-update",
+        });
+        console.log(JSON.stringify(updated));
+      `,
+      5000
+    );
+    assert.equal(updated.session_id, "locked-update");
+    writeFileSync(updaterDone, "done");
+
+    const readerExit = await waitForReaderExit();
+    assert.equal(readerExit, 0, readerStderr);
+    const [persisted] = JSON.parse(
+      readFileSync(path.join(cortexDir, "tasks.json"), "utf-8")
+    );
+    assert.equal(persisted.session_id, "locked-update");
+  } finally {
+    if (!existsSync(updaterDone)) writeFileSync(updaterDone, "done");
+    if (reader.exitCode === null && reader.signalCode === null) {
+      reader.kill("SIGKILL");
+    }
+  }
 });
 
 test("writeConfig persists the supplied configuration", () => {

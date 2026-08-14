@@ -5,11 +5,14 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from "fs";
+import { execFileSync } from "child_process";
+import { createHash, randomUUID } from "crypto";
 import path from "path";
 import type { Task, OrchestratorConfig } from "./types";
 import { snapshotCortex } from "./cortex-git";
@@ -20,10 +23,12 @@ import { assertSufficientDiskSpace } from "./disk-guard";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const TASKS_FILE = path.join(CORTEX_DIR, "tasks.json");
+const TASKS_WRITE_LOCK_PREFIX = ".tasks.write.lock";
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
 const GITIGNORE_FILE = path.join(CORTEX_DIR, ".gitignore");
 const BACKUPS_DIR = path.join(CORTEX_DIR, "backups");
 const DEFAULT_CORTEX_GITIGNORE_ENTRIES = [
+  ".tasks.write.lock.*",
   "orchestrator-state.json",
   ".env.*",
   ".env",
@@ -31,6 +36,7 @@ const DEFAULT_CORTEX_GITIGNORE_ENTRIES = [
   "backups/",
 ];
 const DEFAULT_CORTEX_GITIGNORE = `${DEFAULT_CORTEX_GITIGNORE_ENTRIES.join("\n")}\n`;
+const TASKS_WRITE_LOCK_RETRY_MS = 10;
 type StoredConfig = Partial<OrchestratorConfig> & {
   agent_runner?: OrchestratorConfig["default_agent_runner"];
   permission_mode?: OrchestratorConfig["default_permission_mode"];
@@ -128,7 +134,8 @@ export function writeJsonFileAtomic(
 export function readJsonFileWithBackup<T>(
   filePath: string,
   label: string,
-  validate?: (value: unknown) => value is T
+  validate?: (value: unknown) => value is T,
+  options: { repairPrimary?: boolean } = {}
 ): T {
   const parse = (raw: string): T => {
     const parsed = JSON.parse(raw) as unknown;
@@ -154,14 +161,16 @@ export function readJsonFileWithBackup<T>(
     primaryError instanceof Error ? primaryError.message : primaryError
   );
 
-  try {
-    assertSufficientDiskSpace(`restoring ${label} from backup`, CORTEX_DIR);
-    writeTextFileAtomic(filePath, backupRaw);
-  } catch (restoreError) {
-    console.error(
-      `[store] Failed to restore ${label} from last-good backup:`,
-      restoreError instanceof Error ? restoreError.message : restoreError
-    );
+  if (options.repairPrimary !== false) {
+    try {
+      assertSufficientDiskSpace(`restoring ${label} from backup`, CORTEX_DIR);
+      writeTextFileAtomic(filePath, backupRaw);
+    } catch (restoreError) {
+      console.error(
+        `[store] Failed to restore ${label} from last-good backup:`,
+        restoreError instanceof Error ? restoreError.message : restoreError
+      );
+    }
   }
 
   return parsed;
@@ -174,6 +183,230 @@ function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
   const result = writeLock.then(fn);
   writeLock = result.then(() => {}, () => {});
   return result;
+}
+
+interface TasksWriteLockRecordBase {
+  pid: number;
+  processInstance: string;
+  token: string;
+  path: string;
+}
+
+type TasksWriteLockRecord =
+  | (TasksWriteLockRecordBase & { kind: "choosing" })
+  | (TasksWriteLockRecordBase & { kind: "ticket"; ticket: number });
+
+function isErrnoException(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code
+  );
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isErrnoException(error, "ESRCH");
+  }
+}
+
+function getProcessInstance(pid: number): string | undefined {
+  let startedAt: string | undefined;
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      const bootId = readFileSync(
+        "/proc/sys/kernel/random/boot_id",
+        "utf-8"
+      ).trim();
+      if (/^\d+$/.test(fields[19] || "") && bootId) {
+        startedAt = `linux:${bootId}:${fields[19]}`;
+      }
+    } catch {}
+  }
+
+  if (!startedAt) {
+    try {
+      const value = execFileSync(
+        process.platform === "darwin" ? "/bin/ps" : "ps",
+        ["-o", "lstart=", "-p", String(pid)],
+        { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }
+      ).trim();
+      if (value) startedAt = `ps:${value}`;
+    } catch {}
+  }
+
+  return startedAt
+    ? createHash("sha256").update(startedAt).digest("hex")
+    : undefined;
+}
+
+let currentProcessInstance: string | undefined;
+
+function readProcessInstance(pid: number): string | undefined {
+  if (pid !== process.pid) return getProcessInstance(pid);
+  currentProcessInstance ??= getProcessInstance(pid);
+  return currentProcessInstance;
+}
+
+function parseTasksWriteLockRecord(name: string): TasksWriteLockRecord | undefined {
+  const choosing = name.match(
+    /^\.tasks\.write\.lock\.choosing\.(\d+)\.([0-9a-f]{64})\.([0-9a-f-]+)$/
+  );
+  if (choosing) {
+    const pid = Number(choosing[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+    return {
+      kind: "choosing",
+      pid,
+      processInstance: choosing[2],
+      token: choosing[3],
+      path: path.join(CORTEX_DIR, name),
+    };
+  }
+
+  const ticket = name.match(
+    /^\.tasks\.write\.lock\.ticket\.(\d+)\.(\d+)\.([0-9a-f]{64})\.([0-9a-f-]+)$/
+  );
+  if (!ticket) return undefined;
+  const number = Number(ticket[1]);
+  const pid = Number(ticket[2]);
+  if (
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0
+  ) {
+    return undefined;
+  }
+  return {
+    kind: "ticket",
+    pid,
+    processInstance: ticket[3],
+    token: ticket[4],
+    ticket: number,
+    path: path.join(CORTEX_DIR, name),
+  };
+}
+
+function removeTasksWriteLockRecord(recordPath: string): void {
+  try {
+    unlinkSync(recordPath);
+  } catch (error) {
+    if (!isErrnoException(error, "ENOENT")) throw error;
+  }
+}
+
+function readLiveTasksWriteLockRecords(): TasksWriteLockRecord[] {
+  const live: TasksWriteLockRecord[] = [];
+  for (const name of readdirSync(CORTEX_DIR)) {
+    const record = parseTasksWriteLockRecord(name);
+    if (!record) continue;
+    if (!isProcessRunning(record.pid)) {
+      removeTasksWriteLockRecord(record.path);
+      continue;
+    }
+    const processInstance = readProcessInstance(record.pid);
+    if (!processInstance || processInstance === record.processInstance) {
+      live.push(record);
+    } else {
+      // Each contender uses a unique pathname for its entire lifetime. Removing
+      // a dead contender therefore cannot unlink a live replacement owner.
+      removeTasksWriteLockRecord(record.path);
+    }
+  }
+  return live;
+}
+
+function createTasksWriteLockRecord(recordPath: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(recordPath, "wx", 0o600);
+    fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+async function acquireTasksWriteLock(): Promise<() => void> {
+  ensureCortexDir();
+  const pid = process.pid;
+  const processInstance = readProcessInstance(pid);
+  if (!processInstance) {
+    throw new Error("Unable to identify task write lock process instance");
+  }
+  const token = randomUUID();
+  const choosingPath = path.join(
+    CORTEX_DIR,
+    `${TASKS_WRITE_LOCK_PREFIX}.choosing.${pid}.${processInstance}.${token}`
+  );
+  let ticketPath: string;
+
+  // Clear dead records before entering the bakery doorway. This keeps stale
+  // recovery outside the ordering protocol while every pathname remains tied
+  // to exactly one contender.
+  readLiveTasksWriteLockRecords();
+  createTasksWriteLockRecord(choosingPath);
+  try {
+    const ticket =
+      readLiveTasksWriteLockRecords().reduce(
+        (highest, record) =>
+          record.kind === "ticket" ? Math.max(highest, record.ticket) : highest,
+        0
+      ) + 1;
+    ticketPath = path.join(
+      CORTEX_DIR,
+      `${TASKS_WRITE_LOCK_PREFIX}.ticket.${ticket}.${pid}.${processInstance}.${token}`
+    );
+    createTasksWriteLockRecord(ticketPath);
+  } finally {
+    removeTasksWriteLockRecord(choosingPath);
+  }
+
+  const ownTicket = parseTasksWriteLockRecord(path.basename(ticketPath));
+  if (!ownTicket || ownTicket.kind !== "ticket") {
+    removeTasksWriteLockRecord(ticketPath);
+    throw new Error("Failed to create task write lock ticket");
+  }
+
+  while (true) {
+    const records = readLiveTasksWriteLockRecords();
+    const anotherContenderIsChoosing = records.some(
+      (record) =>
+        record.kind === "choosing" &&
+        (record.pid !== ownTicket.pid || record.token !== ownTicket.token)
+    );
+    const earlierTicketExists = records.some((record) => {
+      if (record.kind !== "ticket") return false;
+      if (record.pid === ownTicket.pid && record.token === ownTicket.token) {
+        return false;
+      }
+      if (record.ticket !== ownTicket.ticket) {
+        return record.ticket < ownTicket.ticket;
+      }
+      if (record.pid !== ownTicket.pid) return record.pid < ownTicket.pid;
+      return record.token < ownTicket.token;
+    });
+    if (!anotherContenderIsChoosing && !earlierTicketExists) break;
+    await new Promise((resolve) => setTimeout(resolve, TASKS_WRITE_LOCK_RETRY_MS));
+  }
+
+  return () => removeTasksWriteLockRecord(ticketPath);
+}
+
+function withTasksWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  return withWriteLock(async () => {
+    const release = await acquireTasksWriteLock();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  });
 }
 
 // --- Tasks ---
@@ -221,12 +454,22 @@ function normalizeTask(task: Task): Task {
   return normalized as Task;
 }
 
-export function readTasks(): Task[] {
+function readTasksFromDisk(repairPrimary: boolean): Task[] {
   ensureCortexDir();
   if (!existsSync(TASKS_FILE)) return [];
-  return readJsonFileWithBackup<Task[]>(TASKS_FILE, "tasks.json").map(
-    normalizeTask
-  );
+  return readJsonFileWithBackup<Task[]>(TASKS_FILE, "tasks.json", undefined, {
+    repairPrimary,
+  }).map(normalizeTask);
+}
+
+export function readTasks(): Task[] {
+  return readTasksFromDisk(false);
+}
+
+function readTasksForMutation(): Task[] {
+  // Every caller holds the cross-process task lock, so backup repair cannot
+  // race another task mutation.
+  return readTasksFromDisk(true);
 }
 
 function writeTasksLocked(tasks: Task[]): void {
@@ -235,7 +478,7 @@ function writeTasksLocked(tasks: Task[]): void {
 }
 
 export function writeTasks(tasks: Task[]): Promise<void> {
-  return withWriteLock(() => {
+  return withTasksWriteLock(() => {
     writeTasksLocked(tasks);
   });
 }
@@ -245,8 +488,8 @@ export async function getTask(id: string): Promise<Task | undefined> {
 }
 
 export async function createTask(task: Task): Promise<Task> {
-  return withWriteLock(() => {
-    const tasks = readTasks();
+  return withTasksWriteLock(() => {
+    const tasks = readTasksForMutation();
     tasks.push(task);
     writeTasksLocked(tasks);
     return task;
@@ -254,8 +497,8 @@ export async function createTask(task: Task): Promise<Task> {
 }
 
 export async function updateTask(id: string, updates: Partial<Task>): Promise<Task> {
-  return withWriteLock(async () => {
-    const tasks = readTasks();
+  return withTasksWriteLock(async () => {
+    const tasks = readTasksForMutation();
     const index = tasks.findIndex((t) => t.id === id);
     if (index === -1) throw new Error(`Task ${id} not found`);
     tasks[index] = {
@@ -276,8 +519,8 @@ export async function updateTaskAtomically(
   id: string,
   buildUpdates: (current: Task) => Partial<Task> | undefined
 ): Promise<Task | undefined> {
-  return withWriteLock(async () => {
-    const tasks = readTasks();
+  return withTasksWriteLock(async () => {
+    const tasks = readTasksForMutation();
     const index = tasks.findIndex((task) => task.id === id);
     if (index === -1) return undefined;
 
@@ -299,8 +542,8 @@ export async function updateTaskAtomically(
 }
 
 export async function deleteTask(id: string): Promise<void> {
-  return withWriteLock(() => {
-    const tasks = readTasks();
+  return withTasksWriteLock(() => {
+    const tasks = readTasksForMutation();
     const filtered = tasks.filter((t) => t.id !== id);
     if (filtered.length === tasks.length) throw new Error(`Task ${id} not found`);
     writeTasksLocked(filtered);

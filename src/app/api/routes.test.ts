@@ -964,6 +964,106 @@ test("task detail route keeps status owned by an active implementation run", () 
   );
 });
 
+test("task detail route checks active-run ownership across processes", () => {
+  runRouteAssertions(
+    withCortexState(`
+      const taskRoute = await loadRoute("./src/app/api/tasks/[id]/route.ts");
+      const store = await loadRoute("./src/lib/store.ts");
+      const { spawn } = await import("node:child_process");
+      const tasksPath = path.join(cortexDir, "tasks.json");
+      const lockHeldPath = path.join(workspace, "worker-lock-held");
+      const releasePath = path.join(workspace, "release-worker-lock");
+      writeJson(tasksPath, [
+        {
+          ...baseTask,
+          id: "handoff-race",
+          title: "Handoff race",
+        },
+      ]);
+
+      const markerScript = [
+        'const fs = require("node:fs");',
+        '(async () => {',
+        '  const workspace = process.argv[1];',
+        '  const repoRoot = process.argv[2];',
+        '  const lockHeldPath = process.argv[3];',
+        '  const releasePath = process.argv[4];',
+        '  process.chdir(workspace);',
+        '  const storeUrl = new URL("./src/lib/store.ts", "file://" + repoRoot + "/").href;',
+        '  const importedStore = await import(storeUrl);',
+        '  const store = importedStore.default || importedStore;',
+        '  const waitArray = new Int32Array(new SharedArrayBuffer(4));',
+        '  await store.updateTaskAtomically("handoff-race", () => {',
+        '    fs.writeFileSync(lockHeldPath, "held");',
+        '    while (!fs.existsSync(releasePath)) {',
+        '      Atomics.wait(waitArray, 0, 0, 10);',
+        '    }',
+        '    return { status: "in_progress", current_run_mode: "initial" };',
+        '  });',
+        '})().catch((error) => { console.error(error); process.exit(1); });',
+      ].join("\\n");
+      let markerStderr = "";
+      const markerProcess = spawn(
+        ${JSON.stringify(TSX_BIN)},
+        [
+          "--eval",
+          markerScript,
+          workspace,
+          repoRoot,
+          lockHeldPath,
+          releasePath,
+        ],
+        {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            CORTEX_ENABLE_WORKER_AUTOSTART: "0",
+            HOME: workspace,
+          },
+          stdio: ["ignore", "ignore", "pipe"],
+        }
+      );
+      markerProcess.stderr.on("data", (chunk) => {
+        markerStderr += chunk.toString();
+      });
+
+      for (let attempt = 0; attempt < 200 && !fs.existsSync(lockHeldPath); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(fs.existsSync(lockHeldPath), true, markerStderr);
+
+      const releaseTimer = setTimeout(() => {
+        fs.writeFileSync(releasePath, "release");
+      }, 50);
+
+      const blockedHandoff = await json(
+        await taskRoute.PUT(
+          request("http://localhost/api/tasks/handoff-race", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status: "in_review" }),
+          }),
+          { params: Promise.resolve({ id: "handoff-race" }) }
+        )
+      );
+      clearTimeout(releaseTimer);
+      if (!fs.existsSync(releasePath)) fs.writeFileSync(releasePath, "release");
+      const markerExitCode = await new Promise((resolve) => {
+        markerProcess.once("exit", resolve);
+      });
+
+      assert.equal(markerExitCode, 0, markerStderr);
+      assert.equal(blockedHandoff.status, 409);
+      assert.deepEqual(blockedHandoff.body, {
+        error: "Cannot change status while the implementation run is active",
+      });
+      const taskAfterHandoff = await store.getTask("handoff-race");
+      assert.equal(taskAfterHandoff.status, "in_progress");
+      assert.equal(taskAfterHandoff.current_run_mode, "initial");
+    `)
+  );
+});
+
 test("task status handoff stays blocked while an implementation run is launching", () => {
   runRouteAssertions(
     withCortexState(`

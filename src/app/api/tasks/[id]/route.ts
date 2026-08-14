@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTask, updateTask, deleteTask, readTasks, readConfig } from "@/lib/store";
+import {
+  getTask,
+  updateTaskAtomically,
+  deleteTask,
+  readTasks,
+  readConfig,
+} from "@/lib/store";
 import { removeWorktree } from "@/lib/agent-runner";
 import { getIssue, unlinkTask } from "@/lib/issue-store";
 import { summaryCoversHead } from "@/lib/review-status";
@@ -115,19 +121,28 @@ export async function PUT(
     // external handoffs during that interval prevents the web process from
     // moving the task to in_review while the worker can still publish
     // provisional live PR state.
-    if (
-      task.status === "in_progress" &&
-      (task.current_run_mode != null || task.current_run_pid != null) &&
-      "status" in body &&
-      body.status !== task.status
-    ) {
+    let blockedByActiveRun = false;
+    const updated = await updateTaskAtomically(id, (current) => {
+      if (
+        current.status === "in_progress" &&
+        (current.current_run_mode != null || current.current_run_pid != null) &&
+        "status" in body &&
+        body.status !== current.status
+      ) {
+        blockedByActiveRun = true;
+        return undefined;
+      }
+      return body;
+    });
+    if (blockedByActiveRun) {
       return NextResponse.json(
         { error: "Cannot change status while the implementation run is active" },
         { status: 409 }
       );
     }
-
-    const updated = await updateTask(id, body);
+    if (!updated) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     return NextResponse.json(updated);
   } catch {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
