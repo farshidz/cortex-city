@@ -11,7 +11,8 @@ import {
   writeFileSync,
   writeSync,
 } from "fs";
-import { randomUUID } from "crypto";
+import { execFileSync } from "child_process";
+import { createHash, randomUUID } from "crypto";
 import path from "path";
 import type { Task, OrchestratorConfig } from "./types";
 import { snapshotCortex } from "./cortex-git";
@@ -183,6 +184,7 @@ function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
 
 interface TasksWriteLockRecordBase {
   pid: number;
+  processInstance: string;
   token: string;
   path: string;
 }
@@ -208,9 +210,45 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
+function getProcessInstance(pid: number): string | undefined {
+  let startedAt: string | undefined;
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      if (/^\d+$/.test(fields[19] || "")) {
+        startedAt = `linux:${fields[19]}`;
+      }
+    } catch {}
+  }
+
+  if (!startedAt) {
+    try {
+      const value = execFileSync(
+        process.platform === "darwin" ? "/bin/ps" : "ps",
+        ["-o", "lstart=", "-p", String(pid)],
+        { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }
+      ).trim();
+      if (value) startedAt = `ps:${value}`;
+    } catch {}
+  }
+
+  return startedAt
+    ? createHash("sha256").update(startedAt).digest("hex")
+    : undefined;
+}
+
+let currentProcessInstance: string | undefined;
+
+function readProcessInstance(pid: number): string | undefined {
+  if (pid !== process.pid) return getProcessInstance(pid);
+  currentProcessInstance ??= getProcessInstance(pid);
+  return currentProcessInstance;
+}
+
 function parseTasksWriteLockRecord(name: string): TasksWriteLockRecord | undefined {
   const choosing = name.match(
-    /^\.tasks\.write\.lock\.choosing\.(\d+)\.([0-9a-f-]+)$/
+    /^\.tasks\.write\.lock\.choosing\.(\d+)\.([0-9a-f]{64})\.([0-9a-f-]+)$/
   );
   if (choosing) {
     const pid = Number(choosing[1]);
@@ -218,13 +256,14 @@ function parseTasksWriteLockRecord(name: string): TasksWriteLockRecord | undefin
     return {
       kind: "choosing",
       pid,
-      token: choosing[2],
+      processInstance: choosing[2],
+      token: choosing[3],
       path: path.join(CORTEX_DIR, name),
     };
   }
 
   const ticket = name.match(
-    /^\.tasks\.write\.lock\.ticket\.(\d+)\.(\d+)\.([0-9a-f-]+)$/
+    /^\.tasks\.write\.lock\.ticket\.(\d+)\.(\d+)\.([0-9a-f]{64})\.([0-9a-f-]+)$/
   );
   if (!ticket) return undefined;
   const number = Number(ticket[1]);
@@ -240,7 +279,8 @@ function parseTasksWriteLockRecord(name: string): TasksWriteLockRecord | undefin
   return {
     kind: "ticket",
     pid,
-    token: ticket[3],
+    processInstance: ticket[3],
+    token: ticket[4],
     ticket: number,
     path: path.join(CORTEX_DIR, name),
   };
@@ -259,7 +299,12 @@ function readLiveTasksWriteLockRecords(): TasksWriteLockRecord[] {
   for (const name of readdirSync(CORTEX_DIR)) {
     const record = parseTasksWriteLockRecord(name);
     if (!record) continue;
-    if (isProcessRunning(record.pid)) {
+    if (!isProcessRunning(record.pid)) {
+      removeTasksWriteLockRecord(record.path);
+      continue;
+    }
+    const processInstance = readProcessInstance(record.pid);
+    if (!processInstance || processInstance === record.processInstance) {
       live.push(record);
     } else {
       // Each contender uses a unique pathname for its entire lifetime. Removing
@@ -283,10 +328,14 @@ function createTasksWriteLockRecord(recordPath: string): void {
 async function acquireTasksWriteLock(): Promise<() => void> {
   ensureCortexDir();
   const pid = process.pid;
+  const processInstance = readProcessInstance(pid);
+  if (!processInstance) {
+    throw new Error("Unable to identify task write lock process instance");
+  }
   const token = randomUUID();
   const choosingPath = path.join(
     CORTEX_DIR,
-    `${TASKS_WRITE_LOCK_PREFIX}.choosing.${pid}.${token}`
+    `${TASKS_WRITE_LOCK_PREFIX}.choosing.${pid}.${processInstance}.${token}`
   );
   let ticketPath: string;
 
@@ -304,7 +353,7 @@ async function acquireTasksWriteLock(): Promise<() => void> {
       ) + 1;
     ticketPath = path.join(
       CORTEX_DIR,
-      `${TASKS_WRITE_LOCK_PREFIX}.ticket.${ticket}.${pid}.${token}`
+      `${TASKS_WRITE_LOCK_PREFIX}.ticket.${ticket}.${pid}.${processInstance}.${token}`
     );
     createTasksWriteLockRecord(ticketPath);
   } finally {

@@ -23,7 +23,7 @@ function createTempWorkspace(): string {
   return mkdtempSync(path.join(os.tmpdir(), "store-test-"));
 }
 
-function runStoreScript(workspace: string, body: string) {
+function runStoreScript(workspace: string, body: string, timeout?: number) {
   const output = execFileSync(
     TSX_BIN,
     [
@@ -41,6 +41,7 @@ function runStoreScript(workspace: string, body: string) {
     {
       cwd: workspace,
       encoding: "utf-8",
+      timeout,
     }
   );
 
@@ -362,6 +363,90 @@ test("dead task-lock recovery cannot unlink a replacement owner", async () => {
         child.kill("SIGKILL");
       }
     }
+  }
+});
+
+test("task-lock recovery rejects a reused live PID", async () => {
+  const workspace = createTempWorkspace();
+  const cortexDir = path.join(workspace, ".cortex");
+  mkdirSync(cortexDir, { recursive: true });
+  writeFileSync(
+    path.join(cortexDir, "tasks.json"),
+    JSON.stringify([sampleTask()], null, 2)
+  );
+
+  const livePidPath = path.join(workspace, "live-pid");
+  const releaseLiveProcess = path.join(workspace, "release-live-process");
+  let helperStderr = "";
+  const liveProcess = spawn(
+    process.execPath,
+    [
+      "--eval",
+      [
+        'const fs = require("node:fs");',
+        'const waitArray = new Int32Array(new SharedArrayBuffer(4));',
+        'fs.writeFileSync(process.argv[1], String(process.pid));',
+        'while (!fs.existsSync(process.argv[2])) {',
+        '  Atomics.wait(waitArray, 0, 0, 10);',
+        '}',
+      ].join("\n"),
+      livePidPath,
+      releaseLiveProcess,
+    ],
+    { cwd: workspace, stdio: ["ignore", "ignore", "pipe"] }
+  );
+  liveProcess.stderr?.on("data", (chunk) => {
+    helperStderr += chunk.toString();
+  });
+
+  const waitForExit = () => {
+    if (liveProcess.exitCode !== null || liveProcess.signalCode !== null) {
+      return Promise.resolve(liveProcess.exitCode);
+    }
+    return new Promise<number | null>((resolve, reject) => {
+      liveProcess.once("error", reject);
+      liveProcess.once("exit", resolve);
+    });
+  };
+
+  try {
+    for (let attempt = 0; attempt < 500 && !existsSync(livePidPath); attempt++) {
+      if (liveProcess.exitCode !== null || liveProcess.signalCode !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(livePidPath), true, helperStderr);
+    const livePid = Number(readFileSync(livePidPath, "utf-8"));
+    assert.equal(Number.isSafeInteger(livePid), true);
+
+    const staleRecord = path.join(
+      cortexDir,
+      [
+        ".tasks.write.lock.ticket.1",
+        livePid,
+        "0".repeat(64),
+        "00000000-0000-4000-8000-000000000000",
+      ].join(".")
+    );
+    writeFileSync(staleRecord, "");
+
+    const updated = runStoreScript(
+      workspace,
+      `
+        const updated = await store.updateTask("task-1", {
+          session_id: "new-process-instance",
+        });
+        console.log(JSON.stringify(updated));
+      `,
+      5000
+    );
+
+    assert.equal(liveProcess.exitCode, null);
+    assert.equal(updated.session_id, "new-process-instance");
+    assert.equal(existsSync(staleRecord), false);
+  } finally {
+    writeFileSync(releaseLiveProcess, "release");
+    const exitCode = await waitForExit();
+    assert.equal(exitCode, 0, helperStderr);
   }
 });
 
