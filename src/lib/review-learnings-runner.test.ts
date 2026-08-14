@@ -116,7 +116,7 @@ test("spawnReviewRetro writes rewritten learnings and stamps done", () => {
   assert.equal(result.persisted.retro_error, undefined);
 
   const args = JSON.parse(readFileSync(argsFile, "utf-8"));
-  const prompt = args.args[args.args.indexOf("-p") + 1];
+  const prompt = args.stdin;
   assert.match(prompt, /https:\/\/github\.com\/acme\/widget\/pull\/7/);
   assert.match(prompt, /Agent review status: needs_author_changes/);
   assert.match(prompt, /The cache change is mostly sound/);

@@ -138,9 +138,11 @@ function readScenario() {
 
 const scenario = readScenario() || {};
 const args = process.argv.slice(2);
+let stdin = "";
 const payload = {
   binary: ${JSON.stringify(binaryName)},
   args,
+  stdin,
   cwd: process.cwd(),
   env: {
     GLOBAL_ONLY: process.env.GLOBAL_ONLY,
@@ -152,13 +154,6 @@ const payload = {
   },
 };
 
-if (process.env.FAKE_AGENT_ARGS_FILE) {
-  writeFileSync(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(payload));
-}
-if (process.env.FAKE_AGENT_CALLS_FILE) {
-  appendFileSync(process.env.FAKE_AGENT_CALLS_FILE, JSON.stringify(payload) + "\\n");
-}
-
 const stdout = scenario.stdout ?? process.env.FAKE_AGENT_STDOUT ?? "";
 const stderr = scenario.stderr ?? process.env.FAKE_AGENT_STDERR ?? "";
 const exitCode = Number(scenario.exitCode ?? process.env.FAKE_AGENT_EXIT_CODE ?? 0);
@@ -167,23 +162,40 @@ const stdoutChunks = Array.isArray(scenario.stdoutChunks)
   ? scenario.stdoutChunks
   : null;
 
-if (stdoutChunks) {
-  let elapsedMs = 0;
-  for (const chunk of stdoutChunks) {
-    elapsedMs += Number(chunk.delayMs || 0);
-    setTimeout(() => process.stdout.write(String(chunk.text || "")), elapsedMs);
+function runScenario() {
+  payload.stdin = stdin;
+  if (process.env.FAKE_AGENT_ARGS_FILE) {
+    writeFileSync(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(payload));
   }
-  setTimeout(() => {
-    if (stderr) process.stderr.write(stderr);
-    process.exit(exitCode);
-  }, elapsedMs + sleepMs);
-} else {
+  if (process.env.FAKE_AGENT_CALLS_FILE) {
+    appendFileSync(process.env.FAKE_AGENT_CALLS_FILE, JSON.stringify(payload) + "\\n");
+  }
+
+  if (stdoutChunks) {
+    let elapsedMs = 0;
+    for (const chunk of stdoutChunks) {
+      elapsedMs += Number(chunk.delayMs || 0);
+      setTimeout(() => process.stdout.write(String(chunk.text || "")), elapsedMs);
+    }
+    setTimeout(() => {
+      if (stderr) process.stderr.write(stderr);
+      process.exit(exitCode);
+    }, elapsedMs + sleepMs);
+    return;
+  }
   setTimeout(() => {
     if (stderr) process.stderr.write(stderr);
     if (stdout) process.stdout.write(stdout);
     process.exit(exitCode);
   }, sleepMs);
 }
+
+process.stdin.setEncoding("utf-8");
+process.stdin.on("data", (chunk) => {
+  stdin += chunk;
+});
+process.stdin.on("end", runScenario);
+process.stdin.resume();
 `
   );
   chmodSync(binaryPath, 0o755);
