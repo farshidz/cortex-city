@@ -134,7 +134,8 @@ export function writeJsonFileAtomic(
 export function readJsonFileWithBackup<T>(
   filePath: string,
   label: string,
-  validate?: (value: unknown) => value is T
+  validate?: (value: unknown) => value is T,
+  options: { repairPrimary?: boolean } = {}
 ): T {
   const parse = (raw: string): T => {
     const parsed = JSON.parse(raw) as unknown;
@@ -160,14 +161,16 @@ export function readJsonFileWithBackup<T>(
     primaryError instanceof Error ? primaryError.message : primaryError
   );
 
-  try {
-    assertSufficientDiskSpace(`restoring ${label} from backup`, CORTEX_DIR);
-    writeTextFileAtomic(filePath, backupRaw);
-  } catch (restoreError) {
-    console.error(
-      `[store] Failed to restore ${label} from last-good backup:`,
-      restoreError instanceof Error ? restoreError.message : restoreError
-    );
+  if (options.repairPrimary !== false) {
+    try {
+      assertSufficientDiskSpace(`restoring ${label} from backup`, CORTEX_DIR);
+      writeTextFileAtomic(filePath, backupRaw);
+    } catch (restoreError) {
+      console.error(
+        `[store] Failed to restore ${label} from last-good backup:`,
+        restoreError instanceof Error ? restoreError.message : restoreError
+      );
+    }
   }
 
   return parsed;
@@ -451,12 +454,22 @@ function normalizeTask(task: Task): Task {
   return normalized as Task;
 }
 
-export function readTasks(): Task[] {
+function readTasksFromDisk(repairPrimary: boolean): Task[] {
   ensureCortexDir();
   if (!existsSync(TASKS_FILE)) return [];
-  return readJsonFileWithBackup<Task[]>(TASKS_FILE, "tasks.json").map(
-    normalizeTask
-  );
+  return readJsonFileWithBackup<Task[]>(TASKS_FILE, "tasks.json", undefined, {
+    repairPrimary,
+  }).map(normalizeTask);
+}
+
+export function readTasks(): Task[] {
+  return readTasksFromDisk(false);
+}
+
+function readTasksForMutation(): Task[] {
+  // Every caller holds the cross-process task lock, so backup repair cannot
+  // race another task mutation.
+  return readTasksFromDisk(true);
 }
 
 function writeTasksLocked(tasks: Task[]): void {
@@ -476,7 +489,7 @@ export async function getTask(id: string): Promise<Task | undefined> {
 
 export async function createTask(task: Task): Promise<Task> {
   return withTasksWriteLock(() => {
-    const tasks = readTasks();
+    const tasks = readTasksForMutation();
     tasks.push(task);
     writeTasksLocked(tasks);
     return task;
@@ -485,7 +498,7 @@ export async function createTask(task: Task): Promise<Task> {
 
 export async function updateTask(id: string, updates: Partial<Task>): Promise<Task> {
   return withTasksWriteLock(async () => {
-    const tasks = readTasks();
+    const tasks = readTasksForMutation();
     const index = tasks.findIndex((t) => t.id === id);
     if (index === -1) throw new Error(`Task ${id} not found`);
     tasks[index] = {
@@ -507,7 +520,7 @@ export async function updateTaskAtomically(
   buildUpdates: (current: Task) => Partial<Task> | undefined
 ): Promise<Task | undefined> {
   return withTasksWriteLock(async () => {
-    const tasks = readTasks();
+    const tasks = readTasksForMutation();
     const index = tasks.findIndex((task) => task.id === id);
     if (index === -1) return undefined;
 
@@ -530,7 +543,7 @@ export async function updateTaskAtomically(
 
 export async function deleteTask(id: string): Promise<void> {
   return withTasksWriteLock(() => {
-    const tasks = readTasks();
+    const tasks = readTasksForMutation();
     const filtered = tasks.filter((t) => t.id !== id);
     if (filtered.length === tasks.length) throw new Error(`Task ${id} not found`);
     writeTasksLocked(filtered);

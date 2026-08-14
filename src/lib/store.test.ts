@@ -613,7 +613,7 @@ test("readTasks clears legacy reviewer state without disturbing builder review s
   );
 });
 
-test("readTasks restores from last-good backup when tasks file is corrupt", () => {
+test("readTasks falls back without repairing a corrupt primary", () => {
   const workspace = createTempWorkspace();
   const task = sampleTask();
 
@@ -631,17 +631,103 @@ test("readTasks restores from last-good backup when tasks file is corrupt", () =
         "tasks.json.last-good"
       );
       const backupBefore = fs.readFileSync(backupFile, "utf-8");
-      fs.writeFileSync(tasksFile, backupBefore.slice(0, 20));
+      const corruptPrimary = backupBefore.slice(0, 20);
+      fs.writeFileSync(tasksFile, corruptPrimary);
       const recovered = store.readTasks();
       console.log(JSON.stringify({
         recovered,
-        restored: fs.readFileSync(tasksFile, "utf-8") === backupBefore,
+        primaryUnchanged: fs.readFileSync(tasksFile, "utf-8") === corruptPrimary,
       }));
     `
   );
 
   assert.deepEqual(result.recovered, [task]);
-  assert.equal(result.restored, true);
+  assert.equal(result.primaryUnchanged, true);
+});
+
+test("a backup-reading task reader cannot overwrite a locked update", async () => {
+  const workspace = createTempWorkspace();
+  const cortexDir = path.join(workspace, ".cortex");
+  const backupDir = path.join(cortexDir, "backups");
+  mkdirSync(backupDir, { recursive: true });
+  const task = sampleTask();
+  const backupRaw = `${JSON.stringify([task], null, 2)}\n`;
+  writeFileSync(path.join(backupDir, "tasks.json.last-good"), backupRaw);
+  writeFileSync(path.join(cortexDir, "tasks.json"), backupRaw.slice(0, 20));
+
+  const readerParsed = path.join(workspace, "reader-parsed-backup");
+  const updaterDone = path.join(workspace, "updater-done");
+  let readerStderr = "";
+  const reader = spawn(
+    TSX_BIN,
+    [
+      "--eval",
+      [
+        'const fs = require("node:fs");',
+        'const waitArray = new Int32Array(new SharedArrayBuffer(4));',
+        'console.error = () => {',
+        '  fs.writeFileSync(process.argv[1], "parsed");',
+        '  while (!fs.existsSync(process.argv[2])) {',
+        '    Atomics.wait(waitArray, 0, 0, 10);',
+        '  }',
+        '};',
+        '(async () => {',
+        `  const importedStore = await import(${JSON.stringify(STORE_MODULE_URL)});`,
+        '  const store = importedStore.default || importedStore;',
+        '  store.readTasks();',
+        '})().catch((error) => { process.stderr.write(String(error)); process.exit(1); });',
+      ].join("\n"),
+      readerParsed,
+      updaterDone,
+    ],
+    { cwd: workspace, stdio: ["ignore", "ignore", "pipe"] }
+  );
+  reader.stderr?.on("data", (chunk) => {
+    readerStderr += chunk.toString();
+  });
+
+  const waitForReaderExit = () => {
+    if (reader.exitCode !== null || reader.signalCode !== null) {
+      return Promise.resolve(reader.exitCode);
+    }
+    return new Promise<number | null>((resolve, reject) => {
+      reader.once("error", reject);
+      reader.once("exit", resolve);
+    });
+  };
+
+  try {
+    for (let attempt = 0; attempt < 500 && !existsSync(readerParsed); attempt++) {
+      if (reader.exitCode !== null || reader.signalCode !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(readerParsed), true, readerStderr);
+
+    const updated = runStoreScript(
+      workspace,
+      `
+        const updated = await store.updateTask("task-1", {
+          session_id: "locked-update",
+        });
+        console.log(JSON.stringify(updated));
+      `,
+      5000
+    );
+    assert.equal(updated.session_id, "locked-update");
+    writeFileSync(updaterDone, "done");
+
+    const readerExit = await waitForReaderExit();
+    assert.equal(readerExit, 0, readerStderr);
+    const [persisted] = JSON.parse(
+      readFileSync(path.join(cortexDir, "tasks.json"), "utf-8")
+    );
+    assert.equal(persisted.session_id, "locked-update");
+  } finally {
+    if (!existsSync(updaterDone)) writeFileSync(updaterDone, "done");
+    if (reader.exitCode === null && reader.signalCode === null) {
+      reader.kill("SIGKILL");
+    }
+  }
 });
 
 test("writeConfig persists the supplied configuration", () => {
