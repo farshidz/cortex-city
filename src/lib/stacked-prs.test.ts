@@ -332,6 +332,49 @@ test("reconcileStackedPRs preserves worker-owned fields and keeps dropped entrie
   assert.equal(updated?.scope, "Original scope");
 });
 
+test("reconcileStackedPRs preserves lifecycle state across canonical URL aliases", () => {
+  const current = [
+    entry({
+      pr_url: "https://github.com/ACME/WIDGET/pull/0007",
+      branch_name: "old-branch",
+      base_branch: "old-base",
+      scope: "Stored scope",
+      state: "merged",
+      pr_status: "clean",
+      last_review_gh_state: "hash-7",
+      merge_commit_sha: "merge-7",
+      pending_restack_of: ["merge-6"],
+    }),
+  ];
+
+  const result = reconcileStackedPRs(current, [
+    {
+      position: 1,
+      pr_url: "https://github.com/acme/widget/pull/7",
+      branch_name: "canonical-branch",
+      base_branch: "main",
+      scope: "Canonical scope",
+    },
+  ]);
+
+  assert.ok(result);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.stack, [
+    {
+      position: 1,
+      pr_url: "https://github.com/acme/widget/pull/7",
+      branch_name: "canonical-branch",
+      base_branch: "main",
+      scope: "Canonical scope",
+      state: "merged",
+      pr_status: "clean",
+      last_review_gh_state: "hash-7",
+      merge_commit_sha: "merge-7",
+      pending_restack_of: ["merge-6"],
+    },
+  ]);
+});
+
 test("reconcileStackedPRs keeps the tracked stack when the report omits it", () => {
   const current = [entry()];
   const result = reconcileStackedPRs(current, null);
@@ -411,4 +454,28 @@ test("reconcileStackedPRs rejects malformed reports atomically", () => {
   assert.equal(preserved.stack[0].state, "merged");
   assert.equal(preserved.stack[1].last_review_gh_state, "hash-2");
   assert.match(preserved.warnings[0], /keeping the tracked stack unchanged/);
+
+  const duplicateAliases = reconcileStackedPRs(tracked, [
+    {
+      position: 1,
+      pr_url: "https://github.com/ACME/WIDGET/pull/0002",
+      branch_name: "b2",
+      base_branch: "main",
+      scope: "Slice two",
+    },
+    {
+      position: 2,
+      pr_url: "https://github.com/acme/widget/pull/2",
+      branch_name: "b2-duplicate",
+      base_branch: "b2",
+      scope: "Duplicate alias",
+    },
+  ]);
+  assert.ok(duplicateAliases);
+  assert.deepEqual(duplicateAliases.stack, tracked);
+  assert.match(duplicateAliases.warnings[0], /listed twice/);
+  assert.match(
+    duplicateAliases.warnings[0],
+    /keeping the tracked stack unchanged/
+  );
 });

@@ -35,10 +35,12 @@ import type {
   FollowupTaskRequest,
   AgentConfig,
   TaskRunMode,
+  TaskStackedPR,
 } from "./types";
 import { resolveEnvPath } from "./agent-files";
 import {
   frontierStackedPR,
+  githubPullRequestIdentity,
   isStackedTask,
   openStackedPRs,
   reconcileStackedPRs,
@@ -1100,24 +1102,93 @@ async function persistLivePullRequestProgress(
     if (!canPersist() || currentTask.status !== "in_progress") return undefined;
 
     if (ordered) {
-      if (currentTask.stacked_prs?.some((entry) => !entry.provisional)) {
+      const trackedStack = [...(currentTask.stacked_prs ?? [])].sort(
+        (a, b) => a.position - b.position
+      );
+      const confirmedSinglePrUrl =
+        currentTask.pr_url &&
+        !currentTask.pr_url_provisional &&
+        trackedStack.length === 0
+          ? currentTask.pr_url
+          : undefined;
+      const confirmedSinglePrIdentity = confirmedSinglePrUrl
+        ? githubPullRequestIdentity(confirmedSinglePrUrl)
+        : undefined;
+      const orderedWithIdentity = ordered.map((pullRequest) => ({
+        pullRequest,
+        identity: githubPullRequestIdentity(pullRequest.url),
+      }));
+      if (orderedWithIdentity.some(({ identity }) => !identity)) {
         return undefined;
       }
-      const stack = ordered.map((pullRequest, index) => ({
-        position: index + 1,
-        pr_url: pullRequest.url,
-        branch_name: pullRequest.headRefName,
-        base_branch: pullRequest.baseRefName,
-        scope: pullRequest.title,
-        state: "open" as const,
-        provisional: true,
-      }));
+      const orderedIndexByIdentity = new Map(
+        orderedWithIdentity.map(({ identity }, index) => [identity, index] as const)
+      );
+      const trackedIdentities = new Set(
+        trackedStack
+          .map((entry) => githubPullRequestIdentity(entry.pr_url))
+          .filter((identity): identity is string => Boolean(identity))
+      );
+      const stack: TaskStackedPR[] = [];
+      const appendNewEntry = (pullRequest: LivePullRequest, identity: string) => {
+        stack.push({
+          position: stack.length + 1,
+          pr_url: pullRequest.url,
+          branch_name: pullRequest.headRefName,
+          base_branch: pullRequest.baseRefName,
+          scope: pullRequest.title,
+          state: "open",
+          provisional:
+            confirmedSinglePrIdentity && identity === confirmedSinglePrIdentity
+              ? undefined
+              : true,
+        });
+      };
+
+      let nextOrderedIndex = 0;
+      for (const tracked of trackedStack) {
+        const identity = githubPullRequestIdentity(tracked.pr_url);
+        const orderedIndex = identity
+          ? orderedIndexByIdentity.get(identity)
+          : undefined;
+        if (orderedIndex === undefined) {
+          stack.push({ ...tracked, position: stack.length + 1 });
+          continue;
+        }
+        if (orderedIndex < nextOrderedIndex) return undefined;
+        while (nextOrderedIndex < orderedIndex) {
+          const candidate = orderedWithIdentity[nextOrderedIndex];
+          if (!candidate.identity || trackedIdentities.has(candidate.identity)) {
+            return undefined;
+          }
+          appendNewEntry(candidate.pullRequest, candidate.identity);
+          nextOrderedIndex += 1;
+        }
+        const pullRequest = orderedWithIdentity[orderedIndex].pullRequest;
+        stack.push({
+          ...tracked,
+          position: stack.length + 1,
+          pr_url: pullRequest.url,
+          branch_name: pullRequest.headRefName,
+          base_branch: pullRequest.baseRefName,
+          scope: tracked.scope || pullRequest.title,
+        });
+        nextOrderedIndex = orderedIndex + 1;
+      }
+      while (nextOrderedIndex < orderedWithIdentity.length) {
+        const candidate = orderedWithIdentity[nextOrderedIndex];
+        if (!candidate.identity || trackedIdentities.has(candidate.identity)) {
+          return undefined;
+        }
+        appendNewEntry(candidate.pullRequest, candidate.identity);
+        nextOrderedIndex += 1;
+      }
       const frontier = frontierStackedPR(stack);
       return {
         stacked_prs: stack,
         pr_url: frontier?.pr_url,
         branch_name: frontier?.branch_name,
-        pr_url_provisional: true,
+        pr_url_provisional: frontier?.provisional ? true : undefined,
       };
     }
 
@@ -1168,6 +1239,31 @@ function shouldClearCompletedRunPid(
     typeof currentTask?.current_run_pid !== "number" ||
     currentTask.current_run_pid === completedPid
   );
+}
+
+function retractProvisionalTaskUpdates(task: Task | undefined): Partial<Task> {
+  if (!task) return {};
+  const confirmedStack = task.stacked_prs
+    ?.filter((entry) => !entry.provisional)
+    .sort((a, b) => a.position - b.position)
+    .map((entry, index) => ({ ...entry, position: index + 1 }));
+  const updates: Partial<Task> = {};
+  if (task.pr_url_provisional) {
+    updates.pr_url = undefined;
+    updates.branch_name = undefined;
+    updates.pr_url_provisional = undefined;
+  }
+  if (task.stacked_prs?.some((entry) => entry.provisional)) {
+    updates.stacked_prs =
+      confirmedStack && confirmedStack.length > 0 ? confirmedStack : undefined;
+    const frontier = confirmedStack
+      ? frontierStackedPR(confirmedStack)
+      : undefined;
+    updates.pr_url = frontier?.pr_url;
+    updates.branch_name = frontier?.branch_name;
+    updates.pr_url_provisional = undefined;
+  }
+  return updates;
 }
 
 function withCodexReceivedAt(event: CodexEvent): CodexEvent {
@@ -1537,10 +1633,12 @@ async function handleRunTimeout(
     currentTask && preParsedResult && runtime
       ? buildUsageAccounting(runtime, preParsedResult, currentTask).updates
       : {};
+  const provisionalUpdates = retractProvisionalTaskUpdates(currentTask);
 
   await updateTask(taskId, {
     ...resumedUpdates,
     ...usageUpdates,
+    ...provisionalUpdates,
     last_run_result: "timeout",
     error_log: `Timed out after ${timeoutMs}ms`,
     last_run_at: new Date().toISOString(),
@@ -1606,7 +1704,18 @@ async function handleRunComplete(
       trackedStack && confirmedStack?.length !== trackedStack.length
     );
     const hadProvisionalPr = currentTask?.pr_url_provisional === true;
+    const confirmedSingleFromLiveStack =
+      hadProvisionalStack &&
+      trackedStack &&
+      trackedStack.length > 1 &&
+      confirmedStack?.length === 1 &&
+      currentTask?.pr_url === confirmedStack[0].pr_url &&
+      !hadProvisionalPr
+        ? confirmedStack[0]
+        : undefined;
+    let finalOutputConfirmedLiveState = false;
     if (report) {
+      finalOutputConfirmedLiveState = shouldApplySuccessSideEffects;
       updates.last_agent_report = report;
       if (hadProvisionalPr) updates.pr_url_provisional = undefined;
 
@@ -1633,7 +1742,23 @@ async function handleRunComplete(
         }
         // An empty stack means the report was rejected and nothing was
         // tracked before — the task simply stays a single-PR task.
-        if (reconciled.stack.length > 0) {
+        const rejectedReportedStack = reconciled.warnings.some((warning) =>
+          warning.startsWith("Rejected stacked_prs report")
+        );
+        const shouldCollapsePromotedSingle = Boolean(
+          confirmedSingleFromLiveStack &&
+            reconciled.stack.length === 1 &&
+            (!report.stacked_prs ||
+              report.stacked_prs.length === 0 ||
+              rejectedReportedStack)
+        );
+        if (shouldCollapsePromotedSingle && confirmedSingleFromLiveStack) {
+          updates.stacked_prs = undefined;
+          if (!report.pr_url) {
+            updates.pr_url = confirmedSingleFromLiveStack.pr_url;
+            updates.branch_name = confirmedSingleFromLiveStack.branch_name;
+          }
+        } else if (reconciled.stack.length > 0) {
           updates.stacked_prs = reconciled.stack;
           const frontier = frontierStackedPR(reconciled.stack);
           if (frontier) {
@@ -1667,6 +1792,7 @@ async function handleRunComplete(
         /https:\/\/github\.com\/[^\s)]+\/pull\/\d+/
       );
       if (prMatch && runReason !== "cleanup") {
+        finalOutputConfirmedLiveState = true;
         updates.pr_url = prMatch[0];
         if (hadProvisionalPr) updates.pr_url_provisional = undefined;
         if (hadProvisionalStack) {
@@ -1677,6 +1803,13 @@ async function handleRunComplete(
         }
         updates.status = "in_review";
       }
+    }
+
+    // Any live-discovered state still marked provisional at runtime exit was
+    // not confirmed by a successful final report or fallback URL. Retract it
+    // on every completion path while preserving confirmed stack entries.
+    if (!finalOutputConfirmedLiveState) {
+      Object.assign(updates, retractProvisionalTaskUpdates(currentTask));
     }
 
     // Accumulate costs and run count
@@ -1761,6 +1894,7 @@ async function handleRunComplete(
     await updateTask(taskId, updates);
   } catch {
     const updates: Partial<Task> = {
+      ...retractProvisionalTaskUpdates(currentTask),
       last_run_result: "error",
       error_log: `Exit code: ${exitCode}`,
       last_run_at: new Date().toISOString(),
