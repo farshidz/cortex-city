@@ -1081,9 +1081,11 @@ export async function pollOnce(
         });
         if (currentTask.worktree_path) {
           await deps.removeWorktree(currentTask);
-          await deps.updateTask(taskId, {
-            worktree_path: undefined,
-          });
+          if (!hasWorktreeDirectory(currentTask)) {
+            await deps.updateTask(taskId, {
+              worktree_path: undefined,
+            });
+          }
         }
       },
       preSpawnUpdates: {
@@ -1105,9 +1107,11 @@ export async function pollOnce(
 
     deps.logger.log(`[worker] Removing leftover worktree for task "${task.title}" (${task.id})`);
     await deps.removeWorktree(task);
-    await deps.updateTask(task.id, {
-      worktree_path: undefined,
-    });
+    if (!hasWorktreeDirectory(task)) {
+      await deps.updateTask(task.id, {
+        worktree_path: undefined,
+      });
+    }
   }
 
   tasks = deps.readTasks();

@@ -1,7 +1,7 @@
 // In-process tests for the pure predicates that gate worker phases.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -26,6 +26,60 @@ function sample(overrides: Partial<Task> = {}): Task {
     updated_at: "",
     ...overrides,
   };
+}
+
+function makeFinalCleanupHarness(
+  task: Task,
+  removeWorktree: WorkerRuntimeDeps["removeWorktree"]
+) {
+  const tasks = [task];
+  const completions: Array<(taskId: string) => Promise<void> | void> = [];
+  const deps: WorkerRuntimeDeps = {
+    deleteReviewSummary: async () => {},
+    deleteTask: async () => {},
+    getPRStateHash: async () => "",
+    getPRStatus: async () => "unknown",
+    getReviewRequestedPRs: async () => [],
+    getTask: async (id) => tasks.find((candidate) => candidate.id === id),
+    isPRMergedOrClosed: async () => null,
+    isPidRunning: () => true,
+    logger: { log: () => {}, error: () => {} },
+    readConfig: () => ({
+      max_parallel_sessions: 1,
+      poll_interval_seconds: 30,
+      default_permission_mode: "bypassPermissions",
+      default_agent_runner: "codex",
+      agents: {},
+    }),
+    readReviewLearnings: () => "",
+    readReviewSummaries: () => [],
+    readReviewSummaryMap: () => ({}),
+    readTasks: () => tasks.map((candidate) => ({ ...candidate })),
+    removeWorktree,
+    removeFinalReviewWorkspace: async () => true,
+    spawnAgentSession: async (_task, _mode, onComplete) => {
+      completions.push(onComplete);
+      return { pid: 202, child: {} as never };
+    },
+    spawnReviewRetro: async () => ({
+      pid: 0,
+      child: {} as never,
+      done: Promise.resolve(),
+    }),
+    spawnReviewSummary: async () => ({
+      pid: 303,
+      child: {} as never,
+      done: Promise.resolve({} as never),
+    }),
+    updateTask: async (id, updates) => {
+      const index = tasks.findIndex((candidate) => candidate.id === id);
+      assert.notEqual(index, -1);
+      tasks[index] = { ...tasks[index], ...updates };
+      return tasks[index];
+    },
+    upsertReviewSummary: async (summary) => summary as never,
+  };
+  return { completions, deps, tasks };
 }
 
 test("shouldFinalizeCleanupWorktree requires finished cleanup + worktree path + no pid", () => {
@@ -92,6 +146,74 @@ test("shouldResetStaleFinalCleanup detects running-but-orphaned cleanup state", 
     ),
     false
   );
+});
+
+test("cleanup completion retains the worktree path after removal failure and retries", async () => {
+  const workspace = mkdtempSync(path.join(os.tmpdir(), "worker-cleanup-retry-"));
+  const worktreePath = path.join(workspace, "worktree");
+  mkdirSync(worktreePath);
+  let removalSucceeds = false;
+  let removalAttempts = 0;
+  const { completions, deps, tasks } = makeFinalCleanupHarness(
+    sample({
+      id: "cleanup-retry",
+      worktree_path: worktreePath,
+      updated_at: new Date().toISOString(),
+    }),
+    async (task) => {
+      removalAttempts++;
+      if (removalSucceeds && task.worktree_path) {
+        rmSync(task.worktree_path, { recursive: true, force: true });
+      }
+    }
+  );
+  const activePids = new Map<string, number>();
+
+  await pollOnce(activePids, deps, new Map());
+  assert.equal(completions.length, 1);
+  await completions[0]("cleanup-retry");
+
+  assert.equal(removalAttempts, 1);
+  assert.equal(tasks[0].final_cleanup_state, "finished");
+  assert.equal(tasks[0].worktree_path, worktreePath);
+
+  removalSucceeds = true;
+  await pollOnce(activePids, deps, new Map());
+
+  assert.equal(removalAttempts, 2);
+  assert.equal(tasks[0].worktree_path, undefined);
+});
+
+test("finished cleanup retains the worktree path after removal failure and retries", async () => {
+  const workspace = mkdtempSync(path.join(os.tmpdir(), "worker-finished-retry-"));
+  const worktreePath = path.join(workspace, "worktree");
+  mkdirSync(worktreePath);
+  let removalSucceeds = false;
+  let removalAttempts = 0;
+  const { deps, tasks } = makeFinalCleanupHarness(
+    sample({
+      id: "finished-retry",
+      final_cleanup_state: "finished",
+      worktree_path: worktreePath,
+      updated_at: new Date().toISOString(),
+    }),
+    async (task) => {
+      removalAttempts++;
+      if (removalSucceeds && task.worktree_path) {
+        rmSync(task.worktree_path, { recursive: true, force: true });
+      }
+    }
+  );
+
+  await pollOnce(new Map(), deps, new Map());
+  assert.equal(removalAttempts, 1);
+  assert.equal(tasks[0].worktree_path, worktreePath);
+
+  removalSucceeds = true;
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.equal(removalAttempts, 2);
+  assert.equal(tasks[0].worktree_path, undefined);
 });
 
 test("shouldWaitForDeadOwnedPid only delays pids owned by this worker", () => {
