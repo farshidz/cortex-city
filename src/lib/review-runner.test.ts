@@ -443,29 +443,59 @@ test("buildReviewWrapperPrompt uses source-specific scope authority", () => {
   }
 });
 
-test("buildReviewWrapperPrompt requires context, design, risk, and scope review", () => {
-  const prompt = buildReviewWrapperPrompt(
-    baseConfig({
-      review_learning_enabled: false,
-      review_prompt: "Apply repository-specific review guidance.",
-    }),
+test("buildReviewWrapperPrompt keeps universal review guidance on every path", () => {
+  const customConfig = baseConfig({
+    review_learning_enabled: false,
+    review_prompt: "Apply repository-specific review guidance.",
+  });
+  const customInitial = buildReviewWrapperPrompt(customConfig, sampleRequest());
+  const defaultInitial = buildReviewWrapperPrompt(
+    baseConfig({ review_learning_enabled: false }),
     sampleRequest()
   );
+  const cached = {
+    ...sampleRequest({ head_sha: "previous-head" }),
+    summary: "## Summary\nPreviously reviewed.",
+    summary_head_sha: "previous-head",
+    generated_at: "2026-05-01T00:10:00.000Z",
+    review_status: "needs_review",
+    review_state: "needs_review",
+  } satisfies ReviewSummary;
+  const customFollowup = buildReviewWrapperPrompt(
+    customConfig,
+    sampleRequest({ head_sha: "current-head" }),
+    cached
+  );
 
-  assert.match(prompt, /high-level account of what the current PR does/i);
-  assert.match(prompt, /relevant context from existing repository code/i);
-  assert.match(prompt, /Read every design document that the PR adds, changes, or references/i);
-  assert.match(prompt, /implementation follows it/i);
-  assert.match(prompt, /## Architecture and Risk/);
-  assert.match(prompt, /hard-to-reverse decisions/i);
-  assert.match(prompt, /database and table design/i);
-  assert.match(prompt, /particularly risky changes/i);
-  assert.match(prompt, /Flag unnecessary changes, over-engineering/i);
-  assert.match(prompt, /unjustified regression or maintenance risk/i);
-  assert.match(prompt, /smallest correct in-scope remedy/i);
-  assert.match(prompt, /consequential question requiring expertise, operational context/i);
-  assert.match(prompt, /to `needs_human_decision`/i);
-  assert.match(prompt, /name the question, needed expertise, and evidence/i);
+  for (const prompt of [customInitial, defaultInitial, customFollowup]) {
+    assert.match(prompt, /high-level account of what the current PR does/i);
+    assert.match(prompt, /relevant context from existing repository code/i);
+    assert.match(prompt, /Read every design document the PR adds, changes, or references/i);
+    assert.match(prompt, /implementation follows it/i);
+    assert.match(prompt, /## Architecture and Risk/);
+    assert.match(prompt, /hard-to-reverse decisions/i);
+    assert.match(prompt, /database\/table design/i);
+    assert.match(prompt, /particularly risky changes/i);
+    assert.match(prompt, /Flag unnecessary changes, over-engineering/i);
+    assert.match(prompt, /unjustified regression risk/i);
+    assert.match(prompt, /smallest in-scope remedy/i);
+    assert.match(prompt, /questions needing outside expertise, operational context/i);
+    assert.match(prompt, /to `needs_human_decision`/i);
+    assert.match(prompt, /name the question, expertise, and evidence needed/i);
+  }
+  assert.match(
+    customFollowup,
+    /apply the design, architecture\/risk, and necessity checks only to prior findings and the revision diff/i
+  );
+  assert.match(customFollowup, /Unchanged material may supply context/i);
+  assert.match(
+    customFollowup,
+    /do not raise new findings about unchanged code unless the issue is critical/i
+  );
+  assert.match(
+    customInitial,
+    /add a `## Human Decision` section after `## Architecture and Risk` when present, otherwise after `## Agent Status`/i
+  );
 });
 
 test("buildReviewWrapperPrompt routes blocking scope calls to a human", () => {
