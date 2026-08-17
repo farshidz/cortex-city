@@ -1,0 +1,4 @@
+interface:
+  display_name: "Investigate Cortex City"
+  short_description: "Trace Cortex City issues through its production tunnel"
+  default_prompt: "Use $investigate-cortex-city with the user-supplied local port, or port 3001 by default, to inspect the tunneled Cortex City production instance and SSH to its host."
