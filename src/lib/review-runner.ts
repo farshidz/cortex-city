@@ -257,9 +257,7 @@ const REVIEWER_SELF_APPROVAL_COMMENT_BODY =
 
 export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull request with Cortex City's unified review agent.
 
-Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused review as **GitHub-flavored Markdown**. Keep the existing review standard: surface the findings you would normally surface, but leave GitHub comments yourself when a finding requires the PR author to make a change. If you are unsure whether something should be posted as a PR comment, keep it in the generated review instead.
-
-Follow the source-aware GitHub action rules in the Cortex City review protocol appended below.`;
+Use the gh CLI to read the PR and produce a focused **GitHub-flavored Markdown** review. Post comments for required author changes; keep uncertain findings in the generated review. Follow the source-aware protocol below.`;
 export const DEFAULT_REVIEW_PROMPT = DEFAULT_REVIEW_SUMMARY_PROMPT;
 
 export interface SpawnOpts {
@@ -515,12 +513,11 @@ function buildReviewSourceContext(
   const context = [
     "Review source: task-owned pull request.",
     [
-      "The signed-in user owns this PR through a Cortex City task. Act as an",
-      "independent reviewer, but never approve it or request changes on GitHub.",
+      "The user owns this task PR. Review independently; never approve it or",
+      "request changes on GitHub.",
     ].join(" "),
     [
-      "Leave specific, actionable GitHub comments for every finding that",
-      "requires code changes so the implementation agent can address them.",
+      "Leave specific, actionable GitHub comments for required code changes.",
     ].join(" "),
     [
       "A `ready_for_human_approval` status is only the internal no-blocking-findings",
@@ -625,14 +622,11 @@ export function buildReviewWrapperPrompt(
     "",
     "- Start the generated review with `## Summary` and put the summary before any findings.",
     [
-      "- The `## Summary` must always be a standalone, self-contained description of",
-      "the PR in its current state, written for a reader who has not seen any prior",
-      "review or summary. Describe what the PR does and your assessment of it as it",
-      "stands now. Do not write it as an update or a diff against a previous review:",
-      "no references to an earlier summary, to what changed since last time, or to",
-      'comments being "addressed", "resolved", or "still unresolved". Any such',
-      "follow-up or delta reasoning belongs in your GitHub comments and the agent",
-      "status only, never in the summary.",
+      "- Make `## Summary` a standalone, self-contained high-level account of what",
+      "the current PR does, the relevant context from existing repository code, and",
+      "your assessment. Do not frame it as a follow-up or mention earlier summaries,",
+      "deltas, or findings as addressed or resolved. Keep round-specific reasoning in",
+      "GitHub comments and `## Agent Status`.",
     ].join(" "),
     "- Then include `## Agent Status` with one exact line: `Agent status: <status>`.",
     `- The status must be one of: ${REVIEW_AGENT_STATUSES.join(", ")}.`,
@@ -675,6 +669,28 @@ export function buildReviewWrapperPrompt(
     [
       "- Prior reviewer comments, learned lessons, and general best practice are",
       "evidence, not authority to broaden the PR.",
+    ].join(" "),
+    [
+      "- Read every design document that the PR adds, changes, or references. Verify",
+      "that the implementation follows it and flag material gaps.",
+    ].join(" "),
+    [
+      "- Add `## Architecture and Risk` after `## Agent Status` when applicable.",
+      "Highlight hard-to-reverse decisions such as database and table design,",
+      "public contracts, protocols, migrations, and ownership boundaries, plus",
+      "particularly risky changes. Explain each commitment or regression surface and",
+      "its justification. Omit an empty section.",
+    ].join(" "),
+    [
+      "- Flag unnecessary changes, over-engineering, and unjustified regression or",
+      "maintenance risk. Cite concrete diff behavior and require removal or",
+      "simplification when it is the smallest correct in-scope remedy.",
+    ].join(" "),
+    [
+      "- Route any consequential question requiring expertise, operational",
+      "context, or product judgment beyond repository evidence to",
+      "`needs_human_decision`. In `## Human Decision`, name the question, needed",
+      "expertise, and evidence.",
     ].join(" "),
     [
       "- Judge a finding's severity separately from the scope of its remedy. A defect,",
@@ -785,13 +801,12 @@ export function buildReviewWrapperPrompt(
         ].join(" "),
     [
       "- If your final status is `needs_human_decision`, add a `## Human Decision`",
-      "section after `## Agent Status`. Clearly present the points or blocking issue",
-      "and the decision the human needs to make. Do this for every review",
-      "source, including task-owned and other self-authored PRs. Do not post this",
-      "comment yourself and do not invent or report a comment ID. Cortex City will",
-      "create exactly one top-level PR conversation comment from that section, prefix",
-      `it with \`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\`, and durably record`,
-      "the GitHub receipt.",
+      "section after `## Agent Status`. Present the points or blocking issue and the",
+      "decision the human needs to make. Do this for every source, including",
+      "task-owned and other self-authored PRs. Do not post this comment yourself and",
+      "do not invent or report a comment ID. Cortex City will create exactly one top-level",
+      "PR conversation comment from that section, prefix it with",
+      `\`${REVIEWER_HUMAN_DECISION_COMMENT_PREFIX}\`, and record its receipt.`,
     ].join(" "),
     [
       "- Include those points or blocking issue in the generated review as well as",
