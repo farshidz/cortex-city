@@ -223,6 +223,29 @@ test("resolveReviewPrompt prefers the configured prompt and falls back to the de
   assert.equal(resolveReviewPrompt(blank), DEFAULT_REVIEW_PROMPT);
 });
 
+test("the default reviewer prompt carries its focus contract on the public prompt path", () => {
+  // The configured-prompt case above only proves the fallback equals the same
+  // exported constant, so it cannot catch a focus instruction being dropped from
+  // the default. Assert each requirement on the assembled prompt a reviewer
+  // actually receives when no `review_prompt` is configured.
+  const prompt = buildReviewWrapperPrompt(
+    baseConfig({ review_learning_enabled: false }),
+    sampleRequest()
+  );
+
+  assert.match(prompt, /high level summary of what the PR does/i);
+  assert.match(prompt, /relevant context from existing repo code/i);
+  assert.match(prompt, /design document as part of this PR/i);
+  assert.match(
+    prompt,
+    /architectural decisions that are difficult to change later/i
+  );
+  assert.match(prompt, /unnecessary changes, over-engineering/i);
+  assert.match(prompt, /unjustified risk of regression/i);
+  assert.match(prompt, /particularly risky/i);
+  assert.match(prompt, /requires deeper human review/i);
+});
+
 test("buildReviewWrapperPrompt injects review learnings when enabled and non-empty", () => {
   const workspace = setupRunnerWorkspace("review-runner-learnings-");
   const request = sampleRequest();
