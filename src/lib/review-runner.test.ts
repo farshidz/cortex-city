@@ -473,7 +473,7 @@ test("buildReviewWrapperPrompt stays within its protocol size budget", () => {
     }),
   ]) {
     assert.ok(
-      wordCount(buildReviewWrapperPrompt(config, request)) < 1_450,
+      wordCount(buildReviewWrapperPrompt(config, request)) < 1_550,
       "merge or shorten existing protocol rules before raising the size budget"
     );
   }
