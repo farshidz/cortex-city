@@ -259,6 +259,14 @@ export const DEFAULT_REVIEW_SUMMARY_PROMPT = `You are reviewing an open pull req
 
 Use the gh CLI (\`gh pr view\`, \`gh pr diff\`, etc.) to read the PR, then produce a focused review as **GitHub-flavored Markdown**. Keep the existing review standard: surface the findings you would normally surface, but leave GitHub comments yourself when a finding requires the PR author to make a change. If you are unsure whether something should be posted as a PR comment, keep it in the generated review instead.
 
+In your review:
+- Provide a high level summary of what the PR does, including any relevant context from existing repo code.
+- If there is a design document as part of this PR, make sure to look at it.
+- Highlight architectural decisions that are difficult to change later, e.g. DynamoDB table design.
+- Flag unnecessary changes, over-engineering, and changes that create an unjustified risk of regression.
+- Highlight any other changes that you deem particularly risky.
+- Flag anything that requires deeper human review.
+
 Follow the source-aware GitHub action rules in the Cortex City review protocol appended below.`;
 export const DEFAULT_REVIEW_PROMPT = DEFAULT_REVIEW_SUMMARY_PROMPT;
 
