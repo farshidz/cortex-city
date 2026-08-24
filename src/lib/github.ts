@@ -715,6 +715,24 @@ export async function getPRMergeCommitSha(prUrl: string): Promise<string> {
   return result.output.trim();
 }
 
+// The merge base is the immutable cutoff between a stacked PR and the entry
+// below it. Capture it before either branch is rewritten so a later serial
+// restack can replay only the upper PR's commits.
+export async function getCommitMergeBaseSha(
+  repoSlug: string,
+  baseSha: string,
+  headSha: string
+): Promise<string> {
+  const slug = repoSlug.trim();
+  if (!slug || !baseSha.trim() || !headSha.trim()) return "";
+
+  const result = await execResult(
+    `gh api repos/${slug}/compare/${baseSha.trim()}...${headSha.trim()} --jq '.merge_base_commit.sha // ""'`
+  );
+  if (!result.ok) return "";
+  return result.output.trim();
+}
+
 // True when `ancestorSha` is reachable from `descendantSha` in the repo's
 // history — GitHub's compare status is "ahead" (or "identical") exactly when
 // the base commit is an ancestor of the head commit. Returns null when GitHub

@@ -393,6 +393,7 @@ test("buildReviewPrompt renders the stack section only for stacked tasks", () =>
               scope: "Slice two",
               state: "open",
               pr_status: "clean",
+              restack_cutoff_sha: "fork-point-2",
             },
           ],
         })
@@ -444,6 +445,7 @@ test("shared templates cover stacked PR instructions", () => {
     "utf-8"
   );
   assert.match(reviewTemplate, /\{\{STACK_SECTION\}\}/);
+  assert.match(reviewTemplate, /\{\{BASE_SYNC_INSTRUCTION\}\}/);
   assert.match(reviewTemplate, /stacked_prs/);
 });
 

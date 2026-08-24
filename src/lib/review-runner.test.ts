@@ -3713,6 +3713,85 @@ test("spawnReviewSummary publishes nothing when the stack slice scope changes mi
   );
 });
 
+test("spawnReviewSummary publishes nothing when a stack review is put on hold mid-run", () => {
+  const workspace = setupRunnerWorkspace("review-runner-stack-hold-race-");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(scenarioFile, {
+    claude: {
+      stdout: JSON.stringify({
+        session_id: "stack-hold-race-session",
+        result:
+          "## Summary\nReviewed before the lower PR merged.\n\n## Agent Status\nAgent status: needs_human_decision",
+        is_error: false,
+      }),
+      sleepMs: 2_000,
+    },
+  });
+  writeJson(ghStateFile, {
+    viewerLogin: "me",
+    prs: {
+      "acme/widget#1": {
+        headRefOid: "abc123",
+        issueComments: [],
+        reviews: [],
+      },
+    },
+  });
+
+  const request = sampleRequest({
+    source: "task",
+    task_id: "task-1",
+    task_title: "Stacked task",
+    task_description: "Build it in slices",
+    task_stack_position: 2,
+    task_stack_size: 3,
+    task_pr_scope: "Slice two",
+    task_review_generation: 0,
+  });
+  const result = runTsxScript(
+    workspace,
+    [
+      `import { readFileSync } from "node:fs";`,
+      `import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary, readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ],
+    `
+      const spawned = await spawnReviewSummary(
+        ${JSON.stringify(request)},
+        { runtime: "claude" }
+      );
+      await patchReviewSummary(${JSON.stringify(request.pr_url)}, {
+        task_review_generation: 1,
+        updated_at: "2026-05-01T00:30:00.000Z",
+      });
+      await spawned.done;
+      console.log(JSON.stringify({
+        persisted: readReviewSummaryMap()[${JSON.stringify(request.pr_url)}],
+        ghState: JSON.parse(readFileSync(${JSON.stringify(ghStateFile)}, "utf-8")),
+      }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.persisted.task_review_generation, 1);
+  assert.equal(result.persisted.summary, "");
+  assert.equal(result.persisted.summary_head_sha, undefined);
+  assert.equal(result.persisted.agent_review_status, undefined);
+  assert.equal(result.persisted.review_status, "pending_summary");
+  assert.equal(result.persisted.review_state, "queued");
+  assert.equal(result.persisted.pending_reviewer_comment_delivery, undefined);
+  assert.equal(result.persisted.reviewer_comment_receipts, undefined);
+  assert.deepEqual(
+    result.ghState.prs["acme/widget#1"].issueComments ?? [],
+    []
+  );
+});
+
 test("spawnReviewSummary keeps a mid-flight change request over the run's verdict", () => {
   const workspace = setupRunnerWorkspace("review-runner-changes-preserve-");
   const scenarioFile = path.join(workspace, "scenario.json");

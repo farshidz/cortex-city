@@ -27,6 +27,55 @@ function sortedByPosition(stack: TaskStackedPR[]): TaskStackedPR[] {
   return [...stack].sort((a, b) => a.position - b.position);
 }
 
+function samePullRequest(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  return (
+    (githubPullRequestIdentity(a) ?? a) ===
+    (githubPullRequestIdentity(b) ?? b)
+  );
+}
+
+export function stackHasSameOrderedEntries(
+  first: TaskStackedPR[],
+  second: Array<Pick<TaskStackedPR, "position" | "pr_url">>
+): boolean {
+  const firstUrls = sortedByPosition(first).map(
+    (entry) => githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url
+  );
+  const secondUrls = [...second]
+    .sort((a, b) => a.position - b.position)
+    .map((entry) => githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url);
+  return (
+    firstUrls.length === secondUrls.length &&
+    firstUrls.every((url, index) => url === secondUrls[index])
+  );
+}
+
+export function lowerStackedPR(
+  stack: TaskStackedPR[],
+  entry: Pick<TaskStackedPR, "position" | "pr_url">
+): TaskStackedPR | undefined {
+  return sortedByPosition(stack)
+    .filter(
+      (candidate) =>
+        candidate.position < entry.position &&
+        !samePullRequest(candidate.pr_url, entry.pr_url)
+    )
+    .at(-1);
+}
+
+export function stackedPRHasValidRestackCutoff(
+  stack: TaskStackedPR[],
+  entry: TaskStackedPR
+): boolean {
+  const lower = lowerStackedPR(stack, entry);
+  return Boolean(
+    entry.restack_cutoff_sha?.trim() &&
+      lower &&
+      samePullRequest(entry.restack_cutoff_lower_pr_url, lower.pr_url)
+  );
+}
+
 export function openStackedPRs(stack: TaskStackedPR[]): TaskStackedPR[] {
   return sortedByPosition(stack).filter((entry) => entry.state === "open");
 }
@@ -39,26 +88,34 @@ export function frontierStackedPR(
   return openStackedPRs(stack)[0];
 }
 
+export function stackMergeTrainStarted(stack: TaskStackedPR[]): boolean {
+  return stack.some((entry) => entry.state === "merged");
+}
+
+// Status follows the same gate as review scheduling. This prevents a stale
+// pre-restack status from presenting a frontier as ready while reviews are
+// paused, and excludes higher entries waiting for their serial turn.
+export function statusRelevantStackedPRs(
+  stack: TaskStackedPR[]
+): TaskStackedPR[] {
+  return reviewableStackedPRs(stack);
+}
+
 export function aggregateStackPRStatus(
   stack: TaskStackedPR[]
 ): PRStatus | undefined {
   const statuses = new Set(
-    openStackedPRs(stack)
+    statusRelevantStackedPRs(stack)
       .map((entry) => entry.pr_status)
       .filter((status): status is PRStatus => Boolean(status))
   );
   return PR_STATUS_SEVERITY.find((status) => statuses.has(status));
 }
 
-// A stack needs restacking when an open entry still bases on the branch of a
-// MERGED PR, or still carries an unverified restack obligation
-// (pending_restack_of): squash merges rewrite the merged commits, so the open
-// entry must be retargeted and rebased — and GitHub must confirm the merged
-// commit is an ancestor of the entry's head — before the obligation clears.
-// Rebasing an entry rewrites its own branch too, which invalidates the merge
-// base of every open entry above it — so the restack set is the whole open
-// suffix starting at the first affected entry, not just the entries directly
-// on merged bases.
+// A serial merge train restacks at most its frontier. Higher entries remain on
+// review hold until the entries below them merge and they become the frontier.
+// The durable pending obligation prevents an automatic GitHub base retarget
+// from being mistaken for a completed rewrite.
 export function stackEntriesRequiringRestack(
   stack: TaskStackedPR[]
 ): TaskStackedPR[] {
@@ -67,18 +124,49 @@ export function stackEntriesRequiringRestack(
       .filter((entry) => entry.state === "merged")
       .map((entry) => entry.branch_name)
   );
-  const open = openStackedPRs(stack);
-  const firstAffected = open.findIndex(
-    (entry) =>
-      mergedBranches.has(entry.base_branch) ||
-      (entry.pending_restack_of?.length ?? 0) > 0
-  );
-  if (firstAffected === -1) return [];
-  return open.slice(firstAffected);
+  const frontier = frontierStackedPR(stack);
+  if (
+    !frontier ||
+    (!mergedBranches.has(frontier.base_branch) &&
+      (frontier.pending_restack_of?.length ?? 0) === 0)
+  ) {
+    return [];
+  }
+  return [frontier];
 }
 
 export function stackRequiresRestack(stack: TaskStackedPR[]): boolean {
   return stackEntriesRequiringRestack(stack).length > 0;
+}
+
+// Rewriting the frontier consumes its own cutoff and invalidates the current
+// frontier-to-successor relationship. Both cutoffs must be durable first.
+export function stackEntriesRequiringCutoffBeforeRestack(
+  stack: TaskStackedPR[]
+): TaskStackedPR[] {
+  if (!stackRequiresRestack(stack)) return [];
+  return openStackedPRs(stack).slice(0, 2);
+}
+
+export function stackEntriesMissingCutoffBeforeRestack(
+  stack: TaskStackedPR[]
+): TaskStackedPR[] {
+  return stackEntriesRequiringCutoffBeforeRestack(stack).filter(
+    (entry) => !stackedPRHasValidRestackCutoff(stack, entry)
+  );
+}
+
+// Initial review fans out to the whole stack. During the merge train, reviews
+// resume only for a frontier whose restack has been verified. A frontier with
+// a pending rewrite has no review target, which lets the restack builder run
+// without waiting behind a review of stale ancestry.
+export function reviewableStackedPRs(
+  stack: TaskStackedPR[]
+): TaskStackedPR[] {
+  const open = openStackedPRs(stack);
+  if (!stackMergeTrainStarted(stack)) return open;
+  if (stackEntriesRequiringRestack(stack).length > 0) return [];
+  return open.length > 0 ? [open[0]] : [];
 }
 
 // A closed, unmerged base is a broken stack, not a restack: the closed PR's
@@ -246,6 +334,17 @@ export function reconcileStackedPRs(
   }
 
   const warnings: string[] = [];
+  if (
+    stackMergeTrainStarted(existing) &&
+    !stackHasSameOrderedEntries(existing, validated.entries)
+  ) {
+    return {
+      stack: sortedByPosition(existing).map((entry) => ({ ...entry })),
+      warnings: [
+        "Rejected stacked_prs relationship change after the merge train started; keeping the tracked stack unchanged",
+      ],
+    };
+  }
   const existingByIdentity = new Map(
     existing.map(
       (entry) => [
@@ -268,6 +367,11 @@ export function reconcileStackedPRs(
       pr_status: tracked?.pr_status,
       last_review_gh_state: tracked?.last_review_gh_state,
       merge_commit_sha: tracked?.merge_commit_sha,
+      restack_cutoff_sha: tracked?.restack_cutoff_sha,
+      restack_cutoff_lower_pr_url: tracked?.restack_cutoff_lower_pr_url,
+      ...(tracked?.review_generation != null
+        ? { review_generation: tracked.review_generation }
+        : {}),
       pending_restack_of: tracked?.pending_restack_of,
     });
   }
@@ -281,5 +385,27 @@ export function reconcileStackedPRs(
     merged.push({ ...entry });
   }
 
-  return { stack: sortedByPosition(merged), warnings };
+  const reconciled = sortedByPosition(merged).map((entry, index, ordered) => {
+    const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
+    const tracked = existingByIdentity.get(identity);
+    const newLower = ordered[index - 1];
+    const oldLowerUrl = tracked?.restack_cutoff_lower_pr_url;
+    if (
+      !tracked?.restack_cutoff_sha ||
+      !newLower ||
+      !samePullRequest(oldLowerUrl, newLower.pr_url)
+    ) {
+      const withoutCutoff = { ...entry };
+      delete withoutCutoff.restack_cutoff_sha;
+      delete withoutCutoff.restack_cutoff_lower_pr_url;
+      return withoutCutoff;
+    }
+    return {
+      ...entry,
+      restack_cutoff_sha: tracked.restack_cutoff_sha,
+      restack_cutoff_lower_pr_url: newLower.pr_url,
+    };
+  });
+
+  return { stack: reconciled, warnings };
 }

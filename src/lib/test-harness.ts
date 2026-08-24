@@ -511,6 +511,7 @@ if (args[0] === "pr" && args[1] === "view") {
     headRefName: pr.headRefName || "",
     headRefOid: pr.headRefOid || "",
     baseRefName: pr.baseRefName || "",
+    baseRefOid: pr.baseRefOid || "",
     title: pr.title || "",
     statusCheckRollup: pr.statusCheckRollup || pr.checks || [],
   });

@@ -167,7 +167,7 @@ test("buildStackSection lists entries bottom-first with stack rules", () => {
   assert.ok(firstIndex >= 0 && secondIndex > firstIndex);
   assert.match(section, /merge status: clean/);
   assert.match(section, /Scope: Slice two/);
-  assert.match(section, /origin\/main/);
+  assert.match(section, /Never merge `main` directly/);
   assert.doesNotMatch(section, /Restack required/);
 });
 
@@ -200,7 +200,7 @@ test("buildStackSection routes closed unmerged bases to a human decision, not a 
   assert.match(section, /Report status `blocked`/);
 });
 
-test("buildStackSection restacks the whole open suffix above a merged entry", () => {
+test("buildStackSection restacks only the serial frontier and holds higher reviews", () => {
   const section = buildStackSection(
     stackedTask([
       {
@@ -218,6 +218,7 @@ test("buildStackSection restacks the whole open suffix above a merged entry", ()
         base_branch: "b1",
         scope: "Slice two",
         state: "open",
+        restack_cutoff_sha: "fork-point-2",
       },
       {
         position: 3,
@@ -231,11 +232,15 @@ test("buildStackSection restacks the whole open suffix above a merged entry", ()
     "main"
   );
   assert.match(section, /### Restack required/);
-  // PR 3 is included even though its own base (b2) is still open.
+  assert.match(section, /restack only the frontier/i);
   assert.match(section, /PR 2 \(https:\/\/github\.com\/acme\/widget\/pull\/2\)/);
-  assert.match(section, /PR 3 \(https:\/\/github\.com\/acme\/widget\/pull\/3\)/);
-  assert.match(section, /record the current tip of every branch/);
-  assert.match(section, /Never restack only the lowest one/);
+  assert.doesNotMatch(
+    section,
+    /A lower PR has merged[^]*PR 3 \(https:\/\/github\.com\/acme\/widget\/pull\/3\)/
+  );
+  assert.match(section, /Reviews are on hold for higher open PRs: PR 3/);
+  assert.match(section, /stored restack cutoff `fork-point-2`/);
+  assert.match(section, /Do not rewrite any higher branch/);
 });
 
 test("buildStackSection flags restack when an open entry bases on a merged branch", () => {
@@ -256,6 +261,7 @@ test("buildStackSection flags restack when an open entry bases on a merged branc
         base_branch: "b1",
         scope: "Slice two",
         state: "open",
+        restack_cutoff_sha: "fork-point-2",
       },
     ]),
     "main"
@@ -264,4 +270,33 @@ test("buildStackSection flags restack when an open entry bases on a merged branc
   assert.match(section, /PR 2 \(https:\/\/github\.com\/acme\/widget\/pull\/2\)/);
   assert.match(section, /--force-with-lease/);
   assert.match(section, /rebase --onto/);
+});
+
+test("buildStackSection blocks rather than guessing a missing restack cutoff", () => {
+  const section = buildStackSection(
+    stackedTask([
+      {
+        position: 1,
+        pr_url: "https://github.com/acme/widget/pull/1",
+        branch_name: "b1",
+        base_branch: "main",
+        scope: "Slice one",
+        state: "merged",
+      },
+      {
+        position: 2,
+        pr_url: "https://github.com/acme/widget/pull/2",
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        state: "open",
+      },
+    ]),
+    "main"
+  );
+
+  assert.match(section, /No durable restack cutoff was captured/);
+  assert.match(section, /Report `blocked`/);
+  assert.doesNotMatch(section, /git rebase --onto/);
+  assert.doesNotMatch(section, /git push --force-with-lease/);
 });

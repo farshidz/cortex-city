@@ -430,6 +430,7 @@ function effectiveReviewRequest(
       task_stack_position: undefined,
       task_stack_size: undefined,
       task_pr_scope: undefined,
+      task_review_generation: undefined,
     };
   }
   return {
@@ -445,6 +446,8 @@ function effectiveReviewRequest(
       request.task_stack_position ?? cached?.task_stack_position,
     task_stack_size: request.task_stack_size ?? cached?.task_stack_size,
     task_pr_scope: request.task_pr_scope ?? cached?.task_pr_scope,
+    task_review_generation:
+      request.task_review_generation ?? cached?.task_review_generation,
     // These decisions do not apply to a PR owned by the signed-in user.
     my_approval_sha: undefined,
     my_changes_requested_sha: undefined,
@@ -465,7 +468,8 @@ function sameReviewContext(a: ReviewRequest, b: ReviewRequest): boolean {
     a.task_plan === b.task_plan &&
     a.task_stack_position === b.task_stack_position &&
     a.task_stack_size === b.task_stack_size &&
-    a.task_pr_scope === b.task_pr_scope
+    a.task_pr_scope === b.task_pr_scope &&
+    a.task_review_generation === b.task_review_generation
   );
 }
 
@@ -479,6 +483,7 @@ function reviewRequestSnapshot(review: ReviewRequest): ReviewRequest {
     task_stack_position: review.task_stack_position,
     task_stack_size: review.task_stack_size,
     task_pr_scope: review.task_pr_scope,
+    task_review_generation: review.task_review_generation,
     label_only: review.label_only,
     self_authored: review.self_authored,
     pr_url: review.pr_url,

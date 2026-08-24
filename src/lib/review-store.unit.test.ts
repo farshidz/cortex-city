@@ -83,10 +83,12 @@ test("stack slice fields persist for task reviews and clear for inbound ones", a
       task_stack_position: 2,
       task_stack_size: 3,
       task_pr_scope: "Slice two",
+      task_review_generation: 4,
     });
     assert.equal(stored.task_stack_position, 2);
     assert.equal(stored.task_stack_size, 3);
     assert.equal(stored.task_pr_scope, "Slice two");
+    assert.equal(stored.task_review_generation, 4);
 
     const inbound = await store.upsertReviewSummary({
       ...sample(inboundUrl),
@@ -94,10 +96,12 @@ test("stack slice fields persist for task reviews and clear for inbound ones", a
       task_stack_position: 2,
       task_stack_size: 3,
       task_pr_scope: "Slice two",
+      task_review_generation: 4,
     });
     assert.equal(inbound.task_stack_position, undefined);
     assert.equal(inbound.task_stack_size, undefined);
     assert.equal(inbound.task_pr_scope, undefined);
+    assert.equal(inbound.task_review_generation, undefined);
   } finally {
     await store.deleteReviewSummary(taskUrl);
     await store.deleteReviewSummary(inboundUrl);

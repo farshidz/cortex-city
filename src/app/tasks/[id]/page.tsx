@@ -47,6 +47,10 @@ import {
   resolveTaskEffort,
   resolveTaskModel,
 } from "@/lib/runtime-config";
+import {
+  reviewableStackedPRs,
+  stackEntriesRequiringRestack,
+} from "@/lib/stacked-prs";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const PERMISSION_LABELS: Record<PermissionMode, string> = {
@@ -280,6 +284,22 @@ export default function TaskDetailPage({
     planExpansion?.taskId === task.id && planExpansion.plan === taskPlan
       ? planExpansion.expanded
       : !isLargeTaskPlan(taskPlan);
+  const reviewableStackUrls = new Set(
+    reviewableStackedPRs(task.stacked_prs || []).map((entry) => entry.pr_url)
+  );
+  const restackRequiredUrls = new Set(
+    stackEntriesRequiringRestack(task.stacked_prs || []).map(
+      (entry) => entry.pr_url
+    )
+  );
+  const mergeTrainStarted = (task.stacked_prs || []).some(
+    (entry) => entry.state === "merged"
+  );
+  const automaticReviewHeld = Boolean(
+    mergeTrainStarted &&
+      task.pr_url &&
+      !reviewableStackUrls.has(task.pr_url)
+  );
 
   return (
     <div className="max-w-3xl space-y-4">
@@ -665,42 +685,61 @@ export default function TaskDetailPage({
               <CardContent className="space-y-3">
                 {[...task.stacked_prs!]
                   .sort((a, b) => a.position - b.position)
-                  .map((entry) => (
-                    <div
-                      key={entry.pr_url}
-                      className="flex flex-wrap items-center gap-2 text-sm"
-                    >
-                      <span className="font-mono text-xs text-muted-foreground">
-                        #{entry.position}
-                      </span>
-                      <a
-                        href={entry.pr_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-medium underline underline-offset-2"
+                  .map((entry) => {
+                    const reviewHeld =
+                      entry.state === "open" &&
+                      mergeTrainStarted &&
+                      !reviewableStackUrls.has(entry.pr_url);
+                    const restackRequired = restackRequiredUrls.has(
+                      entry.pr_url
+                    );
+                    return (
+                      <div
+                        key={entry.pr_url}
+                        className="flex flex-wrap items-center gap-2 text-sm"
                       >
-                        {entry.branch_name}
-                      </a>
-                      <span className="text-xs text-muted-foreground">
-                        → {entry.base_branch}
-                      </span>
-                      <Badge
-                        variant={entry.state === "open" ? "outline" : "secondary"}
-                      >
-                        {entry.state}
-                      </Badge>
-                      {entry.state === "open" && entry.pr_status && (
-                        <Badge variant="outline">
-                          {entry.pr_status.replace("_", " ")}
-                        </Badge>
-                      )}
-                      {entry.scope && (
-                        <span className="w-full text-xs text-muted-foreground">
-                          {entry.scope}
+                        <span className="font-mono text-xs text-muted-foreground">
+                          #{entry.position}
                         </span>
-                      )}
-                    </div>
-                  ))}
+                        <a
+                          href={entry.pr_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-medium underline underline-offset-2"
+                        >
+                          {entry.branch_name}
+                        </a>
+                        <span className="text-xs text-muted-foreground">
+                          → {entry.base_branch}
+                        </span>
+                        <Badge
+                          variant={
+                            entry.state === "open" ? "outline" : "secondary"
+                          }
+                        >
+                          {entry.state}
+                        </Badge>
+                        {restackRequired && (
+                          <Badge variant="outline">restack pending</Badge>
+                        )}
+                        {reviewHeld && !restackRequired && (
+                          <Badge variant="outline">review on hold</Badge>
+                        )}
+                        {entry.state === "open" &&
+                          !reviewHeld &&
+                          entry.pr_status && (
+                            <Badge variant="outline">
+                              {entry.pr_status.replace("_", " ")}
+                            </Badge>
+                          )}
+                        {entry.scope && (
+                          <span className="w-full text-xs text-muted-foreground">
+                            {entry.scope}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
               </CardContent>
             </Card>
           )}
@@ -711,17 +750,28 @@ export default function TaskDetailPage({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <CardTitle className="text-base">Automatic Review</CardTitle>
                   <Badge
-                    variant={taskReviewBadgeVariant(task.automatic_review.state)}
+                    variant={
+                      automaticReviewHeld
+                        ? "outline"
+                        : taskReviewBadgeVariant(task.automatic_review.state)
+                    }
                   >
-                    {taskReviewStateLabel(
-                      task.automatic_review.state,
-                      task.reviewer_agent_enabled !== false
-                    )}
+                    {automaticReviewHeld
+                      ? "Review paused for restack"
+                      : taskReviewStateLabel(
+                          task.automatic_review.state,
+                          task.reviewer_agent_enabled !== false
+                        )}
                   </Badge>
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
-                {task.automatic_review.summary ? (
+                {automaticReviewHeld ? (
+                  <p className="text-sm text-muted-foreground">
+                    Automatic review resumes after the frontier restack is
+                    verified.
+                  </p>
+                ) : task.automatic_review.summary ? (
                   <div className="prose prose-sm dark:prose-invert max-w-none">
                     <ReactMarkdown>{task.automatic_review.summary}</ReactMarkdown>
                   </div>

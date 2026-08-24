@@ -76,9 +76,21 @@ export interface TaskStackedPR {
   last_review_gh_state?: string;
   // Recorded when the worker observes this entry merge (worker-owned).
   merge_commit_sha?: string;
+  // Exact commit at which this PR forked from the entry below it. Deferred
+  // serial restacks use this immutable cutoff instead of the lower branch's
+  // current tip, which may have moved or been force-pushed in the meantime.
+  restack_cutoff_sha?: string;
+  // The adjacent lower PR whose head participated in the merge-base lookup.
+  // A cutoff is valid only while this exact ordered relationship is unchanged.
+  restack_cutoff_lower_pr_url?: string;
+  // Incremented when a lower merge places this PR on hold. Review runs include
+  // the generation in their context so an in-flight pre-hold result cannot be
+  // published or persisted after the transition (worker-owned).
+  review_generation?: number;
   // Merge commits of lower entries whose incorporation into this open entry's
-  // history GitHub has not yet verified. While non-empty the restack stays
-  // required, no matter what base the agent report claims (worker-owned).
+  // history GitHub has not yet verified. Serial merge trains assign the new
+  // obligation only to the next open entry; higher entries wait until they
+  // become the frontier (worker-owned).
   pending_restack_of?: string[];
 }
 
@@ -269,6 +281,9 @@ export interface ReviewRequest {
   task_stack_position?: number;
   task_stack_size?: number;
   task_pr_scope?: string;
+  // Durable stack-entry generation. A lower merge increments it to invalidate
+  // review work that started before the entry entered its hold state.
+  task_review_generation?: number;
   // True when the label was the only discovery criterion that selected this
   // PR. Removing the label can then retire the review without treating an open
   // PR as a failed final-state lookup.

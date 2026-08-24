@@ -44,6 +44,9 @@ import {
   isStackedTask,
   openStackedPRs,
   reconcileStackedPRs,
+  reviewableStackedPRs,
+  stackHasSameOrderedEntries,
+  stackMergeTrainStarted,
 } from "./stacked-prs";
 import {
   buildInterruptedTaskUpdates,
@@ -979,6 +982,7 @@ interface CodexEvent {
 interface LivePullRequest {
   url: string;
   headRefName: string;
+  headRefOid?: string;
   baseRefName: string;
   title: string;
 }
@@ -1018,7 +1022,7 @@ async function inspectLivePullRequest(
         "view",
         prUrl,
         "--json",
-        "url,headRefName,baseRefName,title",
+        "url,headRefName,headRefOid,baseRefName,title",
       ],
       {
         env,
@@ -1037,6 +1041,7 @@ async function inspectLivePullRequest(
     return {
       url,
       headRefName,
+      headRefOid: parsed.headRefOid?.trim() || undefined,
       baseRefName,
       title: parsed.title?.trim() || headRefName,
     };
@@ -1105,6 +1110,17 @@ async function persistLivePullRequestProgress(
       const trackedStack = [...(currentTask.stacked_prs ?? [])].sort(
         (a, b) => a.position - b.position
       );
+      const mergeTrainStarted = stackMergeTrainStarted(trackedStack);
+      const liveOrderedEntries = ordered.map((pullRequest, index) => ({
+        position: index + 1,
+        pr_url: pullRequest.url,
+      }));
+      if (
+        mergeTrainStarted &&
+        !stackHasSameOrderedEntries(trackedStack, liveOrderedEntries)
+      ) {
+        return undefined;
+      }
       const confirmedSinglePrUrl =
         currentTask.pr_url &&
         !currentTask.pr_url_provisional &&
@@ -1129,9 +1145,43 @@ async function persistLivePullRequestProgress(
           .map((entry) => githubPullRequestIdentity(entry.pr_url))
           .filter((identity): identity is string => Boolean(identity))
       );
+      const trackedByIdentity = new Map(
+        trackedStack.map((entry) => [
+          githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url,
+          entry,
+        ])
+      );
       const stack: TaskStackedPR[] = [];
+      const withCutoffForCurrentAdjacency = (
+        entry: TaskStackedPR
+      ): TaskStackedPR => {
+        const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
+        const tracked = trackedByIdentity.get(identity);
+        const lower = stack.at(-1);
+        const priorLowerUrl = tracked?.restack_cutoff_lower_pr_url;
+        const sameLower = Boolean(
+          lower &&
+            priorLowerUrl &&
+            (githubPullRequestIdentity(lower.pr_url) ?? lower.pr_url) ===
+              (githubPullRequestIdentity(priorLowerUrl) ?? priorLowerUrl)
+        );
+        const cutoff =
+          sameLower && tracked?.restack_cutoff_sha
+            ? tracked.restack_cutoff_sha
+            : undefined;
+        const withoutCutoff = { ...entry };
+        delete withoutCutoff.restack_cutoff_sha;
+        delete withoutCutoff.restack_cutoff_lower_pr_url;
+        return cutoff && lower
+          ? {
+              ...withoutCutoff,
+              restack_cutoff_sha: cutoff,
+              restack_cutoff_lower_pr_url: lower.pr_url,
+            }
+          : withoutCutoff;
+      };
       const appendNewEntry = (pullRequest: LivePullRequest, identity: string) => {
-        stack.push({
+        const entry: TaskStackedPR = {
           position: stack.length + 1,
           pr_url: pullRequest.url,
           branch_name: pullRequest.headRefName,
@@ -1142,7 +1192,8 @@ async function persistLivePullRequestProgress(
             confirmedSinglePrIdentity && identity === confirmedSinglePrIdentity
               ? undefined
               : true,
-        });
+        };
+        stack.push(withCutoffForCurrentAdjacency(entry));
       };
 
       let nextOrderedIndex = 0;
@@ -1152,7 +1203,12 @@ async function persistLivePullRequestProgress(
           ? orderedIndexByIdentity.get(identity)
           : undefined;
         if (orderedIndex === undefined) {
-          stack.push({ ...tracked, position: stack.length + 1 });
+          stack.push(
+            withCutoffForCurrentAdjacency({
+              ...tracked,
+              position: stack.length + 1,
+            })
+          );
           continue;
         }
         if (orderedIndex < nextOrderedIndex) return undefined;
@@ -1165,14 +1221,16 @@ async function persistLivePullRequestProgress(
           nextOrderedIndex += 1;
         }
         const pullRequest = orderedWithIdentity[orderedIndex].pullRequest;
-        stack.push({
-          ...tracked,
-          position: stack.length + 1,
-          pr_url: pullRequest.url,
-          branch_name: pullRequest.headRefName,
-          base_branch: pullRequest.baseRefName,
-          scope: tracked.scope || pullRequest.title,
-        });
+        stack.push(
+          withCutoffForCurrentAdjacency({
+            ...tracked,
+            position: stack.length + 1,
+            pr_url: pullRequest.url,
+            branch_name: pullRequest.headRefName,
+            base_branch: pullRequest.baseRefName,
+            scope: tracked.scope || pullRequest.title,
+          })
+        );
         nextOrderedIndex = orderedIndex + 1;
       }
       while (nextOrderedIndex < orderedWithIdentity.length) {
@@ -1543,11 +1601,10 @@ function preRunCommentIdsFor(
 function trackedCommentSnapshotUrls(task: Task): string[] {
   const urls = new Set<string>();
   if (isStackedTask(task)) {
-    for (const entry of openStackedPRs(task.stacked_prs)) {
+    for (const entry of reviewableStackedPRs(task.stacked_prs)) {
       urls.add(entry.pr_url);
     }
-  }
-  if (task.pr_url) urls.add(task.pr_url);
+  } else if (task.pr_url) urls.add(task.pr_url);
   return [...urls];
 }
 
@@ -1845,8 +1902,7 @@ async function handleRunComplete(
       if (shouldApplySuccessSideEffects && runReason !== "manual_instruction") {
         const entries =
           updates.stacked_prs ?? stackAfterRun.map((entry) => ({ ...entry }));
-        for (const entry of entries) {
-          if (entry.state !== "open") continue;
+        for (const entry of reviewableStackedPRs(entries)) {
           const postRunCommentIds = await getSubmittedCommentIds(entry.pr_url);
           const pre = preRunCommentIdsFor(preRunCommentIds, entry.pr_url);
           const newComments = postRunCommentIds.filter((id) => !pre.includes(id));
