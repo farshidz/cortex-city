@@ -759,6 +759,8 @@ interface StackedDepsOptions {
   stateHashes?: Record<string, string>;
   baseBranches?: Record<string, string>;
   mergeCommitShas?: Record<string, string>;
+  // Keyed as "<base>...<head>".
+  mergeBases?: Record<string, string>;
   // Keyed as "<ancestor>...<descendant>".
   ancestors?: Record<string, boolean | null>;
   reviewMap?: Record<string, ReviewSummary>;
@@ -774,6 +776,8 @@ function makeStackedDeps(options: StackedDepsOptions) {
   const deps: WorkerRuntimeDeps = {
     deleteReviewSummary: async () => {},
     deleteTask: async () => {},
+    getCommitMergeBaseSha: async (_repoSlug, baseSha, headSha) =>
+      options.mergeBases?.[`${baseSha}...${headSha}`] || "",
     getPRBaseBranch: async (prUrl) => options.baseBranches?.[prUrl] || "",
     getPRHeadSha: async (prUrl) => options.headShas?.[prUrl] || "",
     getPRMergeCommitSha: async (prUrl) => options.mergeCommitShas?.[prUrl] ?? "",
@@ -949,7 +953,7 @@ test("pollOnce launches a restack review run when a lower stack PR merges", asyn
   // The mirror follows the new frontier entry.
   assert.equal(tasks[0].pr_url, STACK_PR_2);
   assert.equal(tasks[0].branch_name, "b2");
-  assert.equal(tasks[0].pr_status, "clean");
+  assert.equal(tasks[0].pr_status, undefined);
   assert.equal(tasks[0].current_run_mode, "review");
 });
 
@@ -1263,7 +1267,7 @@ test("pollOnce keeps forcing the decision run when it completes without a blocke
   assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
 });
 
-test("pollOnce records the restack obligation on every open entry above a merge", async () => {
+test("pollOnce records the restack obligation only on the next open entry", async () => {
   const task = sample({
     id: "task-1",
     status: "in_review",
@@ -1303,9 +1307,99 @@ test("pollOnce records the restack obligation on every open entry above a merge"
   const stack = tasks[0].stacked_prs!;
   assert.equal(stack[0].state, "merged");
   assert.equal(stack[0].merge_commit_sha, "squash-1");
-  // Both open entries above the merge carry the durable obligation.
+  // The frontier carries the durable obligation. PR 3 stays on review hold
+  // and receives its own obligation only after PR 2 merges.
   assert.deepEqual(stack[1].pending_restack_of, ["squash-1"]);
-  assert.deepEqual(stack[2].pending_restack_of, ["squash-1"]);
+  assert.equal(stack[1].pr_status, undefined);
+  assert.equal(stack[2].pending_restack_of, undefined);
+  assert.equal(tasks[0].pr_status, undefined);
+});
+
+test("pollOnce captures adjacent merge bases as deferred restack cutoffs", async () => {
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_1,
+    branch_name: "b1",
+    stacked_prs: [
+      stackEntry({ last_review_gh_state: "hash-1" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        last_review_gh_state: "hash-2",
+      }),
+      stackEntry({
+        position: 3,
+        pr_url: STACK_PR_3,
+        branch_name: "b3",
+        base_branch: "b2",
+        scope: "Slice three",
+        last_review_gh_state: "hash-3",
+      }),
+    ],
+  });
+  const reviewFor = (
+    prUrl: string,
+    position: number,
+    headSha: string
+  ): ReviewSummary => ({
+    source: "task",
+    task_id: "task-1",
+    task_title: "t",
+    task_description: "",
+    task_plan: undefined,
+    task_stack_position: position,
+    task_stack_size: 3,
+    task_pr_scope: `Slice ${position}`,
+    pr_url: prUrl,
+    pr_number: position,
+    repo_slug: "acme/widget",
+    title: `t (stack ${position}/3)`,
+    author: "",
+    head_sha: headSha,
+    created_at: "",
+    updated_at: "",
+    summary: "Reviewed and fine",
+    summary_head_sha: headSha,
+    generated_at: "2026-05-01T00:00:00.000Z",
+    review_status: "up_to_date",
+    review_state: "reviewed",
+  });
+  const { deps, tasks } = makeStackedDeps({
+    tasks: [task],
+    prStatuses: {
+      [STACK_PR_1]: "clean",
+      [STACK_PR_2]: "clean",
+      [STACK_PR_3]: "clean",
+    },
+    headShas: {
+      [STACK_PR_1]: "head-1",
+      [STACK_PR_2]: "head-2",
+      [STACK_PR_3]: "head-3",
+    },
+    stateHashes: {
+      [STACK_PR_1]: "hash-1",
+      [STACK_PR_2]: "hash-2",
+      [STACK_PR_3]: "hash-3",
+    },
+    mergeBases: {
+      "head-1...head-2": "fork-2",
+      "head-2...head-3": "fork-3",
+    },
+    reviewMap: {
+      [STACK_PR_1]: reviewFor(STACK_PR_1, 1, "head-1"),
+      [STACK_PR_2]: reviewFor(STACK_PR_2, 2, "head-2"),
+      [STACK_PR_3]: reviewFor(STACK_PR_3, 3, "head-3"),
+    },
+  });
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.equal(tasks[0].stacked_prs?.[1].restack_cutoff_sha, "fork-2");
+  assert.equal(tasks[0].stacked_prs?.[2].restack_cutoff_sha, "fork-3");
 });
 
 test("pollOnce keeps the restack forced until GitHub verifies the rewrite", async () => {
@@ -1736,6 +1830,80 @@ test("pollOnce queues per-entry stack reviews with slice context", async () => {
   assert.equal(second?.task_stack_position, 2);
   assert.equal(second?.task_pr_scope, "Slice two");
   assert.equal(second?.head_sha, "head-2");
+});
+
+test("pollOnce holds every automatic review while the frontier needs restacking", async () => {
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_2,
+    branch_name: "b2",
+    stacked_prs: [
+      stackEntry({ state: "merged", merge_commit_sha: "squash-1" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "main",
+        scope: "Slice two",
+        pending_restack_of: ["squash-1"],
+      }),
+      stackEntry({
+        position: 3,
+        pr_url: STACK_PR_3,
+        branch_name: "b3",
+        base_branch: "b2",
+        scope: "Slice three",
+      }),
+    ],
+  });
+  const { deps, launched, upserted } = makeStackedDeps({
+    tasks: [task],
+    prStatuses: { [STACK_PR_2]: "clean", [STACK_PR_3]: "checks_failing" },
+    headShas: { [STACK_PR_2]: "head-2", [STACK_PR_3]: "head-3" },
+    ancestors: { "squash-1...head-2": false },
+  });
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
+  assert.deepEqual(upserted, []);
+});
+
+test("pollOnce resumes automatic review only for a verified frontier", async () => {
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_2,
+    branch_name: "b2",
+    stacked_prs: [
+      stackEntry({ state: "merged", merge_commit_sha: "squash-1" }),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "main",
+        scope: "Slice two",
+      }),
+      stackEntry({
+        position: 3,
+        pr_url: STACK_PR_3,
+        branch_name: "b3",
+        base_branch: "b2",
+        scope: "Slice three",
+      }),
+    ],
+  });
+  const { deps, launched, upserted } = makeStackedDeps({
+    tasks: [task],
+    prStatuses: { [STACK_PR_2]: "clean", [STACK_PR_3]: "checks_failing" },
+    headShas: { [STACK_PR_2]: "head-2", [STACK_PR_3]: "head-3" },
+  });
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(launched, []);
+  assert.deepEqual(upserted.map((review) => review.pr_url), [STACK_PR_2]);
 });
 
 test("pollOnce skips automatic reviews when automatic review is disabled", async () => {

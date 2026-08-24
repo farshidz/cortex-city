@@ -444,6 +444,7 @@ test("shared templates cover stacked PR instructions", () => {
     "utf-8"
   );
   assert.match(reviewTemplate, /\{\{STACK_SECTION\}\}/);
+  assert.match(reviewTemplate, /\{\{BASE_SYNC_INSTRUCTION\}\}/);
   assert.match(reviewTemplate, /stacked_prs/);
 });
 

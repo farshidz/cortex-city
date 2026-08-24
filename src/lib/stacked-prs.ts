@@ -39,26 +39,34 @@ export function frontierStackedPR(
   return openStackedPRs(stack)[0];
 }
 
+export function stackMergeTrainStarted(stack: TaskStackedPR[]): boolean {
+  return stack.some((entry) => entry.state === "merged");
+}
+
+// Status follows the same gate as review scheduling. This prevents a stale
+// pre-restack status from presenting a frontier as ready while reviews are
+// paused, and excludes higher entries waiting for their serial turn.
+export function statusRelevantStackedPRs(
+  stack: TaskStackedPR[]
+): TaskStackedPR[] {
+  return reviewableStackedPRs(stack);
+}
+
 export function aggregateStackPRStatus(
   stack: TaskStackedPR[]
 ): PRStatus | undefined {
   const statuses = new Set(
-    openStackedPRs(stack)
+    statusRelevantStackedPRs(stack)
       .map((entry) => entry.pr_status)
       .filter((status): status is PRStatus => Boolean(status))
   );
   return PR_STATUS_SEVERITY.find((status) => statuses.has(status));
 }
 
-// A stack needs restacking when an open entry still bases on the branch of a
-// MERGED PR, or still carries an unverified restack obligation
-// (pending_restack_of): squash merges rewrite the merged commits, so the open
-// entry must be retargeted and rebased — and GitHub must confirm the merged
-// commit is an ancestor of the entry's head — before the obligation clears.
-// Rebasing an entry rewrites its own branch too, which invalidates the merge
-// base of every open entry above it — so the restack set is the whole open
-// suffix starting at the first affected entry, not just the entries directly
-// on merged bases.
+// A serial merge train restacks at most its frontier. Higher entries remain on
+// review hold until the entries below them merge and they become the frontier.
+// The durable pending obligation prevents an automatic GitHub base retarget
+// from being mistaken for a completed rewrite.
 export function stackEntriesRequiringRestack(
   stack: TaskStackedPR[]
 ): TaskStackedPR[] {
@@ -67,18 +75,32 @@ export function stackEntriesRequiringRestack(
       .filter((entry) => entry.state === "merged")
       .map((entry) => entry.branch_name)
   );
-  const open = openStackedPRs(stack);
-  const firstAffected = open.findIndex(
-    (entry) =>
-      mergedBranches.has(entry.base_branch) ||
-      (entry.pending_restack_of?.length ?? 0) > 0
-  );
-  if (firstAffected === -1) return [];
-  return open.slice(firstAffected);
+  const frontier = frontierStackedPR(stack);
+  if (
+    !frontier ||
+    (!mergedBranches.has(frontier.base_branch) &&
+      (frontier.pending_restack_of?.length ?? 0) === 0)
+  ) {
+    return [];
+  }
+  return [frontier];
 }
 
 export function stackRequiresRestack(stack: TaskStackedPR[]): boolean {
   return stackEntriesRequiringRestack(stack).length > 0;
+}
+
+// Initial review fans out to the whole stack. During the merge train, reviews
+// resume only for a frontier whose restack has been verified. A frontier with
+// a pending rewrite has no review target, which lets the restack builder run
+// without waiting behind a review of stale ancestry.
+export function reviewableStackedPRs(
+  stack: TaskStackedPR[]
+): TaskStackedPR[] {
+  const open = openStackedPRs(stack);
+  if (!stackMergeTrainStarted(stack)) return open;
+  if (stackEntriesRequiringRestack(stack).length > 0) return [];
+  return open.length > 0 ? [open[0]] : [];
 }
 
 // A closed, unmerged base is a broken stack, not a restack: the closed PR's
@@ -268,6 +290,7 @@ export function reconcileStackedPRs(
       pr_status: tracked?.pr_status,
       last_review_gh_state: tracked?.last_review_gh_state,
       merge_commit_sha: tracked?.merge_commit_sha,
+      restack_cutoff_sha: tracked?.restack_cutoff_sha,
       pending_restack_of: tracked?.pending_restack_of,
     });
   }

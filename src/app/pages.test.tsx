@@ -1643,6 +1643,83 @@ test("task detail surfaces task-owned review verdicts without self-approval acti
   });
 });
 
+test("task detail marks serial restack and review holds without stale readiness", () => {
+  const output = runRenderScript(`
+    const originalData = globalThis.__SWR_DATA__;
+    const stackedTask = {
+      ...task,
+      id: "task-serial-stack",
+      status: "in_review",
+      pr_url: "https://github.com/acme/widget/pull/2",
+      pr_status: undefined,
+      stacked_prs: [
+        {
+          position: 1,
+          pr_url: "https://github.com/acme/widget/pull/1",
+          branch_name: "slice-one",
+          base_branch: "main",
+          scope: "Slice one",
+          state: "merged",
+        },
+        {
+          position: 2,
+          pr_url: "https://github.com/acme/widget/pull/2",
+          branch_name: "slice-two",
+          base_branch: "main",
+          scope: "Slice two",
+          state: "open",
+          pr_status: "clean",
+          pending_restack_of: ["squash-1"],
+        },
+        {
+          position: 3,
+          pr_url: "https://github.com/acme/widget/pull/3",
+          branch_name: "slice-three",
+          base_branch: "slice-two",
+          scope: "Slice three",
+          state: "open",
+          pr_status: "checks_failing",
+        },
+      ],
+      automatic_review: {
+        state: "ready_to_approve",
+        status: "ready_for_human_approval",
+        summary: "Stale approval readiness",
+        head_sha: "old-head-2",
+      },
+    };
+    globalThis.__SWR_DATA__ = {
+      ...originalData,
+      "/api/tasks/task-serial-stack": stackedTask,
+    };
+
+    const html = await renderPage(
+      "./src/app/tasks/[id]/page.tsx",
+      { params: Promise.resolve({ id: "task-serial-stack" }) }
+    );
+    globalThis.__SWR_DATA__ = originalData;
+    console.log(JSON.stringify({
+      hasRestackPending: html.includes("restack pending"),
+      hasReviewHold: html.includes("review on hold"),
+      hasPausedReview: html.includes("Review paused for restack"),
+      hasResumeExplanation: html.includes(
+        "Automatic review resumes after the frontier restack is"
+      ),
+      showsStaleReadiness: html.includes("Stale approval readiness"),
+      showsHeldChecks: html.includes("checks failing"),
+    }));
+  `);
+
+  assert.deepEqual(JSON.parse(output[0]), {
+    hasRestackPending: true,
+    hasReviewHold: true,
+    hasPausedReview: true,
+    hasResumeExplanation: true,
+    showsStaleReadiness: false,
+    showsHeldChecks: false,
+  });
+});
+
 test("root layout renders navigation around page content", () => {
   const output = runRenderScript(`
     process.env.NEXT_PUBLIC_CORTEX_COMMIT_SHA = "1234567890abcdef";

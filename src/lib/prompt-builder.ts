@@ -5,8 +5,10 @@ import { readConfig, readTasks } from "./store";
 import { resolvePromptPath } from "./agent-files";
 import {
   isStackedTask,
+  openStackedPRs,
   stackEntriesOnClosedBase,
   stackEntriesRequiringRestack,
+  stackRequiresRestack,
 } from "./stacked-prs";
 
 const PROMPTS_DIR = path.join(process.cwd(), "prompts");
@@ -147,12 +149,17 @@ export function buildReviewPrompt(task: Task, options?: ReviewPromptOptions): st
   const reviewContext = agentConfig
     ? loadPromptFile(resolvePromptPath(agentConfig, task.agent, "review"))
     : undefined;
+  const restackRequired = isStackedTask(task) && stackRequiresRestack(task.stacked_prs);
+  const baseSyncInstruction = restackRequired
+    ? `Immediately run \`git fetch origin\`. Follow the Restack required protocol above; do not merge \`origin/${baseBranch}\` into the branch before rebasing.`
+    : `Immediately run \`git fetch origin\` and merge \`origin/${baseBranch}\` into your working branch. Do not rebase. If GitHub reports conflicts, resolve them now before moving on.`;
 
   return template
     .replace("{{PR_URL}}", task.pr_url || "Unknown")
     .replace("{{AGENT_NAME}}", agentName)
     .replace("{{MERGE_STATUS}}", describeMergeStatus(options?.prStatus || task.pr_status, baseBranch))
     .replace(/\{\{BASE_BRANCH\}\}/g, baseBranch)
+    .replace("{{BASE_SYNC_INSTRUCTION}}", baseSyncInstruction)
     .replace("{{STACK_SECTION}}", buildStackSection(task, baseBranch))
     .replace(
       "{{REPO_CONTEXT_SECTION}}",
@@ -183,6 +190,10 @@ function buildStackSection(task: Task, baseBranch: string): string {
   if (!isStackedTask(task)) return "";
   const stack = [...task.stacked_prs].sort((a, b) => a.position - b.position);
   const restackEntries = stackEntriesRequiringRestack(stack);
+  const openEntries = openStackedPRs(stack);
+  const mergeTrainStarted = stack.some((entry) => entry.state === "merged");
+  const frontier = openEntries[0];
+  const heldEntries = mergeTrainStarted ? openEntries.slice(1) : [];
 
   const lines = [
     "## PR Stack",
@@ -191,28 +202,40 @@ function buildStackSection(task: Task, baseBranch: string): string {
     ...stack.map((entry) => describeStackEntry(entry)),
     "",
     "### Stack rules",
-    `- Instruction 1 above (merging \`origin/${baseBranch}\`) applies only to the bottom open PR of the stack. Never merge \`${baseBranch}\` directly into a higher stack branch.`,
-    "- Inspect all three feedback surfaces on EVERY open stack PR, not just the bottom one. Address feedback on the branch of the PR where it was left: check out that branch, commit, and push it.",
+    mergeTrainStarted
+      ? `- The serial merge train has started. ${frontier ? `PR ${frontier.position} (${frontier.pr_url}) is the frontier.` : "No open frontier remains."}`
+      : "- The stack is in its initial review phase. Inspect all three feedback surfaces on EVERY open stack PR and address feedback on the branch where it was left.",
+    ...(mergeTrainStarted
+      ? [
+          `- Inspect and address feedback only on the frontier after its restack is verified. Reviews are on hold for higher open PRs${heldEntries.length > 0 ? `: ${heldEntries.map((entry) => `PR ${entry.position}`).join(", ")}` : "."}`,
+        ]
+      : []),
+    `- The generic base sync instruction applies only when no restack is pending. Never merge \`${baseBranch}\` directly into a higher stack branch.`,
     "- Do not merge a lower stack branch into a higher one just because the lower branch gained commits. GitHub diffs each PR against its merge base, so upper PRs tolerate that drift until restack time.",
     "- Never open an additional PR or close an existing stack PR unless feedback explicitly asks for it.",
     "- In your final JSON, report the full current stack under `stacked_prs` (every entry, including merged or closed ones) with each entry's current branch, base, and scope.",
   ];
 
   if (restackEntries.length > 0) {
+    const entry = restackEntries[0];
+    const cutoff = entry.restack_cutoff_sha?.trim();
+    const lowerEntry = [...stack]
+      .filter((candidate) => candidate.position < entry.position)
+      .sort((a, b) => b.position - a.position)[0];
+    const newBase = lowerEntry?.base_branch || baseBranch;
     lines.push(
       "",
       "### Restack required",
-      `A PR below these open PRs has MERGED, so every open PR from the first affected one upward must be restacked in one pass: ${restackEntries
-        .map((entry) => `PR ${entry.position} (${entry.pr_url})`)
-        .join(", ")}.`,
-      "Rebasing a branch rewrites it, which breaks the merge base of every stack branch above it — so restack ALL of the PRs listed above, bottom-up, in this session. Never restack only the lowest one.",
+      `A lower PR has merged. Restack only the frontier, PR ${entry.position} (${entry.pr_url}), in this session. Do not rewrite any higher branch; its review remains on hold until it becomes the frontier.`,
+      "This restack section overrides feedback Instructions 2–7 below. Perform the restack and report it; the worker will verify the rewrite and resume review afterward.",
       "1. `git fetch origin` and confirm which stack PRs GitHub reports as merged.",
-      "2. Before rewriting anything, record the current tip of every branch you are about to rebase (for example `git rev-parse origin/<branch>` for each listed PR's branch and its old base). The entry above each rewritten branch must be rebased relative to that OLD tip, not the rewritten one.",
-      `3. For the lowest listed PR: retarget its base to the merged PR's own base (\`gh pr edit <number> --base <new-base>\`) unless GitHub already retargeted it after the old base branch was deleted, then \`git rebase --onto origin/<new-base> <old-base-tip> <branch>\` so the already-merged commits drop out. Squash merges rewrite merged commits, so the merged content must come from the new base — never keep the old stack commits.`,
-      "4. For each PR above it, in order: rebase its branch onto the freshly rewritten branch below, using the OLD tip you recorded in step 2 as the `--onto` upstream boundary: `git rebase --onto <rewritten-lower-branch> <old-lower-tip> <branch>`.",
-      "5. Resolve any rebase conflicts in this session.",
-      "6. Push each restacked branch with `git push --force-with-lease`. This restack is the ONLY situation where rebasing and force-pushing are allowed; the no-rebase rule stays in force everywhere else.",
-      "7. The worker independently verifies on GitHub that each merged slice's merge commit is an ancestor of every open PR above it, and keeps the restack flagged until that verification passes — so the branches must actually be rewritten and pushed; retargeting the PR base alone does not complete a restack."
+      cutoff
+        ? `2. Use the stored restack cutoff \`${cutoff}\`. It is the fork point that separates this PR's commits from the lower slice.`
+        : "2. No restack cutoff was captured. Determine the exact fork point that separates this PR's commits from the lower slice. If it cannot be established safely, report `blocked` instead of guessing.",
+      `3. Retarget PR ${entry.position} to \`${newBase}\` (\`gh pr edit <number> --base ${newBase}\`) unless GitHub already did so, then run \`git rebase --onto origin/${newBase} ${cutoff || "<verified-fork-point>"} ${entry.branch_name}\`.`,
+      "4. Resolve any conflicts in this session while preserving only this PR's intended slice.",
+      `5. Push \`${entry.branch_name}\` with \`git push --force-with-lease\`. This is the only branch that may be force-pushed in this run.`,
+      "6. The worker independently verifies that the lower merge commit is an ancestor of the frontier head. Retargeting alone does not complete the restack."
     );
   }
 

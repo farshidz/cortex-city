@@ -44,6 +44,7 @@ import {
   isStackedTask,
   openStackedPRs,
   reconcileStackedPRs,
+  reviewableStackedPRs,
 } from "./stacked-prs";
 import {
   buildInterruptedTaskUpdates,
@@ -979,7 +980,9 @@ interface CodexEvent {
 interface LivePullRequest {
   url: string;
   headRefName: string;
+  headRefOid?: string;
   baseRefName: string;
+  baseRefOid?: string;
   title: string;
 }
 
@@ -1018,7 +1021,7 @@ async function inspectLivePullRequest(
         "view",
         prUrl,
         "--json",
-        "url,headRefName,baseRefName,title",
+        "url,headRefName,headRefOid,baseRefName,baseRefOid,title",
       ],
       {
         env,
@@ -1037,7 +1040,9 @@ async function inspectLivePullRequest(
     return {
       url,
       headRefName,
+      headRefOid: parsed.headRefOid?.trim() || undefined,
       baseRefName,
+      baseRefOid: parsed.baseRefOid?.trim() || undefined,
       title: parsed.title?.trim() || headRefName,
     };
   } catch (error) {
@@ -1138,6 +1143,9 @@ async function persistLivePullRequestProgress(
           base_branch: pullRequest.baseRefName,
           scope: pullRequest.title,
           state: "open",
+          ...(pullRequest.baseRefOid
+            ? { restack_cutoff_sha: pullRequest.baseRefOid }
+            : {}),
           provisional:
             confirmedSinglePrIdentity && identity === confirmedSinglePrIdentity
               ? undefined
@@ -1172,6 +1180,12 @@ async function persistLivePullRequestProgress(
           branch_name: pullRequest.headRefName,
           base_branch: pullRequest.baseRefName,
           scope: tracked.scope || pullRequest.title,
+          ...(tracked.restack_cutoff_sha || pullRequest.baseRefOid
+            ? {
+                restack_cutoff_sha:
+                  tracked.restack_cutoff_sha || pullRequest.baseRefOid,
+              }
+            : {}),
         });
         nextOrderedIndex = orderedIndex + 1;
       }
@@ -1543,11 +1557,10 @@ function preRunCommentIdsFor(
 function trackedCommentSnapshotUrls(task: Task): string[] {
   const urls = new Set<string>();
   if (isStackedTask(task)) {
-    for (const entry of openStackedPRs(task.stacked_prs)) {
+    for (const entry of reviewableStackedPRs(task.stacked_prs)) {
       urls.add(entry.pr_url);
     }
-  }
-  if (task.pr_url) urls.add(task.pr_url);
+  } else if (task.pr_url) urls.add(task.pr_url);
   return [...urls];
 }
 
@@ -1845,8 +1858,7 @@ async function handleRunComplete(
       if (shouldApplySuccessSideEffects && runReason !== "manual_instruction") {
         const entries =
           updates.stacked_prs ?? stackAfterRun.map((entry) => ({ ...entry }));
-        for (const entry of entries) {
-          if (entry.state !== "open") continue;
+        for (const entry of reviewableStackedPRs(entries)) {
           const postRunCommentIds = await getSubmittedCommentIds(entry.pr_url);
           const pre = preRunCommentIdsFor(preRunCommentIds, entry.pr_url);
           const newComments = postRunCommentIds.filter((id) => !pre.includes(id));

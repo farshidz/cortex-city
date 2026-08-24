@@ -326,7 +326,7 @@ test("handleRunComplete records stacked PRs, mirrors the frontier, and captures 
   assert.equal(task.last_review_gh_state, undefined);
 });
 
-test("handleRunComplete keeps worker-owned stack state and re-mirrors after restack", () => {
+test("handleRunComplete re-mirrors after restack without advancing a held review hash", () => {
   const { workspace } = setupWorkspace();
   const ghStateFile = path.join(workspace, "gh-state.json");
   writeJson(ghStateFile, {
@@ -368,6 +368,8 @@ test("handleRunComplete keeps worker-owned stack state and re-mirrors after rest
               base_branch: "agent/stack",
               scope: "Slice two",
               state: "open",
+              last_review_gh_state: "old-review-hash",
+              pending_restack_of: ["merge-21"],
             },
           ],
         })
@@ -444,7 +446,8 @@ test("handleRunComplete keeps worker-owned stack state and re-mirrors after rest
   // A blank reported scope falls back to the tracked one.
   assert.equal(task.stacked_prs[1].scope, "Slice two");
   assert.equal(task.pr_url, "https://github.com/farshidz/marqo-cortex-city/pull/22");
-  assert.match(task.stacked_prs[1].last_review_gh_state, /^[a-f0-9]{16}$/);
+  assert.equal(task.stacked_prs[1].last_review_gh_state, "old-review-hash");
+  assert.deepEqual(task.stacked_prs[1].pending_restack_of, ["merge-21"]);
 });
 
 test("handleRunComplete creates Claude follow-up tasks and updates review metadata", () => {
@@ -841,13 +844,17 @@ test("initial-mode manual instructions expose a growing PR stack before Codex ex
       "farshidz/marqo-cortex-city#31": {
         url: firstPrUrl,
         headRefName: "agent/live-stack",
+        headRefOid: "head-31",
         baseRefName: "main",
+        baseRefOid: "main-head",
         title: "Add live PR discovery",
       },
       "farshidz/marqo-cortex-city#32": {
         url: secondPrUrl,
         headRefName: "agent/live-stack-2",
+        headRefOid: "head-32",
         baseRefName: "agent/live-stack",
+        baseRefOid: "head-31",
         title: "Show live stacks in the task UI",
       },
     },
@@ -949,6 +956,7 @@ test("initial-mode manual instructions expose a growing PR stack before Codex ex
       (entry: NonNullable<Task["stacked_prs"]>[number]) => entry.provisional
     )
   );
+  assert.equal(result.duringRun.stacked_prs[1].restack_cutoff_sha, "head-31");
   assert.deepEqual(
     result.duringRun.stacked_prs.map((entry: NonNullable<Task["stacked_prs"]>[number]) => ({
       position: entry.position,

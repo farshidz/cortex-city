@@ -75,7 +75,7 @@ function runGithubScript(
     [
       "--eval",
       [
-        `import { deliverReviewerComment, getPRHeadSha, getPRStateHash, getSubmittedCommentIds, getLatestForeignCommentAt, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { deliverReviewerComment, getCommitMergeBaseSha, getPRHeadSha, getPRStateHash, getSubmittedCommentIds, getLatestForeignCommentAt, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
         "(async () => {",
         body,
         "})().catch((error) => {",
@@ -236,6 +236,30 @@ test("getPRHeadSha returns an empty string when gh cannot resolve the PR", () =>
   );
 
   assert.equal(headSha, "");
+});
+
+test("getCommitMergeBaseSha returns the adjacent stack fork point", () => {
+  const workspace = setupWorkspace();
+  const responses = {
+    'api repos/acme/widget/compare/lower-head...upper-head --jq .merge_base_commit.sha // ""': {
+      stdout: "fork-point\n",
+    },
+  };
+
+  const mergeBase = runGithubScript(
+    workspace,
+    responses,
+    `
+      const mergeBase = await getCommitMergeBaseSha(
+        "acme/widget",
+        "lower-head",
+        "upper-head"
+      );
+      console.log(JSON.stringify(mergeBase));
+    `
+  );
+
+  assert.equal(mergeBase, "fork-point");
 });
 
 test("getPRStateHash fails closed when a GitHub review fetch is throttled", () => {

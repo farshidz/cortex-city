@@ -76,9 +76,14 @@ export interface TaskStackedPR {
   last_review_gh_state?: string;
   // Recorded when the worker observes this entry merge (worker-owned).
   merge_commit_sha?: string;
+  // Exact commit at which this PR forked from the entry below it. Deferred
+  // serial restacks use this immutable cutoff instead of the lower branch's
+  // current tip, which may have moved or been force-pushed in the meantime.
+  restack_cutoff_sha?: string;
   // Merge commits of lower entries whose incorporation into this open entry's
-  // history GitHub has not yet verified. While non-empty the restack stays
-  // required, no matter what base the agent report claims (worker-owned).
+  // history GitHub has not yet verified. Serial merge trains assign the new
+  // obligation only to the next open entry; higher entries wait until they
+  // become the frontier (worker-owned).
   pending_restack_of?: string[];
 }
 

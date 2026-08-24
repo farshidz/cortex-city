@@ -12,6 +12,7 @@ import {
   deliverReviewerComment,
   getLatestForeignCommentAt,
   drainMyPendingReview,
+  getCommitMergeBaseSha,
   getPRBaseBranch,
   getPRDiffHash,
   getPRHeadSha,
@@ -68,7 +69,9 @@ import {
   frontierStackedPR,
   isStackedTask,
   openStackedPRs,
+  reviewableStackedPRs,
   stackClosedBaseFingerprint,
+  stackMergeTrainStarted,
   stackRequiresRestack,
   stackTerminalStatus,
 } from "./stacked-prs";
@@ -196,6 +199,7 @@ interface WorkerLogger {
 
 export interface WorkerRuntimeDeps {
   deleteTask: typeof deleteTask;
+  getCommitMergeBaseSha?: typeof getCommitMergeBaseSha;
   getPRBaseBranch?: typeof getPRBaseBranch;
   // Absent leaves the effective diff unknown, which falls scheduling back to
   // comparing head SHAs.
@@ -240,6 +244,7 @@ export interface WorkerRuntimeDeps {
 
 export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   deleteTask,
+  getCommitMergeBaseSha,
   getPRBaseBranch,
   getPRDiffHash,
   getLatestForeignCommentAt,
@@ -338,7 +343,7 @@ function reviewableTaskPRTargets(task: Task): Array<{
 }> {
   if (isStackedTask(task)) {
     const size = task.stacked_prs.length;
-    return openStackedPRs(task.stacked_prs).map((entry) => ({
+    return reviewableStackedPRs(task.stacked_prs).map((entry) => ({
       pr_url: entry.pr_url,
       stackContext: { entry, size },
     }));
@@ -1289,16 +1294,18 @@ export async function pollOnce(
   }
 
   deps.logger.log("[worker] Poll phase: scan in_review tasks");
-  // Terminal stack entries are excluded on purpose: their reviews should
-  // finalize (and run retros) as soon as the entry merges, not when the whole
-  // stack completes.
+  // Keep every open stack URL task-owned even while its review is on hold.
+  // Otherwise inbound discovery could bypass the serial merge-train gate.
+  // Terminal entries are excluded so their reviews can finalize immediately.
   const liveTaskOwners = new Map<string, Task & { pr_url: string }>();
   for (const task of tasks) {
     if (task.status !== "in_review" || typeof task.pr_url !== "string") continue;
     const owner = task as Task & { pr_url: string };
     liveTaskOwners.set(task.pr_url, owner);
-    for (const target of reviewableTaskPRTargets(task)) {
-      liveTaskOwners.set(target.pr_url, owner);
+    if (isStackedTask(task)) {
+      for (const entry of openStackedPRs(task.stacked_prs)) {
+        liveTaskOwners.set(entry.pr_url, owner);
+      }
     }
   }
   const inReviewTasks = tasks.filter(
@@ -1313,6 +1320,47 @@ export async function pollOnce(
     const hasManualInstruction = Boolean(task.pending_manual_instruction);
     const stack = task.stacked_prs!.map((entry) => ({ ...entry }));
     let stackChanged = false;
+
+    // Capture each slice's fork point before the merge train rewrites any
+    // branch. The adjacent branch tips may have drifted through appended
+    // feedback commits, so use their merge base instead of assuming the
+    // lower branch's current tip is an ancestor of the upper branch.
+    if (
+      !stackMergeTrainStarted(stack) &&
+      deps.getCommitMergeBaseSha &&
+      deps.getPRHeadSha
+    ) {
+      for (let index = 1; index < stack.length; index++) {
+        const entry = stack[index];
+        if (entry.restack_cutoff_sha || entry.state !== "open") continue;
+        const lower = stack[index - 1];
+        const repoSlug = entry.pr_url.match(
+          /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/
+        )?.[1];
+        if (!repoSlug) continue;
+        try {
+          const lowerHead =
+            taskReviewHeads.get(lower.pr_url) ||
+            (await deps.getPRHeadSha(lower.pr_url)).trim();
+          const entryHead =
+            taskReviewHeads.get(entry.pr_url) ||
+            (await deps.getPRHeadSha(entry.pr_url)).trim();
+          if (!lowerHead || !entryHead) continue;
+          const cutoff = (
+            await deps.getCommitMergeBaseSha(repoSlug, lowerHead, entryHead)
+          ).trim();
+          if (cutoff) {
+            entry.restack_cutoff_sha = cutoff;
+            stackChanged = true;
+          }
+        } catch (error) {
+          deps.logger.error(
+            `[worker] Failed to capture restack cutoff for ${entry.pr_url}:`,
+            error
+          );
+        }
+      }
+    }
 
     for (const entry of stack) {
       if (entry.state === "closed") {
@@ -1342,9 +1390,9 @@ export async function pollOnce(
       if (entry.state !== "open") continue;
       const prState = await deps.isPRMergedOrClosed(entry.pr_url);
       if (prState === "merged") {
-        // Record the durable restack obligation in the same update that
-        // marks the entry merged: every open entry above must prove (via
-        // ancestry) that it incorporated this merge before restack clears.
+        // Record the durable restack obligation in the same update that marks
+        // the entry merged. Serial merge trains wake only the next open entry;
+        // higher entries stay on review hold until they become the frontier.
         // Fail closed: without a non-empty merge commit the entry stays open
         // and is retried next poll — marking it merged without the obligation
         // would permanently bypass the ancestry verification.
@@ -1376,13 +1424,18 @@ export async function pollOnce(
         entry.state = "merged";
         entry.pr_status = undefined;
         entry.merge_commit_sha = mergeCommitSha;
-        for (const upper of stack) {
-          if (upper.state !== "open" || upper.position <= entry.position) {
-            continue;
-          }
-          const pending = new Set(upper.pending_restack_of ?? []);
+        entry.pending_restack_of = undefined;
+        const nextOpen = stack
+          .filter(
+            (candidate) =>
+              candidate.state === "open" && candidate.position > entry.position
+          )
+          .sort((a, b) => a.position - b.position)[0];
+        if (nextOpen) {
+          const pending = new Set(nextOpen.pending_restack_of ?? []);
           pending.add(mergeCommitSha);
-          upper.pending_restack_of = [...pending];
+          nextOpen.pending_restack_of = [...pending];
+          nextOpen.pr_status = undefined;
         }
         stackChanged = true;
         // Let the entry's review finalize now instead of at stack completion.
@@ -1399,10 +1452,18 @@ export async function pollOnce(
         liveTaskOwners.delete(entry.pr_url);
         continue;
       }
-      const prStatus = await deps.getPRStatus(entry.pr_url);
-      if (prStatus !== "unknown" && prStatus !== entry.pr_status) {
-        entry.pr_status = prStatus;
-        stackChanged = true;
+      // Review-derived readiness is meaningful only for currently reviewable
+      // entries. A frontier awaiting rewrite and every higher entry are held.
+      if (
+        reviewableStackedPRs(stack).some(
+          (candidate) => candidate.pr_url === entry.pr_url
+        )
+      ) {
+        const prStatus = await deps.getPRStatus(entry.pr_url);
+        if (prStatus !== "unknown" && prStatus !== entry.pr_status) {
+          entry.pr_status = prStatus;
+          stackChanged = true;
+        }
       }
       // GitHub is the authority on where an open PR points. The agent report
       // only claims a base; if a retarget failed (or never happened), this
@@ -1421,38 +1482,42 @@ export async function pollOnce(
     // Verify pending restack obligations from GitHub history: a claimed
     // retarget or rebase counts only once the merged commit is an ancestor of
     // the open entry's current head. Errors keep the obligation pending.
-    for (const entry of stack) {
-      if (entry.state !== "open") continue;
+    const frontierToVerify = frontierStackedPR(stack);
+    if (frontierToVerify) {
+      const entry = frontierToVerify;
       const pending = entry.pending_restack_of ?? [];
-      if (pending.length === 0) continue;
-      const repoSlug = entry.pr_url.match(
-        /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/
-      )?.[1];
-      const headSha =
-        taskReviewHeads.get(entry.pr_url) ||
-        (await deps.getPRHeadSha?.(entry.pr_url))?.trim() ||
-        "";
-      if (!repoSlug || !headSha || !deps.isCommitAncestor) continue;
-      const remaining: string[] = [];
-      for (const mergedSha of pending) {
-        let verified: boolean | null = null;
-        try {
-          verified = await deps.isCommitAncestor(repoSlug, mergedSha, headSha);
-        } catch (error) {
-          deps.logger.error(
-            `[worker] Failed to verify restack of ${entry.pr_url} against ${mergedSha}:`,
-            error
-          );
-        }
-        if (verified !== true) remaining.push(mergedSha);
-      }
-      if (remaining.length !== pending.length) {
-        entry.pending_restack_of = remaining.length > 0 ? remaining : undefined;
-        stackChanged = true;
-        if (remaining.length === 0) {
-          deps.logger.log(
-            `[worker] Restack of ${entry.pr_url} verified against all merged lower slices`
-          );
+      if (pending.length > 0) {
+        const repoSlug = entry.pr_url.match(
+          /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/
+        )?.[1];
+        const headSha =
+          taskReviewHeads.get(entry.pr_url) ||
+          (await deps.getPRHeadSha?.(entry.pr_url))?.trim() ||
+          "";
+        if (repoSlug && headSha && deps.isCommitAncestor) {
+          const remaining: string[] = [];
+          for (const mergedSha of pending) {
+            let verified: boolean | null = null;
+            try {
+              verified = await deps.isCommitAncestor(repoSlug, mergedSha, headSha);
+            } catch (error) {
+              deps.logger.error(
+                `[worker] Failed to verify restack of ${entry.pr_url} against ${mergedSha}:`,
+                error
+              );
+            }
+            if (verified !== true) remaining.push(mergedSha);
+          }
+          if (remaining.length !== pending.length) {
+            entry.pending_restack_of =
+              remaining.length > 0 ? remaining : undefined;
+            stackChanged = true;
+            if (remaining.length === 0) {
+              deps.logger.log(
+                `[worker] Restack of ${entry.pr_url} verified against all merged lower slices`
+              );
+            }
+          }
         }
       }
     }
@@ -1501,10 +1566,10 @@ export async function pollOnce(
 
     const automaticReviewEnabled = isAutomaticReviewEnabled(task);
     const size = stack.length;
-    const openEntries = openStackedPRs(stack);
+    const reviewEntries = reviewableStackedPRs(stack);
     const reviewMap = deps.readReviewSummaryMap();
     let deferForPendingReview = false;
-    for (const entry of openEntries) {
+    for (const entry of reviewEntries) {
       const headSha = taskReviewHeads.get(entry.pr_url) || "";
       const cached = reviewMap[entry.pr_url];
       const request = taskReviewRequest(task, headSha, { entry, size });
@@ -1553,7 +1618,7 @@ export async function pollOnce(
       !hasManualInstruction &&
       !restackRequired &&
       !brokenStackNeedsDecision &&
-      openEntries.some((entry) => entry.pr_status === "checks_pending")
+      reviewEntries.some((entry) => entry.pr_status === "checks_pending")
     ) {
       return;
     }
@@ -1561,7 +1626,7 @@ export async function pollOnce(
     const entryHashes: Record<string, string> = {};
     let anyHash = false;
     let anyHashChanged = false;
-    for (const entry of openEntries) {
+    for (const entry of reviewEntries) {
       const ghState = await deps.getPRStateHash(entry.pr_url);
       if (!ghState) continue;
       anyHash = true;
@@ -1577,7 +1642,7 @@ export async function pollOnce(
       return;
     }
 
-    const hasConflicts = openEntries.some(
+    const hasConflicts = reviewEntries.some(
       (entry) => entry.pr_status === "conflicts"
     );
     if (
