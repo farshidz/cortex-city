@@ -385,20 +385,11 @@ export function reconcileStackedPRs(
     merged.push({ ...entry });
   }
 
-  const existingLowerByIdentity = new Map(
-    sortedByPosition(existing).map((entry, index, ordered) => {
-      const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
-      const lower = ordered[index - 1];
-      return [identity, lower?.pr_url] as const;
-    })
-  );
   const reconciled = sortedByPosition(merged).map((entry, index, ordered) => {
     const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
     const tracked = existingByIdentity.get(identity);
     const newLower = ordered[index - 1];
-    const oldLowerUrl =
-      tracked?.restack_cutoff_lower_pr_url ||
-      existingLowerByIdentity.get(identity);
+    const oldLowerUrl = tracked?.restack_cutoff_lower_pr_url;
     if (
       !tracked?.restack_cutoff_sha ||
       !newLower ||

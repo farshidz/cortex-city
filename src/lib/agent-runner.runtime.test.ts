@@ -956,10 +956,10 @@ test("initial-mode manual instructions expose a growing PR stack before Codex ex
       (entry: NonNullable<Task["stacked_prs"]>[number]) => entry.provisional
     )
   );
-  assert.equal(result.duringRun.stacked_prs[1].restack_cutoff_sha, "head-31");
+  assert.equal(result.duringRun.stacked_prs[1].restack_cutoff_sha, undefined);
   assert.equal(
     result.duringRun.stacked_prs[1].restack_cutoff_lower_pr_url,
-    firstPrUrl
+    undefined
   );
   assert.deepEqual(
     result.duringRun.stacked_prs.map((entry: NonNullable<Task["stacked_prs"]>[number]) => ({
@@ -1256,7 +1256,7 @@ test("live PR discovery appends to a confirmed stack without losing lifecycle st
   assert.equal(result.tasks[0].pr_url_provisional, undefined);
 });
 
-test("live PR discovery rebinds cutoffs when a pre-train entry is inserted", () => {
+test("live PR discovery invalidates cutoffs until the worker captures a moved-base merge base", () => {
   const { workspace } = setupWorkspace();
   const ghStateFile = path.join(workspace, "gh-inserted-stack-state.json");
   const pr1 = "https://github.com/farshidz/marqo-cortex-city/pull/51";
@@ -1336,16 +1336,16 @@ test("live PR discovery rebinds cutoffs when a pre-train entry is inserted", () 
   );
 
   assert.equal(result.tasks[0].stacked_prs[1].pr_url, inserted);
-  assert.equal(result.tasks[0].stacked_prs[1].restack_cutoff_sha, "head-51");
+  assert.equal(result.tasks[0].stacked_prs[1].restack_cutoff_sha, undefined);
   assert.equal(
     result.tasks[0].stacked_prs[1].restack_cutoff_lower_pr_url,
-    pr1
+    undefined
   );
   assert.equal(result.tasks[0].stacked_prs[2].pr_url, pr2);
-  assert.equal(result.tasks[0].stacked_prs[2].restack_cutoff_sha, "head-52");
+  assert.equal(result.tasks[0].stacked_prs[2].restack_cutoff_sha, undefined);
   assert.equal(
     result.tasks[0].stacked_prs[2].restack_cutoff_lower_pr_url,
-    inserted
+    undefined
   );
 });
 

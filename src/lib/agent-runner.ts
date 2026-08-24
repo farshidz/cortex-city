@@ -984,7 +984,6 @@ interface LivePullRequest {
   headRefName: string;
   headRefOid?: string;
   baseRefName: string;
-  baseRefOid?: string;
   title: string;
 }
 
@@ -1023,7 +1022,7 @@ async function inspectLivePullRequest(
         "view",
         prUrl,
         "--json",
-        "url,headRefName,headRefOid,baseRefName,baseRefOid,title",
+        "url,headRefName,headRefOid,baseRefName,title",
       ],
       {
         env,
@@ -1044,7 +1043,6 @@ async function inspectLivePullRequest(
       headRefName,
       headRefOid: parsed.headRefOid?.trim() || undefined,
       baseRefName,
-      baseRefOid: parsed.baseRefOid?.trim() || undefined,
       title: parsed.title?.trim() || headRefName,
     };
   } catch (error) {
@@ -1161,8 +1159,7 @@ async function persistLivePullRequestProgress(
       );
       const stack: TaskStackedPR[] = [];
       const withCutoffForCurrentAdjacency = (
-        entry: TaskStackedPR,
-        baseRefOid?: string
+        entry: TaskStackedPR
       ): TaskStackedPR => {
         const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
         const tracked = trackedByIdentity.get(identity);
@@ -1179,9 +1176,7 @@ async function persistLivePullRequestProgress(
         const cutoff =
           sameLower && tracked?.restack_cutoff_sha
             ? tracked.restack_cutoff_sha
-            : !mergeTrainStarted && lower
-              ? baseRefOid?.trim()
-              : undefined;
+            : undefined;
         const withoutCutoff = { ...entry };
         delete withoutCutoff.restack_cutoff_sha;
         delete withoutCutoff.restack_cutoff_lower_pr_url;
@@ -1206,9 +1201,7 @@ async function persistLivePullRequestProgress(
               ? undefined
               : true,
         };
-        stack.push(
-          withCutoffForCurrentAdjacency(entry, pullRequest.baseRefOid)
-        );
+        stack.push(withCutoffForCurrentAdjacency(entry));
       };
 
       let nextOrderedIndex = 0;
@@ -1237,17 +1230,14 @@ async function persistLivePullRequestProgress(
         }
         const pullRequest = orderedWithIdentity[orderedIndex].pullRequest;
         stack.push(
-          withCutoffForCurrentAdjacency(
-            {
-              ...tracked,
-              position: stack.length + 1,
-              pr_url: pullRequest.url,
-              branch_name: pullRequest.headRefName,
-              base_branch: pullRequest.baseRefName,
-              scope: tracked.scope || pullRequest.title,
-            },
-            pullRequest.baseRefOid
-          )
+          withCutoffForCurrentAdjacency({
+            ...tracked,
+            position: stack.length + 1,
+            pr_url: pullRequest.url,
+            branch_name: pullRequest.headRefName,
+            base_branch: pullRequest.baseRefName,
+            scope: tracked.scope || pullRequest.title,
+          })
         );
         nextOrderedIndex = orderedIndex + 1;
       }

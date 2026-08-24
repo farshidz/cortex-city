@@ -515,6 +515,42 @@ test("reconcileStackedPRs invalidates cutoffs when a pre-train report reorders e
   assert.equal(result.stack[2].restack_cutoff_lower_pr_url, undefined);
 });
 
+test("reconcileStackedPRs invalidates a legacy cutoff with no adjacency provenance", () => {
+  const pr1 = "https://github.com/acme/widget/pull/1";
+  const pr2 = "https://github.com/acme/widget/pull/2";
+  const current = [
+    entry({ position: 1, pr_url: pr1 }),
+    entry({
+      position: 2,
+      pr_url: pr2,
+      branch_name: "b2",
+      base_branch: "b1",
+      restack_cutoff_sha: "unproven-fork",
+    }),
+  ];
+
+  const result = reconcileStackedPRs(current, [
+    {
+      position: 1,
+      pr_url: pr1,
+      branch_name: "b1",
+      base_branch: "main",
+      scope: "Slice one",
+    },
+    {
+      position: 2,
+      pr_url: pr2,
+      branch_name: "b2",
+      base_branch: "b1",
+      scope: "Slice two",
+    },
+  ]);
+
+  assert.ok(result);
+  assert.equal(result.stack[1].restack_cutoff_sha, undefined);
+  assert.equal(result.stack[1].restack_cutoff_lower_pr_url, undefined);
+});
+
 test("reconcileStackedPRs rejects relationship changes after the train starts", () => {
   const pr1 = "https://github.com/acme/widget/pull/1";
   const pr2 = "https://github.com/acme/widget/pull/2";
