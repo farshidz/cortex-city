@@ -1256,6 +1256,80 @@ test("live PR discovery appends to a confirmed stack without losing lifecycle st
   assert.equal(result.tasks[0].pr_url_provisional, undefined);
 });
 
+test("live PR discovery invalidates an unchanged legacy cutoff with no provenance", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-legacy-cutoff-state.json");
+  const pr1 = "https://github.com/farshidz/marqo-cortex-city/pull/41";
+  const pr2 = "https://github.com/farshidz/marqo-cortex-city/pull/42";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#41": {
+        url: pr1,
+        headRefName: "agent/legacy-lower",
+        headRefOid: "head-41",
+        baseRefName: "main",
+        title: "Lower slice",
+      },
+      "farshidz/marqo-cortex-city#42": {
+        url: pr2,
+        headRefName: "agent/legacy-upper",
+        headRefOid: "head-42",
+        baseRefName: "agent/legacy-lower",
+        title: "Upper slice",
+      },
+    },
+  });
+  const trackedStack = [
+    {
+      position: 1,
+      pr_url: pr1,
+      branch_name: "agent/legacy-lower",
+      base_branch: "main",
+      scope: "Lower slice",
+      state: "open",
+    },
+    {
+      position: 2,
+      pr_url: pr2,
+      branch_name: "agent/legacy-upper",
+      base_branch: "agent/legacy-lower",
+      scope: "Upper slice",
+      state: "open",
+      restack_cutoff_sha: "legacy-unproven-fork",
+    },
+  ];
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        pr_url: pr1,
+        branch_name: "agent/legacy-lower",
+        stacked_prs: trackedStack as Task["stacked_prs"],
+      }))};
+      await createTask(task);
+      await __testUtils.persistLivePullRequestProgress(
+        task.id,
+        ${JSON.stringify(workspace)},
+        ${JSON.stringify([pr1, pr2])},
+        process.env
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.tasks[0].stacked_prs[1].restack_cutoff_sha, undefined);
+  assert.equal(
+    result.tasks[0].stacked_prs[1].restack_cutoff_lower_pr_url,
+    undefined
+  );
+});
+
 test("live PR discovery invalidates cutoffs until the worker captures a moved-base merge base", () => {
   const { workspace } = setupWorkspace();
   const ghStateFile = path.join(workspace, "gh-inserted-stack-state.json");

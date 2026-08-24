@@ -1151,12 +1151,6 @@ async function persistLivePullRequestProgress(
           entry,
         ])
       );
-      const trackedLowerByIdentity = new Map(
-        trackedStack.map((entry, index) => [
-          githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url,
-          trackedStack[index - 1]?.pr_url,
-        ])
-      );
       const stack: TaskStackedPR[] = [];
       const withCutoffForCurrentAdjacency = (
         entry: TaskStackedPR
@@ -1164,9 +1158,7 @@ async function persistLivePullRequestProgress(
         const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
         const tracked = trackedByIdentity.get(identity);
         const lower = stack.at(-1);
-        const priorLowerUrl =
-          tracked?.restack_cutoff_lower_pr_url ||
-          trackedLowerByIdentity.get(identity);
+        const priorLowerUrl = tracked?.restack_cutoff_lower_pr_url;
         const sameLower = Boolean(
           lower &&
             priorLowerUrl &&
