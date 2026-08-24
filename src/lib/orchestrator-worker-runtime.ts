@@ -68,6 +68,7 @@ import {
   aggregateStackPRStatus,
   frontierStackedPR,
   isStackedTask,
+  lowerStackedPR,
   openStackedPRs,
   reviewableStackedPRs,
   stackClosedBaseFingerprint,
@@ -76,6 +77,7 @@ import {
   stackMergeTrainStarted,
   stackRequiresRestack,
   stackTerminalStatus,
+  stackedPRHasValidRestackCutoff,
 } from "./stacked-prs";
 import type {
   ReviewerThreadSummary,
@@ -412,6 +414,8 @@ function stackEntriesMissingInitialReview(
       review.summary?.trim() &&
       review.current_run_pid == null &&
       review.current_run_id == null &&
+      review.pending_reviewer_comment_delivery == null &&
+      !review.pending_review_error &&
       reviewCoversHeadSha(review, headSha)
     );
   });
@@ -1411,10 +1415,8 @@ export async function pollOnce(
             .slice(1)
             .filter((entry) => entry.state === "open");
       for (const entry of cutoffCandidates) {
-        if (entry.restack_cutoff_sha) continue;
-        const lower = [...stack]
-          .filter((candidate) => candidate.position < entry.position)
-          .sort((a, b) => b.position - a.position)[0];
+        if (stackedPRHasValidRestackCutoff(stack, entry)) continue;
+        const lower = lowerStackedPR(stack, entry);
         if (!lower) continue;
         const repoSlug = entry.pr_url.match(
           /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/
@@ -1433,6 +1435,7 @@ export async function pollOnce(
           ).trim();
           if (cutoff) {
             entry.restack_cutoff_sha = cutoff;
+            entry.restack_cutoff_lower_pr_url = lower.pr_url;
             stackChanged = true;
           }
         } catch (error) {

@@ -957,6 +957,10 @@ test("initial-mode manual instructions expose a growing PR stack before Codex ex
     )
   );
   assert.equal(result.duringRun.stacked_prs[1].restack_cutoff_sha, "head-31");
+  assert.equal(
+    result.duringRun.stacked_prs[1].restack_cutoff_lower_pr_url,
+    firstPrUrl
+  );
   assert.deepEqual(
     result.duringRun.stacked_prs.map((entry: NonNullable<Task["stacked_prs"]>[number]) => ({
       position: entry.position,
@@ -1250,6 +1254,182 @@ test("live PR discovery appends to a confirmed stack without losing lifecycle st
   });
   assert.equal(result.tasks[0].pr_url, canonicalFirstPrUrl);
   assert.equal(result.tasks[0].pr_url_provisional, undefined);
+});
+
+test("live PR discovery rebinds cutoffs when a pre-train entry is inserted", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-inserted-stack-state.json");
+  const pr1 = "https://github.com/farshidz/marqo-cortex-city/pull/51";
+  const inserted = "https://github.com/farshidz/marqo-cortex-city/pull/52";
+  const pr2 = "https://github.com/farshidz/marqo-cortex-city/pull/53";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#51": {
+        url: pr1,
+        headRefName: "agent/lower",
+        headRefOid: "head-51",
+        baseRefName: "main",
+        baseRefOid: "main-head",
+        title: "Lower slice",
+      },
+      "farshidz/marqo-cortex-city#52": {
+        url: inserted,
+        headRefName: "agent/inserted",
+        headRefOid: "head-52",
+        baseRefName: "agent/lower",
+        baseRefOid: "head-51",
+        title: "Inserted slice",
+      },
+      "farshidz/marqo-cortex-city#53": {
+        url: pr2,
+        headRefName: "agent/upper",
+        headRefOid: "head-53",
+        baseRefName: "agent/inserted",
+        baseRefOid: "head-52",
+        title: "Upper slice",
+      },
+    },
+  });
+  const trackedStack = [
+    {
+      position: 1,
+      pr_url: pr1,
+      branch_name: "agent/lower",
+      base_branch: "main",
+      scope: "Lower slice",
+      state: "open",
+    },
+    {
+      position: 2,
+      pr_url: pr2,
+      branch_name: "agent/upper",
+      base_branch: "agent/lower",
+      scope: "Upper slice",
+      state: "open",
+      restack_cutoff_sha: "old-fork",
+      restack_cutoff_lower_pr_url: pr1,
+    },
+  ];
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        pr_url: pr1,
+        branch_name: "agent/lower",
+        stacked_prs: trackedStack as Task["stacked_prs"],
+      }))};
+      await createTask(task);
+      await __testUtils.persistLivePullRequestProgress(
+        task.id,
+        ${JSON.stringify(workspace)},
+        ${JSON.stringify([pr1, inserted, pr2])},
+        process.env
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.equal(result.tasks[0].stacked_prs[1].pr_url, inserted);
+  assert.equal(result.tasks[0].stacked_prs[1].restack_cutoff_sha, "head-51");
+  assert.equal(
+    result.tasks[0].stacked_prs[1].restack_cutoff_lower_pr_url,
+    pr1
+  );
+  assert.equal(result.tasks[0].stacked_prs[2].pr_url, pr2);
+  assert.equal(result.tasks[0].stacked_prs[2].restack_cutoff_sha, "head-52");
+  assert.equal(
+    result.tasks[0].stacked_prs[2].restack_cutoff_lower_pr_url,
+    inserted
+  );
+});
+
+test("live PR discovery rejects inserted adjacency after the train starts", () => {
+  const { workspace } = setupWorkspace();
+  const ghStateFile = path.join(workspace, "gh-late-inserted-stack-state.json");
+  const pr1 = "https://github.com/farshidz/marqo-cortex-city/pull/61";
+  const inserted = "https://github.com/farshidz/marqo-cortex-city/pull/62";
+  const pr2 = "https://github.com/farshidz/marqo-cortex-city/pull/63";
+  writeJson(ghStateFile, {
+    prs: {
+      "farshidz/marqo-cortex-city#61": {
+        url: pr1,
+        headRefName: "agent/merged-lower",
+        headRefOid: "head-61",
+        baseRefName: "main",
+        baseRefOid: "main-head",
+        title: "Merged lower slice",
+      },
+      "farshidz/marqo-cortex-city#62": {
+        url: inserted,
+        headRefName: "agent/late-inserted",
+        headRefOid: "head-62",
+        baseRefName: "agent/merged-lower",
+        baseRefOid: "head-61",
+        title: "Late inserted slice",
+      },
+      "farshidz/marqo-cortex-city#63": {
+        url: pr2,
+        headRefName: "agent/late-upper",
+        headRefOid: "head-63",
+        baseRefName: "agent/late-inserted",
+        baseRefOid: "head-62",
+        title: "Upper slice",
+      },
+    },
+  });
+  const trackedStack = [
+    {
+      position: 1,
+      pr_url: pr1,
+      branch_name: "agent/merged-lower",
+      base_branch: "main",
+      scope: "Merged lower slice",
+      state: "merged",
+      merge_commit_sha: "merge-61",
+    },
+    {
+      position: 2,
+      pr_url: pr2,
+      branch_name: "agent/late-upper",
+      base_branch: "agent/merged-lower",
+      scope: "Upper slice",
+      state: "open",
+      restack_cutoff_sha: "fork-63",
+      restack_cutoff_lower_pr_url: pr1,
+    },
+  ];
+
+  const result = runAgentRunnerScript(
+    workspace,
+    `
+      const task = ${JSON.stringify(sampleTask({
+        status: "in_progress",
+        pr_url: pr2,
+        branch_name: "agent/late-upper",
+        stacked_prs: trackedStack as Task["stacked_prs"],
+      }))};
+      await createTask(task);
+      await __testUtils.persistLivePullRequestProgress(
+        task.id,
+        ${JSON.stringify(workspace)},
+        ${JSON.stringify([pr1, inserted, pr2])},
+        process.env
+      );
+      console.log(JSON.stringify({ tasks: readTasks() }));
+    `,
+    {
+      ...prependBinToPath(workspace),
+      FAKE_GH_STATE_FILE: ghStateFile,
+    }
+  );
+
+  assert.deepEqual(result.tasks[0].stacked_prs, trackedStack);
 });
 
 test("live PR discovery preserves terminal entries between open replacements", () => {

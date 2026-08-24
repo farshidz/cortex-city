@@ -80,6 +80,9 @@ export interface TaskStackedPR {
   // serial restacks use this immutable cutoff instead of the lower branch's
   // current tip, which may have moved or been force-pushed in the meantime.
   restack_cutoff_sha?: string;
+  // The adjacent lower PR whose head participated in the merge-base lookup.
+  // A cutoff is valid only while this exact ordered relationship is unchanged.
+  restack_cutoff_lower_pr_url?: string;
   // Incremented when a lower merge places this PR on hold. Review runs include
   // the generation in their context so an in-flight pre-hold result cannot be
   // published or persisted after the transition (worker-owned).

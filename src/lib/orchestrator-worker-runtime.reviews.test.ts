@@ -45,6 +45,9 @@ interface HarnessOptions {
   // Installs the drain dep. Each PR maps to the results successive poll passes
   // see, so a failed → repaired transition is expressible without real GitHub.
   pendingReviewDrains?: Record<string, PendingReviewDrain[]>;
+  deliverReviewerComment?: NonNullable<
+    WorkerRuntimeDeps["deliverReviewerComment"]
+  >;
   // Runs inside the drain fake, before it answers. Lets a test stand in for a
   // concurrent writer that records a different condition while the real drain's
   // GitHub calls are in flight, outside the store lock.
@@ -80,6 +83,7 @@ interface Harness {
   stoppedLegacyReviewerPids: number[];
   reviewCompletions: Array<(summary: ReviewSummary) => Promise<void>>;
   drainCalls: string[];
+  deliveryCalls: string[];
   tasks: Task[];
 }
 
@@ -160,6 +164,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
   const builderCalls: Array<{ task: Task; mode: string }> = [];
   const stoppedLegacyReviewerPids: number[] = [];
   const drainCalls: string[] = [];
+  const deliveryCalls: string[] = [];
   const reviewCompletions: Array<
     (summary: ReviewSummary) => Promise<void>
   > = [];
@@ -232,6 +237,14 @@ function makeHarness(options: HarnessOptions = {}): Harness {
             return (
               queued.shift() || ({ status: "none" } as PendingReviewDrain)
             );
+          },
+        }
+      : {}),
+    ...(options.deliverReviewerComment
+      ? {
+          deliverReviewerComment: async (...args) => {
+            deliveryCalls.push(args[0]);
+            return options.deliverReviewerComment!(...args);
           },
         }
       : {}),
@@ -339,6 +352,7 @@ function makeHarness(options: HarnessOptions = {}): Harness {
     stoppedLegacyReviewerPids,
     reviewCompletions,
     drainCalls,
+    deliveryCalls,
     tasks,
   };
 }
@@ -1262,7 +1276,7 @@ test("pollOnce queues a task-owned review with task context when task slots are 
 
   await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
 
-  assert.equal(h.builderCalls.length, 0);
+  assert.deepEqual(h.builderCalls, []);
   assert.equal(h.spawnCalls.length, 1);
   assert.deepEqual(h.spawnCalls[0], {
     source: "task",
@@ -1497,7 +1511,7 @@ test("pollOnce gives task ownership precedence over a self-authored labeled requ
 
   await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
 
-  assert.deepEqual(h.builderCalls, []);
+  assert.equal(h.builderCalls.length, 0);
   assert.equal(h.spawnCalls.length, 1);
   assert.equal(h.spawnCalls[0].source, "task");
   assert.equal(h.spawnCalls[0].task_id, task.id);
@@ -1932,7 +1946,7 @@ test("the frontier gets a fresh review after its restack is verified", async () 
   assert.equal(h.reviews[pr2].task_review_generation, 1);
 });
 
-test("the initial stack review sweep drains before a merged PR starts the train", async () => {
+test("the initial stack review sweep drains model and publication work before the train", async () => {
   const pr1 = "https://github.com/acme/widget/pull/1";
   const pr2 = "https://github.com/acme/widget/pull/2";
   const pr3 = "https://github.com/acme/widget/pull/3";
@@ -1956,6 +1970,7 @@ test("the initial stack review sweep drains before a merged PR starts the train"
         scope: "Slice two",
         state: "open",
         restack_cutoff_sha: "fork-2",
+        restack_cutoff_lower_pr_url: pr1,
       },
       {
         position: 3,
@@ -1965,6 +1980,7 @@ test("the initial stack review sweep drains before a merged PR starts the train"
         scope: "Slice three",
         state: "open",
         restack_cutoff_sha: "fork-3",
+        restack_cutoff_lower_pr_url: pr2,
       },
     ],
   });
@@ -1994,6 +2010,7 @@ test("the initial stack review sweep drains before a merged PR starts the train"
       agent_review_status: "ready_for_human_approval",
       current_run_pid: undefined,
     });
+  let deliveryAttempts = 0;
   const h = makeHarness({
     config: { max_parallel_reviews: 1 },
     tasks: [task],
@@ -2007,6 +2024,28 @@ test("the initial stack review sweep drains before a merged PR starts the train"
     },
     prFinalStates: { [pr1]: "merged" },
     mergeCommitShas: { [pr1]: "merge-1" },
+    deliverReviewerComment: async (_prUrl, delivery) => {
+      deliveryAttempts += 1;
+      if (deliveryAttempts === 1) {
+        throw new Error("temporary decision delivery failure");
+      }
+      return {
+        action_token: delivery.action_token,
+        comment_id: 4102,
+        author_login: "me",
+        body_sha256: "b".repeat(64),
+        surface: "issue",
+      };
+    },
+    pendingReviewDrains: {
+      [pr3]: [
+        {
+          status: "failed",
+          review_id: 78,
+          error: "temporary draft repair failure",
+        },
+      ],
+    },
   });
 
   await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
@@ -2016,7 +2055,15 @@ test("the initial stack review sweep drains before a merged PR starts the train"
     h.spawnCalls.map((request) => request.pr_url),
     [pr2]
   );
-  h.reviews[pr2] = completedReview(h.spawnCalls[0]);
+  h.reviews[pr2] = {
+    ...completedReview(h.spawnCalls[0]),
+    pending_reviewer_comment_delivery: {
+      action_token: "decision-action",
+      kind: "human_decision",
+      head_sha: "head-2",
+      body: "decision body",
+    },
+  };
   await h.reviewCompletions[0](h.reviews[pr2]);
 
   await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
@@ -2024,14 +2071,47 @@ test("the initial stack review sweep drains before a merged PR starts the train"
   assert.equal(h.tasks[0].stacked_prs?.[0].state, "open");
   assert.deepEqual(
     h.spawnCalls.map((request) => request.pr_url),
-    [pr2, pr3]
+    [pr2, pr2]
   );
-  h.reviews[pr3] = completedReview(h.spawnCalls[1]);
-  await h.reviewCompletions[1](h.reviews[pr3]);
+  assert.deepEqual(h.deliveryCalls, [pr2]);
+  assert.equal(
+    h.reviews[pr2].pending_reviewer_comment_delivery?.action_token,
+    "decision-action"
+  );
+
+  h.reviews[pr2] = completedReview(h.spawnCalls[1]);
+  await h.reviewCompletions[1](h.reviews[pr2]);
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.tasks[0].stacked_prs?.[0].state, "open");
+  assert.deepEqual(
+    h.spawnCalls.map((request) => request.pr_url),
+    [pr2, pr2, pr3]
+  );
+  h.reviews[pr3] = {
+    ...completedReview(h.spawnCalls[2]),
+    pending_review_error: "draft repair is pending",
+  };
+  await h.reviewCompletions[2](h.reviews[pr3]);
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.tasks[0].stacked_prs?.[0].state, "open");
+  assert.equal(h.builderCalls.length, 0);
+  assert.deepEqual(
+    h.spawnCalls.map((request) => request.pr_url),
+    [pr2, pr2, pr3]
+  );
+  assert.equal(
+    h.reviews[pr3].pending_review_error,
+    "temporary draft repair failure"
+  );
 
   await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
 
   assert.equal(h.tasks[0].stacked_prs?.[0].state, "merged");
+  assert.equal(h.reviews[pr3].pending_review_error, undefined);
   assert.deepEqual(h.builderCalls.map((call) => call.task.id), [task.id]);
 });
 

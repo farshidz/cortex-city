@@ -27,6 +27,55 @@ function sortedByPosition(stack: TaskStackedPR[]): TaskStackedPR[] {
   return [...stack].sort((a, b) => a.position - b.position);
 }
 
+function samePullRequest(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  return (
+    (githubPullRequestIdentity(a) ?? a) ===
+    (githubPullRequestIdentity(b) ?? b)
+  );
+}
+
+export function stackHasSameOrderedEntries(
+  first: TaskStackedPR[],
+  second: Array<Pick<TaskStackedPR, "position" | "pr_url">>
+): boolean {
+  const firstUrls = sortedByPosition(first).map(
+    (entry) => githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url
+  );
+  const secondUrls = [...second]
+    .sort((a, b) => a.position - b.position)
+    .map((entry) => githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url);
+  return (
+    firstUrls.length === secondUrls.length &&
+    firstUrls.every((url, index) => url === secondUrls[index])
+  );
+}
+
+export function lowerStackedPR(
+  stack: TaskStackedPR[],
+  entry: Pick<TaskStackedPR, "position" | "pr_url">
+): TaskStackedPR | undefined {
+  return sortedByPosition(stack)
+    .filter(
+      (candidate) =>
+        candidate.position < entry.position &&
+        !samePullRequest(candidate.pr_url, entry.pr_url)
+    )
+    .at(-1);
+}
+
+export function stackedPRHasValidRestackCutoff(
+  stack: TaskStackedPR[],
+  entry: TaskStackedPR
+): boolean {
+  const lower = lowerStackedPR(stack, entry);
+  return Boolean(
+    entry.restack_cutoff_sha?.trim() &&
+      lower &&
+      samePullRequest(entry.restack_cutoff_lower_pr_url, lower.pr_url)
+  );
+}
+
 export function openStackedPRs(stack: TaskStackedPR[]): TaskStackedPR[] {
   return sortedByPosition(stack).filter((entry) => entry.state === "open");
 }
@@ -103,7 +152,7 @@ export function stackEntriesMissingCutoffBeforeRestack(
   stack: TaskStackedPR[]
 ): TaskStackedPR[] {
   return stackEntriesRequiringCutoffBeforeRestack(stack).filter(
-    (entry) => !entry.restack_cutoff_sha?.trim()
+    (entry) => !stackedPRHasValidRestackCutoff(stack, entry)
   );
 }
 
@@ -285,6 +334,17 @@ export function reconcileStackedPRs(
   }
 
   const warnings: string[] = [];
+  if (
+    stackMergeTrainStarted(existing) &&
+    !stackHasSameOrderedEntries(existing, validated.entries)
+  ) {
+    return {
+      stack: sortedByPosition(existing).map((entry) => ({ ...entry })),
+      warnings: [
+        "Rejected stacked_prs relationship change after the merge train started; keeping the tracked stack unchanged",
+      ],
+    };
+  }
   const existingByIdentity = new Map(
     existing.map(
       (entry) => [
@@ -308,6 +368,7 @@ export function reconcileStackedPRs(
       last_review_gh_state: tracked?.last_review_gh_state,
       merge_commit_sha: tracked?.merge_commit_sha,
       restack_cutoff_sha: tracked?.restack_cutoff_sha,
+      restack_cutoff_lower_pr_url: tracked?.restack_cutoff_lower_pr_url,
       ...(tracked?.review_generation != null
         ? { review_generation: tracked.review_generation }
         : {}),
@@ -324,5 +385,36 @@ export function reconcileStackedPRs(
     merged.push({ ...entry });
   }
 
-  return { stack: sortedByPosition(merged), warnings };
+  const existingLowerByIdentity = new Map(
+    sortedByPosition(existing).map((entry, index, ordered) => {
+      const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
+      const lower = ordered[index - 1];
+      return [identity, lower?.pr_url] as const;
+    })
+  );
+  const reconciled = sortedByPosition(merged).map((entry, index, ordered) => {
+    const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
+    const tracked = existingByIdentity.get(identity);
+    const newLower = ordered[index - 1];
+    const oldLowerUrl =
+      tracked?.restack_cutoff_lower_pr_url ||
+      existingLowerByIdentity.get(identity);
+    if (
+      !tracked?.restack_cutoff_sha ||
+      !newLower ||
+      !samePullRequest(oldLowerUrl, newLower.pr_url)
+    ) {
+      const withoutCutoff = { ...entry };
+      delete withoutCutoff.restack_cutoff_sha;
+      delete withoutCutoff.restack_cutoff_lower_pr_url;
+      return withoutCutoff;
+    }
+    return {
+      ...entry,
+      restack_cutoff_sha: tracked.restack_cutoff_sha,
+      restack_cutoff_lower_pr_url: newLower.pr_url,
+    };
+  });
+
+  return { stack: reconciled, warnings };
 }

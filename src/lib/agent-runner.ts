@@ -45,6 +45,8 @@ import {
   openStackedPRs,
   reconcileStackedPRs,
   reviewableStackedPRs,
+  stackHasSameOrderedEntries,
+  stackMergeTrainStarted,
 } from "./stacked-prs";
 import {
   buildInterruptedTaskUpdates,
@@ -1110,6 +1112,17 @@ async function persistLivePullRequestProgress(
       const trackedStack = [...(currentTask.stacked_prs ?? [])].sort(
         (a, b) => a.position - b.position
       );
+      const mergeTrainStarted = stackMergeTrainStarted(trackedStack);
+      const liveOrderedEntries = ordered.map((pullRequest, index) => ({
+        position: index + 1,
+        pr_url: pullRequest.url,
+      }));
+      if (
+        mergeTrainStarted &&
+        !stackHasSameOrderedEntries(trackedStack, liveOrderedEntries)
+      ) {
+        return undefined;
+      }
       const confirmedSinglePrUrl =
         currentTask.pr_url &&
         !currentTask.pr_url_provisional &&
@@ -1134,23 +1147,68 @@ async function persistLivePullRequestProgress(
           .map((entry) => githubPullRequestIdentity(entry.pr_url))
           .filter((identity): identity is string => Boolean(identity))
       );
+      const trackedByIdentity = new Map(
+        trackedStack.map((entry) => [
+          githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url,
+          entry,
+        ])
+      );
+      const trackedLowerByIdentity = new Map(
+        trackedStack.map((entry, index) => [
+          githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url,
+          trackedStack[index - 1]?.pr_url,
+        ])
+      );
       const stack: TaskStackedPR[] = [];
+      const withCutoffForCurrentAdjacency = (
+        entry: TaskStackedPR,
+        baseRefOid?: string
+      ): TaskStackedPR => {
+        const identity = githubPullRequestIdentity(entry.pr_url) ?? entry.pr_url;
+        const tracked = trackedByIdentity.get(identity);
+        const lower = stack.at(-1);
+        const priorLowerUrl =
+          tracked?.restack_cutoff_lower_pr_url ||
+          trackedLowerByIdentity.get(identity);
+        const sameLower = Boolean(
+          lower &&
+            priorLowerUrl &&
+            (githubPullRequestIdentity(lower.pr_url) ?? lower.pr_url) ===
+              (githubPullRequestIdentity(priorLowerUrl) ?? priorLowerUrl)
+        );
+        const cutoff =
+          sameLower && tracked?.restack_cutoff_sha
+            ? tracked.restack_cutoff_sha
+            : !mergeTrainStarted && lower
+              ? baseRefOid?.trim()
+              : undefined;
+        const withoutCutoff = { ...entry };
+        delete withoutCutoff.restack_cutoff_sha;
+        delete withoutCutoff.restack_cutoff_lower_pr_url;
+        return cutoff && lower
+          ? {
+              ...withoutCutoff,
+              restack_cutoff_sha: cutoff,
+              restack_cutoff_lower_pr_url: lower.pr_url,
+            }
+          : withoutCutoff;
+      };
       const appendNewEntry = (pullRequest: LivePullRequest, identity: string) => {
-        stack.push({
+        const entry: TaskStackedPR = {
           position: stack.length + 1,
           pr_url: pullRequest.url,
           branch_name: pullRequest.headRefName,
           base_branch: pullRequest.baseRefName,
           scope: pullRequest.title,
           state: "open",
-          ...(pullRequest.baseRefOid
-            ? { restack_cutoff_sha: pullRequest.baseRefOid }
-            : {}),
           provisional:
             confirmedSinglePrIdentity && identity === confirmedSinglePrIdentity
               ? undefined
               : true,
-        });
+        };
+        stack.push(
+          withCutoffForCurrentAdjacency(entry, pullRequest.baseRefOid)
+        );
       };
 
       let nextOrderedIndex = 0;
@@ -1160,7 +1218,12 @@ async function persistLivePullRequestProgress(
           ? orderedIndexByIdentity.get(identity)
           : undefined;
         if (orderedIndex === undefined) {
-          stack.push({ ...tracked, position: stack.length + 1 });
+          stack.push(
+            withCutoffForCurrentAdjacency({
+              ...tracked,
+              position: stack.length + 1,
+            })
+          );
           continue;
         }
         if (orderedIndex < nextOrderedIndex) return undefined;
@@ -1173,20 +1236,19 @@ async function persistLivePullRequestProgress(
           nextOrderedIndex += 1;
         }
         const pullRequest = orderedWithIdentity[orderedIndex].pullRequest;
-        stack.push({
-          ...tracked,
-          position: stack.length + 1,
-          pr_url: pullRequest.url,
-          branch_name: pullRequest.headRefName,
-          base_branch: pullRequest.baseRefName,
-          scope: tracked.scope || pullRequest.title,
-          ...(tracked.restack_cutoff_sha || pullRequest.baseRefOid
-            ? {
-                restack_cutoff_sha:
-                  tracked.restack_cutoff_sha || pullRequest.baseRefOid,
-              }
-            : {}),
-        });
+        stack.push(
+          withCutoffForCurrentAdjacency(
+            {
+              ...tracked,
+              position: stack.length + 1,
+              pr_url: pullRequest.url,
+              branch_name: pullRequest.headRefName,
+              base_branch: pullRequest.baseRefName,
+              scope: tracked.scope || pullRequest.title,
+            },
+            pullRequest.baseRefOid
+          )
+        );
         nextOrderedIndex = orderedIndex + 1;
       }
       while (nextOrderedIndex < orderedWithIdentity.length) {
