@@ -90,6 +90,23 @@ export function stackRequiresRestack(stack: TaskStackedPR[]): boolean {
   return stackEntriesRequiringRestack(stack).length > 0;
 }
 
+// Rewriting the frontier consumes its own cutoff and invalidates the current
+// frontier-to-successor relationship. Both cutoffs must be durable first.
+export function stackEntriesRequiringCutoffBeforeRestack(
+  stack: TaskStackedPR[]
+): TaskStackedPR[] {
+  if (!stackRequiresRestack(stack)) return [];
+  return openStackedPRs(stack).slice(0, 2);
+}
+
+export function stackEntriesMissingCutoffBeforeRestack(
+  stack: TaskStackedPR[]
+): TaskStackedPR[] {
+  return stackEntriesRequiringCutoffBeforeRestack(stack).filter(
+    (entry) => !entry.restack_cutoff_sha?.trim()
+  );
+}
+
 // Initial review fans out to the whole stack. During the merge train, reviews
 // resume only for a frontier whose restack has been verified. A frontier with
 // a pending rewrite has no review target, which lets the restack builder run
@@ -291,6 +308,9 @@ export function reconcileStackedPRs(
       last_review_gh_state: tracked?.last_review_gh_state,
       merge_commit_sha: tracked?.merge_commit_sha,
       restack_cutoff_sha: tracked?.restack_cutoff_sha,
+      ...(tracked?.review_generation != null
+        ? { review_generation: tracked.review_generation }
+        : {}),
       pending_restack_of: tracked?.pending_restack_of,
     });
   }

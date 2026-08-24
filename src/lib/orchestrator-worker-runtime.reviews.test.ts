@@ -1776,6 +1776,155 @@ test("task review completion wakes the builder only for current actionable findi
   assert.equal(optedOut.tasks[0].resume_run_mode, undefined);
 });
 
+test("a stack review completed after the merge train starts does not wake the builder", async () => {
+  const pr1 = "https://github.com/acme/widget/pull/1";
+  const pr2 = "https://github.com/acme/widget/pull/2";
+  const pr3 = "https://github.com/acme/widget/pull/3";
+  const task = makeTask({
+    pr_url: pr1,
+    branch_name: "slice-1",
+    stacked_prs: [
+      {
+        position: 1,
+        pr_url: pr1,
+        branch_name: "slice-1",
+        base_branch: "main",
+        scope: "Slice one",
+        state: "open",
+      },
+      {
+        position: 2,
+        pr_url: pr2,
+        branch_name: "slice-2",
+        base_branch: "slice-1",
+        scope: "Slice two",
+        state: "open",
+      },
+      {
+        position: 3,
+        pr_url: pr3,
+        branch_name: "slice-3",
+        base_branch: "slice-2",
+        scope: "Slice three",
+        state: "open",
+      },
+    ],
+  });
+  const h = makeHarness({
+    tasks: [task],
+    prHeadShas: {
+      [pr1]: "head-1",
+      [pr2]: "head-2",
+      [pr3]: "head-3",
+    },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  const pr2Index = h.spawnCalls.findIndex((request) => request.pr_url === pr2);
+  assert.notEqual(pr2Index, -1);
+  const oldRequest = h.spawnCalls[pr2Index];
+  h.tasks[0].stacked_prs = h.tasks[0].stacked_prs?.map((entry) => {
+    if (entry.position === 1) {
+      return { ...entry, state: "merged", merge_commit_sha: "merge-1" };
+    }
+    if (entry.position === 2) {
+      return {
+        ...entry,
+        review_generation: 1,
+        pending_restack_of: ["merge-1"],
+      };
+    }
+    return { ...entry, review_generation: 1 };
+  });
+
+  await h.reviewCompletions[pr2Index](
+    makeSummary(oldRequest, {
+      summary: "## Summary\nChanges are required.",
+      summary_head_sha: oldRequest.head_sha,
+      generated_at: "2026-05-01T00:20:00.000Z",
+      agent_review_status: "needs_author_changes",
+      current_run_pid: undefined,
+    })
+  );
+
+  assert.equal(h.tasks[0].resume_requested, undefined);
+  assert.equal(h.tasks[0].resume_run_mode, undefined);
+});
+
+test("the frontier gets a fresh review after its restack is verified", async () => {
+  const pr1 = "https://github.com/acme/widget/pull/1";
+  const pr2 = "https://github.com/acme/widget/pull/2";
+  const pr3 = "https://github.com/acme/widget/pull/3";
+  const task = makeTask({
+    pr_url: pr2,
+    branch_name: "slice-2",
+    stacked_prs: [
+      {
+        position: 1,
+        pr_url: pr1,
+        branch_name: "slice-1",
+        base_branch: "main",
+        scope: "Slice one",
+        state: "merged",
+        merge_commit_sha: "merge-1",
+      },
+      {
+        position: 2,
+        pr_url: pr2,
+        branch_name: "slice-2",
+        base_branch: "main",
+        scope: "Slice two",
+        state: "open",
+        review_generation: 1,
+      },
+      {
+        position: 3,
+        pr_url: pr3,
+        branch_name: "slice-3",
+        base_branch: "slice-2",
+        scope: "Slice three",
+        state: "open",
+        review_generation: 1,
+      },
+    ],
+  });
+  const oldRequest = makeRequest({
+    source: "task",
+    task_id: task.id,
+    task_title: task.title,
+    task_description: task.description,
+    task_plan: task.plan,
+    task_stack_position: 2,
+    task_stack_size: 3,
+    task_pr_scope: "Slice two",
+    task_review_generation: 0,
+    pr_url: pr2,
+    pr_number: 2,
+    head_sha: "head-2",
+  });
+  const h = makeHarness({
+    tasks: [task],
+    reviews: {
+      [pr2]: makeSummary(oldRequest, {
+        summary: "Reviewed before the merge train started.",
+        summary_head_sha: "head-2",
+        generated_at: "2026-05-01T00:20:00.000Z",
+      }),
+    },
+    prHeadShas: { [pr2]: "head-2", [pr3]: "head-3" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.deepEqual(h.builderCalls, []);
+  assert.equal(h.spawnCalls.length, 1);
+  assert.equal(h.spawnCalls[0].pr_url, pr2);
+  assert.equal(h.spawnCalls[0].task_review_generation, 1);
+  assert.equal(h.reviews[pr2].summary, "");
+  assert.equal(h.reviews[pr2].task_review_generation, 1);
+});
+
 test("a hand-off to tier 2 queues the round instead of waking the builder", async () => {
   // A round that hands its diff on preserves the standing verdict without
   // standing behind it: `conversation_resolved` from a reply round whose

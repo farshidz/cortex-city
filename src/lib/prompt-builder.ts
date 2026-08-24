@@ -226,17 +226,23 @@ function buildStackSection(task: Task, baseBranch: string): string {
     lines.push(
       "",
       "### Restack required",
-      `A lower PR has merged. Restack only the frontier, PR ${entry.position} (${entry.pr_url}), in this session. Do not rewrite any higher branch; its review remains on hold until it becomes the frontier.`,
-      "This restack section overrides feedback Instructions 2–7 below. Perform the restack and report it; the worker will verify the rewrite and resume review afterward.",
-      "1. `git fetch origin` and confirm which stack PRs GitHub reports as merged.",
-      cutoff
-        ? `2. Use the stored restack cutoff \`${cutoff}\`. It is the fork point that separates this PR's commits from the lower slice.`
-        : "2. No restack cutoff was captured. Determine the exact fork point that separates this PR's commits from the lower slice. If it cannot be established safely, report `blocked` instead of guessing.",
-      `3. Retarget PR ${entry.position} to \`${newBase}\` (\`gh pr edit <number> --base ${newBase}\`) unless GitHub already did so, then run \`git rebase --onto origin/${newBase} ${cutoff || "<verified-fork-point>"} ${entry.branch_name}\`.`,
-      "4. Resolve any conflicts in this session while preserving only this PR's intended slice.",
-      `5. Push \`${entry.branch_name}\` with \`git push --force-with-lease\`. This is the only branch that may be force-pushed in this run.`,
-      "6. The worker independently verifies that the lower merge commit is an ancestor of the frontier head. Retargeting alone does not complete the restack."
+      `A lower PR has merged. Restack only the frontier, PR ${entry.position} (${entry.pr_url}), in this session. Do not rewrite any higher branch; its review remains on hold until it becomes the frontier.`
     );
+    if (!cutoff) {
+      lines.push(
+        "No durable restack cutoff was captured. Do not rebase, retarget, or force-push the branch. Report `blocked`; the worker will retry cutoff capture before launching another restack run."
+      );
+    } else {
+      lines.push(
+        "This restack section overrides feedback Instructions 2–7 below. Perform the restack and report it; the worker will verify the rewrite and resume review afterward.",
+        "1. `git fetch origin` and confirm which stack PRs GitHub reports as merged.",
+        `2. Use the stored restack cutoff \`${cutoff}\`. It is the fork point that separates this PR's commits from the lower slice.`,
+        `3. Retarget PR ${entry.position} to \`${newBase}\` (\`gh pr edit <number> --base ${newBase}\`) unless GitHub already did so, then run \`git rebase --onto origin/${newBase} ${cutoff} ${entry.branch_name}\`.`,
+        "4. Resolve any conflicts in this session while preserving only this PR's intended slice.",
+        `5. Push \`${entry.branch_name}\` with \`git push --force-with-lease\`. This is the only branch that may be force-pushed in this run.`,
+        "6. The worker independently verifies that the lower merge commit is an ancestor of the frontier head. Retargeting alone does not complete the restack."
+      );
+    }
   }
 
   const closedBaseEntries = stackEntriesOnClosedBase(stack);

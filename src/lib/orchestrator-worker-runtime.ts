@@ -71,6 +71,8 @@ import {
   openStackedPRs,
   reviewableStackedPRs,
   stackClosedBaseFingerprint,
+  stackEntriesMissingCutoffBeforeRestack,
+  stackEntriesRequiringCutoffBeforeRestack,
   stackMergeTrainStarted,
   stackRequiresRestack,
   stackTerminalStatus,
@@ -352,6 +354,40 @@ function reviewableTaskPRTargets(task: Task): Array<{
   return [{ pr_url: task.pr_url }];
 }
 
+// Restacking rewrites the frontier head and changes the immediate successor's
+// base. Active reviews on either target must settle before the builder runs.
+function builderBlockingTaskPRTargets(task: Task): Array<{
+  pr_url: string;
+  stackContext?: StackEntryContext;
+}> {
+  if (!isStackedTask(task) || !stackRequiresRestack(task.stacked_prs)) {
+    return reviewableTaskPRTargets(task);
+  }
+  const size = task.stacked_prs.length;
+  return stackEntriesRequiringCutoffBeforeRestack(task.stacked_prs).map(
+    (entry) => ({
+      pr_url: entry.pr_url,
+      stackContext: { entry, size },
+    })
+  );
+}
+
+function completedReviewIsActionableForTask(
+  task: Task,
+  summary: Pick<
+    ReviewSummary,
+    "pr_url" | "task_review_generation"
+  >
+): boolean {
+  if (!isStackedTask(task)) return task.pr_url === summary.pr_url;
+  const entry = reviewableStackedPRs(task.stacked_prs).find(
+    (candidate) => candidate.pr_url === summary.pr_url
+  );
+  return Boolean(
+    entry && entry.review_generation === summary.task_review_generation
+  );
+}
+
 function stackContextForUrl(
   task: Task,
   prUrl: string
@@ -385,6 +421,7 @@ function taskReviewRequest(
           task_stack_position: stackContext.entry.position,
           task_stack_size: stackContext.size,
           task_pr_scope: stackContext.entry.scope || undefined,
+          task_review_generation: stackContext.entry.review_generation,
         }
       : {}),
     pr_url: targetUrl,
@@ -428,7 +465,9 @@ function shouldDeferBuilderForStoredReviewUrl(
     (!stackContext ||
       (review.task_stack_position === stackContext.entry.position &&
         review.task_stack_size === stackContext.size &&
-        review.task_pr_scope === (stackContext.entry.scope || undefined)));
+        review.task_pr_scope === (stackContext.entry.scope || undefined) &&
+        review.task_review_generation ===
+          stackContext.entry.review_generation));
   if (!taskContextMatches) return true;
   // A failed review retries independently with backoff, but must not deadlock
   // explicit implementation work while the reviewer configuration is repaired.
@@ -454,7 +493,18 @@ function shouldDeferBuilderForStoredReview(
   ) {
     return false;
   }
-  return reviewableTaskPRTargets(task).some((target) =>
+  const targets = builderBlockingTaskPRTargets(task);
+  if (isStackedTask(task) && stackRequiresRestack(task.stacked_prs)) {
+    return targets.some((target) => {
+      const review = reviewMap[target.pr_url];
+      return (
+        activeReviewPids.has(target.pr_url) ||
+        review?.current_run_pid != null ||
+        review?.current_run_id != null
+      );
+    });
+  }
+  return targets.some((target) =>
     shouldDeferBuilderForStoredReviewUrl(
       task,
       target.pr_url,
@@ -1321,19 +1371,22 @@ export async function pollOnce(
     const stack = task.stacked_prs!.map((entry) => ({ ...entry }));
     let stackChanged = false;
 
-    // Capture each slice's fork point before the merge train rewrites any
-    // branch. The adjacent branch tips may have drifted through appended
-    // feedback commits, so use their merge base instead of assuming the
-    // lower branch's current tip is an ancestor of the upper branch.
-    if (
-      !stackMergeTrainStarted(stack) &&
-      deps.getCommitMergeBaseSha &&
-      deps.getPRHeadSha
-    ) {
-      for (let index = 1; index < stack.length; index++) {
-        const entry = stack[index];
-        if (entry.restack_cutoff_sha || entry.state !== "open") continue;
-        const lower = stack[index - 1];
+    // Capture each slice's fork point before a lower branch rewrite can erase
+    // it. Before the train starts this covers every adjacency. During a train,
+    // retry the frontier and its immediate successor until both are durable.
+    if (deps.getCommitMergeBaseSha && deps.getPRHeadSha) {
+      const cutoffCandidates = stackMergeTrainStarted(stack)
+        ? stackEntriesRequiringCutoffBeforeRestack(stack)
+        : [...stack]
+            .sort((a, b) => a.position - b.position)
+            .slice(1)
+            .filter((entry) => entry.state === "open");
+      for (const entry of cutoffCandidates) {
+        if (entry.restack_cutoff_sha) continue;
+        const lower = [...stack]
+          .filter((candidate) => candidate.position < entry.position)
+          .sort((a, b) => b.position - a.position)[0];
+        if (!lower) continue;
         const repoSlug = entry.pr_url.match(
           /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/
         )?.[1];
@@ -1425,12 +1478,32 @@ export async function pollOnce(
         entry.pr_status = undefined;
         entry.merge_commit_sha = mergeCommitSha;
         entry.pending_restack_of = undefined;
-        const nextOpen = stack
+        const heldEntries = stack
           .filter(
             (candidate) =>
               candidate.state === "open" && candidate.position > entry.position
           )
-          .sort((a, b) => a.position - b.position)[0];
+          .sort((a, b) => a.position - b.position);
+        for (const heldEntry of heldEntries) {
+          heldEntry.review_generation = (heldEntry.review_generation ?? 0) + 1;
+          await mutateStoredReview(deps, heldEntry.pr_url, (current) => {
+            if (
+              !current ||
+              current.source !== "task" ||
+              current.task_id !== task.id ||
+              (current.current_run_pid == null &&
+                current.current_run_id == null) ||
+              current.task_review_generation === heldEntry.review_generation
+            ) {
+              return undefined;
+            }
+            return {
+              ...current,
+              task_review_generation: heldEntry.review_generation,
+            };
+          });
+        }
+        const nextOpen = heldEntries[0];
         if (nextOpen) {
           const pending = new Set(nextOpen.pending_restack_of ?? []);
           pending.add(mergeCommitSha);
@@ -1579,7 +1652,9 @@ export async function pollOnce(
           if (cached?.current_run_pid != null) {
             deferForPendingReview = true;
           } else if (
-            (!cached?.summary?.trim() ||
+            (cached?.task_review_generation !==
+              request.task_review_generation ||
+              !cached?.summary?.trim() ||
               !reviewCoversHeadSha(cached, request.head_sha)) &&
             !cached?.error
           ) {
@@ -1599,6 +1674,17 @@ export async function pollOnce(
     if (deferForPendingReview) return;
 
     const restackRequired = stackRequiresRestack(stack);
+    if (restackRequired) {
+      const missingCutoffs = stackEntriesMissingCutoffBeforeRestack(stack);
+      if (missingCutoffs.length > 0) {
+        deps.logger.log(
+          `[worker] Waiting for durable restack cutoffs on ${missingCutoffs
+            .map((entry) => entry.pr_url)
+            .join(", ")}`
+        );
+        return;
+      }
+    }
     // A lower PR closing unmerged under an open dependent breaks the stack
     // without changing any upper-PR hash. Keep forcing a non-destructive run
     // (the prompt forbids rebasing and instructs a `blocked` report naming
@@ -1853,6 +1939,7 @@ function prFieldsFromRequest(request: ReviewRequest) {
     task_stack_position: request.task_stack_position,
     task_stack_size: request.task_stack_size,
     task_pr_scope: request.task_pr_scope,
+    task_review_generation: request.task_review_generation,
     label_only: request.label_only,
     self_authored: request.self_authored,
     pr_url: request.pr_url,
@@ -2054,7 +2141,8 @@ async function runReviewPhases(
         current.task_plan !== pr.task_plan ||
         current.task_stack_position !== pr.task_stack_position ||
         current.task_stack_size !== pr.task_stack_size ||
-        current.task_pr_scope !== pr.task_pr_scope;
+        current.task_pr_scope !== pr.task_pr_scope ||
+        current.task_review_generation !== pr.task_review_generation;
       if (current.head_sha !== pr.head_sha) {
         // A rebase moves the head without changing the effective diff. The
         // verdict is about the diff, so it survives; only a diff that is known to
@@ -2322,7 +2410,7 @@ async function runReviewPhases(
                 task &&
                 !task.paused &&
                 task.status === "in_review" &&
-                trackedTaskPRUrls(task).includes(summary.pr_url) &&
+                completedReviewIsActionableForTask(task, summary) &&
                 isAutomaticReviewEnabled(task)
               ) {
                 await deps.updateTask(task.id, {

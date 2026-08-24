@@ -393,6 +393,7 @@ test("buildReviewPrompt renders the stack section only for stacked tasks", () =>
               scope: "Slice two",
               state: "open",
               pr_status: "clean",
+              restack_cutoff_sha: "fork-point-2",
             },
           ],
         })

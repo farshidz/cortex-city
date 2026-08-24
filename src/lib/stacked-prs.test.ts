@@ -12,6 +12,8 @@ import {
   reviewableStackedPRs,
   stackClosedBaseFingerprint,
   stackEntriesOnClosedBase,
+  stackEntriesMissingCutoffBeforeRestack,
+  stackEntriesRequiringCutoffBeforeRestack,
   stackEntriesRequiringRestack,
   stackRequiresRestack,
   stackTerminalStatus,
@@ -187,6 +189,18 @@ test("reviews cover the whole initial stack and then follow the serial frontier"
   restackPending[1].pending_restack_of = ["merge-1"];
   assert.deepEqual(reviewableStackedPRs(restackPending), []);
   assert.equal(aggregateStackPRStatus(restackPending), undefined);
+  assert.deepEqual(
+    stackEntriesRequiringCutoffBeforeRestack(restackPending).map(
+      (candidate) => candidate.position
+    ),
+    [2, 3]
+  );
+  assert.deepEqual(
+    stackEntriesMissingCutoffBeforeRestack(restackPending).map(
+      (candidate) => candidate.position
+    ),
+    [2, 3]
+  );
 
   restackPending[1].base_branch = "main";
   restackPending[1].pending_restack_of = undefined;
@@ -352,6 +366,7 @@ test("reconcileStackedPRs preserves worker-owned fields and keeps dropped entrie
       pr_status: "clean",
       last_review_gh_state: "hash-2",
       restack_cutoff_sha: "fork-2",
+      review_generation: 2,
       pending_restack_of: ["squash-1"],
     }),
   ];
@@ -383,6 +398,7 @@ test("reconcileStackedPRs preserves worker-owned fields and keeps dropped entrie
   // clear its own obligation by omitting it.
   assert.deepEqual(updated?.pending_restack_of, ["squash-1"]);
   assert.equal(updated?.restack_cutoff_sha, "fork-2");
+  assert.equal(updated?.review_generation, 2);
   assert.equal(kept?.merge_commit_sha, "squash-1");
   // Blank reported scope falls back to the tracked scope.
   assert.equal(updated?.scope, "Original scope");

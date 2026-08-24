@@ -204,6 +204,7 @@ function normalizeReview(review: ReviewSummaryInput): ReviewSummary {
     normalized.task_stack_position = undefined;
     normalized.task_stack_size = undefined;
     normalized.task_pr_scope = undefined;
+    normalized.task_review_generation = undefined;
     if (normalized.self_authored) {
       normalized.my_approval_sha = undefined;
       normalized.my_changes_requested_sha = undefined;

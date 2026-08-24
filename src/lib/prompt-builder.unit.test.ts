@@ -261,6 +261,7 @@ test("buildStackSection flags restack when an open entry bases on a merged branc
         base_branch: "b1",
         scope: "Slice two",
         state: "open",
+        restack_cutoff_sha: "fork-point-2",
       },
     ]),
     "main"
@@ -269,4 +270,33 @@ test("buildStackSection flags restack when an open entry bases on a merged branc
   assert.match(section, /PR 2 \(https:\/\/github\.com\/acme\/widget\/pull\/2\)/);
   assert.match(section, /--force-with-lease/);
   assert.match(section, /rebase --onto/);
+});
+
+test("buildStackSection blocks rather than guessing a missing restack cutoff", () => {
+  const section = buildStackSection(
+    stackedTask([
+      {
+        position: 1,
+        pr_url: "https://github.com/acme/widget/pull/1",
+        branch_name: "b1",
+        base_branch: "main",
+        scope: "Slice one",
+        state: "merged",
+      },
+      {
+        position: 2,
+        pr_url: "https://github.com/acme/widget/pull/2",
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+        state: "open",
+      },
+    ]),
+    "main"
+  );
+
+  assert.match(section, /No durable restack cutoff was captured/);
+  assert.match(section, /Report `blocked`/);
+  assert.doesNotMatch(section, /git rebase --onto/);
+  assert.doesNotMatch(section, /git push --force-with-lease/);
 });

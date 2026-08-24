@@ -829,7 +829,7 @@ function makeStackedDeps(options: StackedDepsOptions) {
       return summary as ReviewSummary;
     },
   };
-  return { deps, launched, upserted, tasks };
+  return { deps, launched, reviewMap, upserted, tasks };
 }
 
 test("pollOnce marks a stacked task merged only when every entry merged", async () => {
@@ -908,6 +908,7 @@ test("pollOnce launches a restack review run when a lower stack PR merges", asyn
         branch_name: "b2",
         base_branch: "b1",
         scope: "Slice two",
+        restack_cutoff_sha: "fork-2",
         // The hash matches the poll result, so only the restack forces a run.
         last_review_gh_state: "hash-2",
       }),
@@ -974,6 +975,7 @@ test("pollOnce keeps forcing restack when GitHub still reports the old base", as
         branch_name: "b2",
         base_branch: "main", // stale claim from the agent report
         scope: "Slice two",
+        restack_cutoff_sha: "fork-2",
         last_review_gh_state: "hash-2",
       }),
     ],
@@ -1315,6 +1317,88 @@ test("pollOnce records the restack obligation only on the next open entry", asyn
   assert.equal(tasks[0].pr_status, undefined);
 });
 
+test("pollOnce invalidates active stack reviews and keeps them ahead of a restack", async () => {
+  const reviewFor = (
+    prUrl: string,
+    position: number,
+    headSha: string,
+    pid: number
+  ): ReviewSummary => ({
+    source: "task",
+    task_id: "task-1",
+    task_title: "t",
+    task_description: "d",
+    task_plan: undefined,
+    task_stack_position: position,
+    task_stack_size: 3,
+    task_pr_scope: `Slice ${position}`,
+    pr_url: prUrl,
+    pr_number: position,
+    repo_slug: "acme/widget",
+    title: `t (stack ${position}/3)`,
+    author: "",
+    head_sha: headSha,
+    created_at: "",
+    updated_at: "",
+    summary: "",
+    generated_at: "",
+    review_status: "summarizing",
+    review_state: "generating",
+    current_run_pid: pid,
+  });
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_1,
+    branch_name: "b1",
+    stacked_prs: [
+      stackEntry(),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice 2",
+        restack_cutoff_sha: "fork-2",
+      }),
+      stackEntry({
+        position: 3,
+        pr_url: STACK_PR_3,
+        branch_name: "b3",
+        base_branch: "b2",
+        scope: "Slice 3",
+        restack_cutoff_sha: "fork-3",
+      }),
+    ],
+  });
+  const { deps, launched, reviewMap, tasks } = makeStackedDeps({
+    tasks: [task],
+    mergedOrClosed: { [STACK_PR_1]: "merged" },
+    mergeCommitShas: { [STACK_PR_1]: "squash-1" },
+    headShas: {
+      [STACK_PR_1]: "head-1",
+      [STACK_PR_2]: "head-2",
+      [STACK_PR_3]: "head-3",
+    },
+    ancestors: { "squash-1...head-2": false },
+    reviewMap: {
+      [STACK_PR_2]: reviewFor(STACK_PR_2, 2, "head-2", 401),
+      [STACK_PR_3]: reviewFor(STACK_PR_3, 3, "head-3", 402),
+    },
+  });
+  const activeReviews = new Map<string, number>();
+
+  await pollOnce(new Map(), deps, activeReviews);
+
+  assert.deepEqual(launched, []);
+  assert.equal(tasks[0].stacked_prs?.[1].review_generation, 1);
+  assert.equal(tasks[0].stacked_prs?.[2].review_generation, 1);
+  assert.equal(reviewMap[STACK_PR_2].task_review_generation, 1);
+  assert.equal(reviewMap[STACK_PR_3].task_review_generation, 1);
+  assert.equal(activeReviews.get(STACK_PR_2), 401);
+  assert.equal(activeReviews.get(STACK_PR_3), 402);
+});
+
 test("pollOnce captures adjacent merge bases as deferred restack cutoffs", async () => {
   const task = sample({
     id: "task-1",
@@ -1402,6 +1486,62 @@ test("pollOnce captures adjacent merge bases as deferred restack cutoffs", async
   assert.equal(tasks[0].stacked_prs?.[2].restack_cutoff_sha, "fork-3");
 });
 
+test("pollOnce blocks a rewrite until a partially missing successor cutoff is captured", async () => {
+  const task = sample({
+    id: "task-1",
+    status: "in_review",
+    pr_url: STACK_PR_1,
+    branch_name: "b1",
+    reviewer_agent_enabled: false,
+    stacked_prs: [
+      stackEntry(),
+      stackEntry({
+        position: 2,
+        pr_url: STACK_PR_2,
+        branch_name: "b2",
+        base_branch: "b1",
+        scope: "Slice two",
+      }),
+      stackEntry({
+        position: 3,
+        pr_url: STACK_PR_3,
+        branch_name: "b3",
+        base_branch: "b2",
+        scope: "Slice three",
+      }),
+    ],
+  });
+  const options: StackedDepsOptions = {
+    tasks: [task],
+    mergedOrClosed: { [STACK_PR_1]: "merged" },
+    mergeCommitShas: { [STACK_PR_1]: "squash-1" },
+    headShas: {
+      [STACK_PR_1]: "head-1",
+      [STACK_PR_2]: "head-2",
+      [STACK_PR_3]: "head-3",
+    },
+    mergeBases: {
+      "head-1...head-2": "fork-2",
+      // The PR 2 → PR 3 lookup failed in this poll.
+      "head-2...head-3": "",
+    },
+    ancestors: { "squash-1...head-2": false },
+  };
+  const { deps, launched, tasks } = makeStackedDeps(options);
+
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.deepEqual(launched, []);
+  assert.equal(tasks[0].stacked_prs?.[1].restack_cutoff_sha, "fork-2");
+  assert.equal(tasks[0].stacked_prs?.[2].restack_cutoff_sha, undefined);
+
+  options.mergeBases!["head-2...head-3"] = "fork-3";
+  await pollOnce(new Map(), deps, new Map());
+
+  assert.equal(tasks[0].stacked_prs?.[2].restack_cutoff_sha, "fork-3");
+  assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
+});
+
 test("pollOnce keeps the restack forced until GitHub verifies the rewrite", async () => {
   const currentReview: ReviewSummary = {
     source: "task",
@@ -1441,6 +1581,7 @@ test("pollOnce keeps the restack forced until GitHub verifies the rewrite", asyn
         // rewritten: the pending obligation must keep the restack armed.
         base_branch: "main",
         scope: "Slice two",
+        restack_cutoff_sha: "fork-2",
         last_review_gh_state: "hash-2",
         pending_restack_of: ["squash-1"],
       }),
@@ -1846,6 +1987,7 @@ test("pollOnce holds every automatic review while the frontier needs restacking"
         branch_name: "b2",
         base_branch: "main",
         scope: "Slice two",
+        restack_cutoff_sha: "fork-2",
         pending_restack_of: ["squash-1"],
       }),
       stackEntry({
@@ -1854,6 +1996,7 @@ test("pollOnce holds every automatic review while the frontier needs restacking"
         branch_name: "b3",
         base_branch: "b2",
         scope: "Slice three",
+        restack_cutoff_sha: "fork-3",
       }),
     ],
   });
