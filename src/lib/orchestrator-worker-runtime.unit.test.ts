@@ -900,6 +900,7 @@ test("pollOnce launches a restack review run when a lower stack PR merges", asyn
     branch_name: "b1",
     agent_runner: "codex",
     permission_mode: "bypassPermissions",
+    reviewer_agent_enabled: false,
     stacked_prs: [
       stackEntry(),
       stackEntry({
@@ -1113,6 +1114,7 @@ test("pollOnce treats a recorded-closed PR that GitHub reports merged as a merge
     status: "in_review",
     pr_url: STACK_PR_2,
     branch_name: "b2",
+    reviewer_agent_enabled: false,
     stack_decision_requested: `closed_base:${STACK_PR_2}<-b1`,
     stacked_prs: [
       stackEntry({ state: "closed" }),
@@ -1151,6 +1153,7 @@ test("pollOnce leaves a merged PR open for retry when no merge commit is availab
     status: "in_review",
     pr_url: STACK_PR_1,
     branch_name: "b1",
+    reviewer_agent_enabled: false,
     stacked_prs: [
       stackEntry({ last_review_gh_state: "hash-1" }),
       stackEntry({
@@ -1275,6 +1278,7 @@ test("pollOnce records the restack obligation only on the next open entry", asyn
     status: "in_review",
     pr_url: STACK_PR_1,
     branch_name: "b1",
+    reviewer_agent_enabled: false,
     stacked_prs: [
       stackEntry({ last_review_gh_state: "hash-1" }),
       stackEntry({
@@ -1317,21 +1321,22 @@ test("pollOnce records the restack obligation only on the next open entry", asyn
   assert.equal(tasks[0].pr_status, undefined);
 });
 
-test("pollOnce invalidates active stack reviews and keeps them ahead of a restack", async () => {
+test("pollOnce drains active initial stack reviews before starting a restack", async () => {
   const reviewFor = (
     prUrl: string,
     position: number,
     headSha: string,
-    pid: number
+    pid?: number
   ): ReviewSummary => ({
     source: "task",
     task_id: "task-1",
     task_title: "t",
-    task_description: "d",
+    task_description: "",
     task_plan: undefined,
     task_stack_position: position,
     task_stack_size: 3,
-    task_pr_scope: `Slice ${position}`,
+    task_pr_scope:
+      position === 1 ? "Slice one" : `Slice ${position}`,
     pr_url: prUrl,
     pr_number: position,
     repo_slug: "acme/widget",
@@ -1340,10 +1345,11 @@ test("pollOnce invalidates active stack reviews and keeps them ahead of a restac
     head_sha: headSha,
     created_at: "",
     updated_at: "",
-    summary: "",
-    generated_at: "",
-    review_status: "summarizing",
-    review_state: "generating",
+    summary: pid == null ? "Reviewed and fine" : "",
+    summary_head_sha: pid == null ? headSha : undefined,
+    generated_at: pid == null ? "2026-05-01T00:00:00.000Z" : "",
+    review_status: pid == null ? "up_to_date" : "summarizing",
+    review_state: pid == null ? "reviewed" : "generating",
     current_run_pid: pid,
   });
   const task = sample({
@@ -1382,6 +1388,7 @@ test("pollOnce invalidates active stack reviews and keeps them ahead of a restac
     },
     ancestors: { "squash-1...head-2": false },
     reviewMap: {
+      [STACK_PR_1]: reviewFor(STACK_PR_1, 1, "head-1"),
       [STACK_PR_2]: reviewFor(STACK_PR_2, 2, "head-2", 401),
       [STACK_PR_3]: reviewFor(STACK_PR_3, 3, "head-3", 402),
     },
@@ -1391,12 +1398,22 @@ test("pollOnce invalidates active stack reviews and keeps them ahead of a restac
   await pollOnce(new Map(), deps, activeReviews);
 
   assert.deepEqual(launched, []);
-  assert.equal(tasks[0].stacked_prs?.[1].review_generation, 1);
-  assert.equal(tasks[0].stacked_prs?.[2].review_generation, 1);
-  assert.equal(reviewMap[STACK_PR_2].task_review_generation, 1);
-  assert.equal(reviewMap[STACK_PR_3].task_review_generation, 1);
+  assert.equal(tasks[0].stacked_prs?.[0].state, "open");
+  assert.equal(tasks[0].stacked_prs?.[1].review_generation, undefined);
+  assert.equal(tasks[0].stacked_prs?.[2].review_generation, undefined);
   assert.equal(activeReviews.get(STACK_PR_2), 401);
   assert.equal(activeReviews.get(STACK_PR_3), 402);
+
+  reviewMap[STACK_PR_2] = reviewFor(STACK_PR_2, 2, "head-2");
+  reviewMap[STACK_PR_3] = reviewFor(STACK_PR_3, 3, "head-3");
+  activeReviews.clear();
+
+  await pollOnce(new Map(), deps, activeReviews);
+
+  assert.equal(tasks[0].stacked_prs?.[0].state, "merged");
+  assert.equal(tasks[0].stacked_prs?.[1].review_generation, 1);
+  assert.equal(tasks[0].stacked_prs?.[2].review_generation, 1);
+  assert.deepEqual(launched, [{ taskId: "task-1", mode: "review" }]);
 });
 
 test("pollOnce captures adjacent merge bases as deferred restack cutoffs", async () => {

@@ -29,6 +29,7 @@ interface HarnessOptions {
   reviews?: Record<string, ReviewSummary>;
   openReviewRequests?: ReviewRequest[];
   prFinalStates?: Record<string, "merged" | "closed" | null>;
+  mergeCommitShas?: Record<string, string>;
   isPRMergedOrClosed?: (prUrl: string) => Promise<"merged" | "closed" | null>;
   isPidRunning?: (pid: number) => boolean;
   spawnPid?: () => number;
@@ -199,6 +200,12 @@ function makeHarness(options: HarnessOptions = {}): Harness {
       builderCalls.push({ task, mode });
       return { pid: spawnPid(), child: {} as never };
     },
+    ...(options.mergeCommitShas
+      ? {
+          getPRMergeCommitSha: async (prUrl: string) =>
+            options.mergeCommitShas?.[prUrl] || "",
+        }
+      : {}),
     ...(options.prDiffHashes
       ? {
           getPRDiffHash: async (prUrl: string, expectedHeadSha?: string) => {
@@ -1923,6 +1930,109 @@ test("the frontier gets a fresh review after its restack is verified", async () 
   assert.equal(h.spawnCalls[0].task_review_generation, 1);
   assert.equal(h.reviews[pr2].summary, "");
   assert.equal(h.reviews[pr2].task_review_generation, 1);
+});
+
+test("the initial stack review sweep drains before a merged PR starts the train", async () => {
+  const pr1 = "https://github.com/acme/widget/pull/1";
+  const pr2 = "https://github.com/acme/widget/pull/2";
+  const pr3 = "https://github.com/acme/widget/pull/3";
+  const task = makeTask({
+    pr_url: pr1,
+    branch_name: "slice-1",
+    stacked_prs: [
+      {
+        position: 1,
+        pr_url: pr1,
+        branch_name: "slice-1",
+        base_branch: "main",
+        scope: "Slice one",
+        state: "open",
+      },
+      {
+        position: 2,
+        pr_url: pr2,
+        branch_name: "slice-2",
+        base_branch: "slice-1",
+        scope: "Slice two",
+        state: "open",
+        restack_cutoff_sha: "fork-2",
+      },
+      {
+        position: 3,
+        pr_url: pr3,
+        branch_name: "slice-3",
+        base_branch: "slice-2",
+        scope: "Slice three",
+        state: "open",
+        restack_cutoff_sha: "fork-3",
+      },
+    ],
+  });
+  const initialRequest = (
+    prUrl: string,
+    position: number,
+    headSha: string
+  ): ReviewRequest =>
+    makeRequest({
+      source: "task",
+      task_id: task.id,
+      task_title: task.title,
+      task_description: task.description,
+      task_plan: task.plan,
+      task_stack_position: position,
+      task_stack_size: 3,
+      task_pr_scope: `Slice ${["one", "two", "three"][position - 1]}`,
+      pr_url: prUrl,
+      pr_number: position,
+      head_sha: headSha,
+    });
+  const completedReview = (request: ReviewRequest): ReviewSummary =>
+    makeSummary(request, {
+      summary: "## Summary\nInitial review complete.",
+      summary_head_sha: request.head_sha,
+      generated_at: "2026-05-01T00:20:00.000Z",
+      agent_review_status: "ready_for_human_approval",
+      current_run_pid: undefined,
+    });
+  const h = makeHarness({
+    config: { max_parallel_reviews: 1 },
+    tasks: [task],
+    reviews: {
+      [pr1]: completedReview(initialRequest(pr1, 1, "head-1")),
+    },
+    prHeadShas: {
+      [pr1]: "head-1",
+      [pr2]: "head-2",
+      [pr3]: "head-3",
+    },
+    prFinalStates: { [pr1]: "merged" },
+    mergeCommitShas: { [pr1]: "merge-1" },
+  });
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.tasks[0].stacked_prs?.[0].state, "open");
+  assert.deepEqual(
+    h.spawnCalls.map((request) => request.pr_url),
+    [pr2]
+  );
+  h.reviews[pr2] = completedReview(h.spawnCalls[0]);
+  await h.reviewCompletions[0](h.reviews[pr2]);
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.tasks[0].stacked_prs?.[0].state, "open");
+  assert.deepEqual(
+    h.spawnCalls.map((request) => request.pr_url),
+    [pr2, pr3]
+  );
+  h.reviews[pr3] = completedReview(h.spawnCalls[1]);
+  await h.reviewCompletions[1](h.reviews[pr3]);
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(h.tasks[0].stacked_prs?.[0].state, "merged");
+  assert.deepEqual(h.builderCalls.map((call) => call.task.id), [task.id]);
 });
 
 test("a hand-off to tier 2 queues the round instead of waking the builder", async () => {

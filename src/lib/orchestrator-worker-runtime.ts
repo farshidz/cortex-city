@@ -388,6 +388,35 @@ function completedReviewIsActionableForTask(
   );
 }
 
+function stackEntriesMissingInitialReview(
+  task: Task,
+  stack: TaskStackedPR[],
+  reviewMap: Record<string, ReviewSummary>,
+  taskReviewHeads: Map<string, string>
+): TaskStackedPR[] {
+  const size = stack.length;
+  return openStackedPRs(stack).filter((entry) => {
+    const review = reviewMap[entry.pr_url];
+    const headSha = taskReviewHeads.get(entry.pr_url);
+    return !(
+      headSha &&
+      review?.source === "task" &&
+      review.task_id === task.id &&
+      review.task_title === task.title &&
+      review.task_description === task.description &&
+      review.task_plan === task.plan &&
+      review.task_stack_position === entry.position &&
+      review.task_stack_size === size &&
+      review.task_pr_scope === (entry.scope || undefined) &&
+      review.task_review_generation === entry.review_generation &&
+      review.summary?.trim() &&
+      review.current_run_pid == null &&
+      review.current_run_id == null &&
+      reviewCoversHeadSha(review, headSha)
+    );
+  });
+}
+
 function stackContextForUrl(
   task: Task,
   prUrl: string
@@ -1443,6 +1472,29 @@ export async function pollOnce(
       if (entry.state !== "open") continue;
       const prState = await deps.isPRMergedOrClosed(entry.pr_url);
       if (prState === "merged") {
+        // The initial review sweep is a barrier over the entire stack. A human
+        // can merge the bottom PR while upper reviews are still queued behind
+        // the concurrency limit; keep the pre-train scheduling set intact until
+        // every open entry has completed that promised first review.
+        if (
+          !stackMergeTrainStarted(stack) &&
+          isAutomaticReviewEnabled(task)
+        ) {
+          const missingInitialReviews = stackEntriesMissingInitialReview(
+            task,
+            stack,
+            deps.readReviewSummaryMap(),
+            taskReviewHeads
+          );
+          if (missingInitialReviews.length > 0) {
+            deps.logger.log(
+              `[worker] Waiting for initial stack reviews before starting the merge train: ${missingInitialReviews
+                .map((candidate) => candidate.pr_url)
+                .join(", ")}`
+            );
+            continue;
+          }
+        }
         // Record the durable restack obligation in the same update that marks
         // the entry merged. Serial merge trains wake only the next open entry;
         // higher entries stay on review hold until they become the frontier.
