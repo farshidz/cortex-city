@@ -299,6 +299,10 @@ export interface ReviewRequest {
   head_sha: string;
   created_at: string;
   updated_at: string;
+  // Fingerprint of the cheap batched GitHub snapshot that authorized the
+  // detailed review/comment reads used to build this request. Detailed reads
+  // are cached while this value is unchanged.
+  github_observation_key?: string;
   // SHA of the most recent review the signed-in user submitted on this PR.
   // Undefined if the user has never reviewed.
   my_last_review_sha?: string;

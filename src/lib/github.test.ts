@@ -37,11 +37,16 @@ function writeFakeGh(workspace: string) {
   writeFileSync(
     binaryPath,
     `#!/usr/bin/env node
-const { readFileSync } = require("fs");
+const { appendFileSync, readFileSync } = require("fs");
 
 const responses = JSON.parse(readFileSync(process.env.FAKE_GH_RESPONSES_FILE, "utf8"));
 const key = process.argv.slice(2).join(" ");
-const response = responses[key];
+appendFileSync(process.env.FAKE_GH_CALLS_FILE, JSON.stringify(key) + "\\n");
+const response = responses[key] || (
+  key.startsWith("api graphql -f query=query CortexCityPullRequestSnapshots")
+    ? responses.__graphql_snapshots__
+    : undefined
+);
 
 if (!response) {
   process.stderr.write("No fake gh response for: " + key);
@@ -68,14 +73,17 @@ function runGithubScript(
   body: string
 ) {
   const responsesFile = path.join(workspace, "gh-responses.json");
+  const callsFile = path.join(workspace, "gh-calls.txt");
   writeFileSync(responsesFile, JSON.stringify(responses, null, 2));
+  writeFileSync(callsFile, "");
 
   const output = execFileSync(
     TSX_BIN,
     [
       "--eval",
       [
-        `import { deliverReviewerComment, getCommitMergeBaseSha, getPRHeadSha, getPRStateHash, getSubmittedCommentIds, getLatestForeignCommentAt, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { deliverReviewerComment, getCommitMergeBaseSha, getMyReviewSignals, getPRHeadSha, getPRSnapshots, getPRStateHash, getSubmittedCommentIds, getLatestForeignCommentAt, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { readFileSync } from "node:fs";`,
         "(async () => {",
         body,
         "})().catch((error) => {",
@@ -90,6 +98,7 @@ function runGithubScript(
       env: {
         ...process.env,
         PATH: `${path.join(workspace, "bin")}:${process.env.PATH || ""}`,
+        FAKE_GH_CALLS_FILE: callsFile,
         FAKE_GH_RESPONSES_FILE: responsesFile,
       },
     }
@@ -159,6 +168,217 @@ function prDeliveryTargetKey(): string {
 function checksKey(prUrl: string): string {
   return `pr checks ${prUrl} --json name,state --jq [.[] | .name + "=" + .state] | sort | join(",")`;
 }
+
+test("getPRSnapshots batches PR state, refs, and checks into one GraphQL call", () => {
+  const workspace = setupWorkspace();
+  const firstUrl = "https://github.com/acme/widget/pull/123";
+  const secondUrl = "https://github.com/acme/widget/pull/124";
+  const graphQLResponse = {
+    data: {
+      r0: {
+        p0: {
+          state: "OPEN",
+          mergedAt: null,
+          mergeCommit: null,
+          headRefOid: "head-123",
+          baseRefName: "main",
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "BLOCKED",
+          updatedAt: "2026-05-01T00:00:00Z",
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  statusCheckRollup: {
+                    contexts: {
+                      nodes: [
+                        {
+                          __typename: "CheckRun",
+                          name: "test",
+                          status: "COMPLETED",
+                          conclusion: "SUCCESS",
+                        },
+                      ],
+                      pageInfo: { hasNextPage: false },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          reviews: { nodes: [] },
+          comments: { nodes: [] },
+        },
+        p1: {
+          state: "CLOSED",
+          mergedAt: "2026-05-02T00:00:00Z",
+          mergeCommit: { oid: "merge-124" },
+          headRefOid: "head-124",
+          baseRefName: "release",
+          mergeable: "UNKNOWN",
+          mergeStateStatus: "UNKNOWN",
+          updatedAt: "2026-05-02T00:00:00Z",
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  statusCheckRollup: {
+                    contexts: {
+                      nodes: [
+                        {
+                          __typename: "CheckRun",
+                          name: "deploy",
+                          status: "IN_PROGRESS",
+                          conclusion: null,
+                        },
+                      ],
+                      pageInfo: { hasNextPage: false },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          reviews: {
+            nodes: [
+              {
+                databaseId: 9,
+                state: "APPROVED",
+                submittedAt: "2026-05-01T23:00:00Z",
+                commit: { oid: "head-124" },
+              },
+            ],
+          },
+          comments: { nodes: [] },
+        },
+      },
+    },
+  };
+
+  const result = runGithubScript(
+    workspace,
+    {
+      __graphql_snapshots__: { stdout: JSON.stringify(graphQLResponse) },
+    },
+    `
+      const snapshots = await getPRSnapshots(${JSON.stringify([
+        firstUrl,
+        secondUrl,
+        firstUrl,
+      ])});
+      const calls = readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf8")
+        .trim().split(/\\r?\\n/).filter(Boolean).map((line) => JSON.parse(line));
+      console.log(JSON.stringify({ snapshots, calls }));
+    `
+  ) as {
+    snapshots: Record<string, {
+      state: string;
+      head_sha: string;
+      base_branch: string;
+      merge_commit_sha?: string;
+      pr_status: string;
+      checks_state: string;
+      observation_key: string;
+    }>;
+    calls: string[];
+  };
+
+  assert.equal(result.calls.length, 1);
+  assert.match(result.calls[0], /^api graphql -f query=query CortexCity/);
+  assert.deepEqual(Object.keys(result.snapshots).sort(), [firstUrl, secondUrl]);
+  assert.deepEqual(
+    {
+      state: result.snapshots[firstUrl].state,
+      head: result.snapshots[firstUrl].head_sha,
+      base: result.snapshots[firstUrl].base_branch,
+      status: result.snapshots[firstUrl].pr_status,
+      checks: result.snapshots[firstUrl].checks_state,
+    },
+    {
+      state: "open",
+      head: "head-123",
+      base: "main",
+      status: "needs_approval",
+      checks: "test=SUCCESS",
+    }
+  );
+  assert.equal(result.snapshots[secondUrl].state, "merged");
+  assert.equal(result.snapshots[secondUrl].merge_commit_sha, "merge-124");
+  assert.equal(result.snapshots[secondUrl].pr_status, "checks_pending");
+  assert.match(result.snapshots[firstUrl].observation_key, /^[0-9a-f]{16}$/);
+  assert.notEqual(
+    result.snapshots[firstUrl].observation_key,
+    result.snapshots[secondUrl].observation_key
+  );
+});
+
+test("snapshot observation keys cache detailed PR activity across consumers", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const responses = {
+    [reviewsKey()]: { stdout: JSON.stringify([[]]) },
+    [reviewCommentsKey()]: { stdout: JSON.stringify([[]]) },
+    [issueCommentsKey()]: { stdout: JSON.stringify([[]]) },
+  };
+
+  const result = runGithubScript(
+    workspace,
+    responses,
+    `
+      const snapshot = {
+        pr_url: ${JSON.stringify(prUrl)},
+        state: "open",
+        head_sha: "abc123",
+        base_branch: "main",
+        pr_status: "clean",
+        checks_state: "test=SUCCESS",
+        updated_at: "2026-05-01T00:00:00Z",
+        observation_key: "snapshot-a",
+      };
+      await getPRStateHash(${JSON.stringify(prUrl)}, snapshot);
+      await getPRStateHash(${JSON.stringify(prUrl)}, snapshot);
+      await getLatestForeignCommentAt(${JSON.stringify(prUrl)}, snapshot.observation_key);
+      await getMyReviewSignals(${JSON.stringify(prUrl)}, "me", snapshot.observation_key);
+      const firstCalls = readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf8")
+        .trim().split(/\\r?\\n/).filter(Boolean).map((line) => JSON.parse(line));
+      await getPRStateHash(${JSON.stringify(prUrl)}, {
+        ...snapshot,
+        observation_key: "snapshot-b",
+      });
+      const allCalls = readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf8")
+        .trim().split(/\\r?\\n/).filter(Boolean).map((line) => JSON.parse(line));
+      console.log(JSON.stringify({
+        firstDetailedCalls: firstCalls.filter((call) => call.includes("--paginate --slurp")).length,
+        allDetailedCalls: allCalls.filter((call) => call.includes("--paginate --slurp")).length,
+      }));
+    `
+  ) as { firstDetailedCalls: number; allDetailedCalls: number };
+
+  assert.deepEqual(result, { firstDetailedCalls: 3, allDetailedCalls: 6 });
+});
+
+test("GitHub calls back off after a rate-limit response", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const result = runGithubScript(
+    workspace,
+    {
+      [prHeadShaKey(prUrl)]: {
+        stderr: "API rate limit exceeded",
+        exitCode: 1,
+      },
+    },
+    `
+      const first = await getPRHeadSha(${JSON.stringify(prUrl)});
+      const second = await getPRHeadSha(${JSON.stringify(prUrl)});
+      const calls = readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf8")
+        .trim().split(/\\r?\\n/).filter(Boolean).map((line) => JSON.parse(line));
+      console.log(JSON.stringify({ first, second, callCount: calls.length }));
+    `
+  );
+
+  assert.deepEqual(result, { first: "", second: "", callCount: 1 });
+});
 
 test("getPRStateHash keeps a stable hash when GitHub reports no checks", () => {
   const workspace = setupWorkspace();

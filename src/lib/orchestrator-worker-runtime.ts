@@ -17,7 +17,9 @@ import {
   getPRDiffHash,
   getPRHeadSha,
   getPRMergeCommitSha,
+  getPRSnapshots,
   getPRStateHash,
+  type GitHubPRSnapshot,
   type PendingReviewDrain,
   getPRStatus,
   getReviewRequestedPRs,
@@ -214,6 +216,8 @@ export interface WorkerRuntimeDeps {
   listUnresolvedReviewerThreads?: typeof listUnresolvedReviewerThreads;
   getPRHeadSha?: typeof getPRHeadSha;
   getPRMergeCommitSha?: typeof getPRMergeCommitSha;
+  // Absent preserves the legacy per-PR polling path.
+  getPRSnapshots?: typeof getPRSnapshots;
   getPRStateHash: typeof getPRStateHash;
   // Absent leaves a recorded unsubmitted-review condition to the next review
   // round instead of retrying it from the poll.
@@ -254,6 +258,7 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   getLatestForeignCommentAt,
   getPRHeadSha,
   getPRMergeCommitSha,
+  getPRSnapshots,
   getPRStateHash,
   getPRStatus,
   getReviewRequestedPRs,
@@ -435,7 +440,8 @@ function stackContextForUrl(
 function taskReviewRequest(
   task: Task & { pr_url: string },
   headSha: string,
-  stackContext?: StackEntryContext
+  stackContext?: StackEntryContext,
+  githubObservationKey?: string
 ): ReviewRequest | undefined {
   const targetUrl = stackContext?.entry.pr_url ?? task.pr_url;
   const match = targetUrl.match(
@@ -467,6 +473,9 @@ function taskReviewRequest(
     head_sha: headSha.trim(),
     created_at: task.created_at,
     updated_at: task.updated_at,
+    ...(githubObservationKey
+      ? { github_observation_key: githubObservationKey }
+      : {}),
   };
 }
 
@@ -1250,6 +1259,43 @@ export async function pollOnce(
 
   tasks = deps.readTasks();
 
+  let taskPRSnapshots: Record<string, GitHubPRSnapshot> = {};
+  if (deps.getPRSnapshots) {
+    const urls = tasks.flatMap((task) => {
+      if (
+        task.paused ||
+        task.status !== "in_review" ||
+        typeof task.pr_url !== "string"
+      ) {
+        return [];
+      }
+      if (isStackedTask(task)) {
+        return task.stacked_prs
+          .filter((entry) => entry.state !== "merged")
+          .map((entry) => entry.pr_url);
+      }
+      return [task.pr_url];
+    });
+    try {
+      taskPRSnapshots = await deps.getPRSnapshots(urls);
+    } catch (error) {
+      deps.logger.error("[worker] Failed to fetch batched PR snapshots:", error);
+    }
+  }
+  const taskPRSnapshot = (prUrl: string) => taskPRSnapshots[prUrl];
+  const observedPRState = async (prUrl: string) => {
+    const snapshot = taskPRSnapshot(prUrl);
+    return snapshot
+      ? snapshot.state === "open"
+        ? null
+        : snapshot.state
+      : deps.isPRMergedOrClosed(prUrl);
+  };
+  const observedPRStatus = async (prUrl: string) => {
+    const snapshot = taskPRSnapshot(prUrl);
+    return snapshot?.pr_status ?? deps.getPRStatus(prUrl);
+  };
+
   deps.logger.log("[worker] Poll phase: resolve task review heads");
   const taskReviewHeads = new Map<string, string>();
   const storedReviewsBeforeHeadResolution = deps.readReviewSummaryMap();
@@ -1274,7 +1320,11 @@ export async function pollOnce(
         })
         .map(async (target) => {
           try {
-            const headSha = (await deps.getPRHeadSha?.(target.pr_url))?.trim();
+            const headSha = (
+              taskPRSnapshot(target.pr_url)?.head_sha ||
+              (await deps.getPRHeadSha?.(target.pr_url)) ||
+              ""
+            ).trim();
             if (headSha) {
               if (
                 !target.stackContext &&
@@ -1407,7 +1457,10 @@ export async function pollOnce(
     // Capture each slice's fork point before a lower branch rewrite can erase
     // it. Before the train starts this covers every adjacency. During a train,
     // retry the frontier and its immediate successor until both are durable.
-    if (deps.getCommitMergeBaseSha && deps.getPRHeadSha) {
+    if (
+      deps.getCommitMergeBaseSha &&
+      (deps.getPRHeadSha || deps.getPRSnapshots)
+    ) {
       const cutoffCandidates = stackMergeTrainStarted(stack)
         ? stackEntriesRequiringCutoffBeforeRestack(stack)
         : [...stack]
@@ -1425,10 +1478,14 @@ export async function pollOnce(
         try {
           const lowerHead =
             taskReviewHeads.get(lower.pr_url) ||
-            (await deps.getPRHeadSha(lower.pr_url)).trim();
+            taskPRSnapshot(lower.pr_url)?.head_sha ||
+            (await deps.getPRHeadSha?.(lower.pr_url))?.trim() ||
+            "";
           const entryHead =
             taskReviewHeads.get(entry.pr_url) ||
-            (await deps.getPRHeadSha(entry.pr_url)).trim();
+            taskPRSnapshot(entry.pr_url)?.head_sha ||
+            (await deps.getPRHeadSha?.(entry.pr_url))?.trim() ||
+            "";
           if (!lowerHead || !entryHead) continue;
           const cutoff = (
             await deps.getCommitMergeBaseSha(repoSlug, lowerHead, entryHead)
@@ -1457,7 +1514,7 @@ export async function pollOnce(
         // back to open in-memory so the standard handling below observes the
         // fresh state (including a merge) through its fail-closed path.
         try {
-          const currentState = await deps.isPRMergedOrClosed(entry.pr_url);
+          const currentState = await observedPRState(entry.pr_url);
           if (currentState !== "closed") {
             deps.logger.log(
               `[worker] Stack PR no longer closed for "${task.title}": ${entry.pr_url} (${currentState ?? "open"})`
@@ -1473,7 +1530,7 @@ export async function pollOnce(
         }
       }
       if (entry.state !== "open") continue;
-      const prState = await deps.isPRMergedOrClosed(entry.pr_url);
+      const prState = await observedPRState(entry.pr_url);
       if (prState === "merged") {
         // The initial review sweep is a barrier over the entire stack. A human
         // can merge the bottom PR while upper reviews are still queued behind
@@ -1504,7 +1561,9 @@ export async function pollOnce(
         // Fail closed: without a non-empty merge commit the entry stays open
         // and is retried next poll — marking it merged without the obligation
         // would permanently bypass the ancestry verification.
-        if (!deps.getPRMergeCommitSha) {
+        const observedMergeCommitSha =
+          taskPRSnapshot(entry.pr_url)?.merge_commit_sha?.trim() || "";
+        if (!observedMergeCommitSha && !deps.getPRMergeCommitSha) {
           deps.logger.error(
             `[worker] Cannot read merge commits; leaving ${entry.pr_url} open to retry`
           );
@@ -1512,7 +1571,10 @@ export async function pollOnce(
         }
         let mergeCommitSha = "";
         try {
-          mergeCommitSha = (await deps.getPRMergeCommitSha(entry.pr_url)).trim();
+          mergeCommitSha =
+            observedMergeCommitSha ||
+            (await deps.getPRMergeCommitSha?.(entry.pr_url))?.trim() ||
+            "";
         } catch (error) {
           deps.logger.error(
             `[worker] Failed to read merge commit for ${entry.pr_url}; retrying next poll:`,
@@ -1587,7 +1649,7 @@ export async function pollOnce(
           (candidate) => candidate.pr_url === entry.pr_url
         )
       ) {
-        const prStatus = await deps.getPRStatus(entry.pr_url);
+        const prStatus = await observedPRStatus(entry.pr_url);
         if (prStatus !== "unknown" && prStatus !== entry.pr_status) {
           entry.pr_status = prStatus;
           stackChanged = true;
@@ -1597,7 +1659,9 @@ export async function pollOnce(
       // only claims a base; if a retarget failed (or never happened), this
       // override keeps the restack detector armed instead of trusting the
       // claim.
-      const actualBase = (await deps.getPRBaseBranch?.(entry.pr_url))?.trim();
+      const actualBase =
+        taskPRSnapshot(entry.pr_url)?.base_branch.trim() ||
+        (await deps.getPRBaseBranch?.(entry.pr_url))?.trim();
       if (actualBase && actualBase !== entry.base_branch) {
         deps.logger.log(
           `[worker] Stack PR base for ${entry.pr_url} is ${actualBase} on GitHub (recorded ${entry.base_branch})`
@@ -1620,6 +1684,7 @@ export async function pollOnce(
         )?.[1];
         const headSha =
           taskReviewHeads.get(entry.pr_url) ||
+          taskPRSnapshot(entry.pr_url)?.head_sha ||
           (await deps.getPRHeadSha?.(entry.pr_url))?.trim() ||
           "";
         if (repoSlug && headSha && deps.isCommitAncestor) {
@@ -1700,7 +1765,12 @@ export async function pollOnce(
     for (const entry of reviewEntries) {
       const headSha = taskReviewHeads.get(entry.pr_url) || "";
       const cached = reviewMap[entry.pr_url];
-      const request = taskReviewRequest(task, headSha, { entry, size });
+      const request = taskReviewRequest(
+        task,
+        headSha,
+        { entry, size },
+        taskPRSnapshot(entry.pr_url)?.observation_key
+      );
       if (automaticReviewEnabled) {
         if (request) {
           taskReviewRequests.push(request);
@@ -1768,7 +1838,10 @@ export async function pollOnce(
     let anyHash = false;
     let anyHashChanged = false;
     for (const entry of reviewEntries) {
-      const ghState = await deps.getPRStateHash(entry.pr_url);
+      const ghState = await deps.getPRStateHash(
+        entry.pr_url,
+        taskPRSnapshot(entry.pr_url)
+      );
       if (!ghState) continue;
       anyHash = true;
       entryHashes[entry.pr_url] = ghState;
@@ -1815,7 +1888,7 @@ export async function pollOnce(
           return;
         }
         const hasManualInstruction = Boolean(task.pending_manual_instruction);
-        const prState = await deps.isPRMergedOrClosed(task.pr_url);
+        const prState = await observedPRState(task.pr_url);
         if (prState) {
           deps.logger.log(`[worker] PR ${prState} for "${task.title}"`);
           liveTaskOwners.delete(task.pr_url);
@@ -1823,7 +1896,7 @@ export async function pollOnce(
           return;
         }
 
-        const prStatus = await deps.getPRStatus(task.pr_url);
+        const prStatus = await observedPRStatus(task.pr_url);
         if (prStatus !== "unknown" && prStatus !== task.pr_status) {
           await deps.updateTask(task.id, { pr_status: prStatus });
           task.pr_status = prStatus;
@@ -1837,7 +1910,12 @@ export async function pollOnce(
         const request =
           task.review_migration_head_sha === headSha
             ? undefined
-            : taskReviewRequest(task, headSha);
+            : taskReviewRequest(
+                task,
+                headSha,
+                undefined,
+                taskPRSnapshot(task.pr_url)?.observation_key
+              );
         if (automaticReviewEnabled) {
           if (request) {
             taskReviewRequests.push(request);
@@ -1862,7 +1940,10 @@ export async function pollOnce(
 
         if (prStatus === "checks_pending" && !hasManualInstruction) return;
 
-        const ghState = await deps.getPRStateHash(task.pr_url);
+        const ghState = await deps.getPRStateHash(
+          task.pr_url,
+          taskPRSnapshot(task.pr_url)
+        );
         if (!ghState && !hasManualInstruction) return;
 
         const hasConflicts = prStatus === "conflicts";
@@ -2005,6 +2086,9 @@ function prFieldsFromRequest(request: ReviewRequest) {
     head_sha: request.head_sha,
     created_at: request.created_at,
     updated_at: request.updated_at,
+    ...(request.github_observation_key
+      ? { github_observation_key: request.github_observation_key }
+      : {}),
     my_last_review_sha: request.my_last_review_sha,
     my_approval_sha: request.my_approval_sha,
     my_changes_requested_sha: request.my_changes_requested_sha,
@@ -2121,7 +2205,9 @@ async function runReviewPhases(
     const request = taskReviewRequest(
       { ...task, pr_url: task.pr_url },
       inboundRequestsByUrl.get(prUrl)?.head_sha || cached.head_sha,
-      stackContextForUrl(task, prUrl)
+      stackContextForUrl(task, prUrl),
+      inboundRequestsByUrl.get(prUrl)?.github_observation_key ||
+        cached.github_observation_key
     );
     if (!request) continue;
     // The live task owns this URL even when its scheduling guards prevent a
@@ -2272,7 +2358,8 @@ async function runReviewPhases(
         reviewContextChanged ||
         current.label_only !== pr.label_only ||
         current.title !== pr.title ||
-        current.updated_at !== pr.updated_at;
+        current.updated_at !== pr.updated_at ||
+        current.github_observation_key !== pr.github_observation_key;
       // A freshly computed diff identity still needs one write at an otherwise
       // unchanged head.
       const diffIdentityChanged = Boolean(
@@ -2396,8 +2483,9 @@ async function runReviewPhases(
         config,
       };
       let decision = decideReviewRound(roundInput);
-      // Looking for conversation costs two GitHub calls, so it only happens once
-      // the code itself needs no round — which is the steady state.
+      // Looking for conversation happens only once the code itself needs no
+      // round. The batch observation key makes this a cached read while the PR
+      // remains unchanged.
       if (
         !decision.round &&
         decision.reason === "up_to_date" &&
@@ -2405,7 +2493,10 @@ async function runReviewPhases(
       ) {
         let latestConversationAt = "";
         try {
-          latestConversationAt = await deps.getLatestForeignCommentAt(pr.pr_url);
+          latestConversationAt = await deps.getLatestForeignCommentAt(
+            pr.pr_url,
+            pr.github_observation_key
+          );
         } catch (error) {
           deps.logger.error(
             `[worker] Failed to read conversation timestamps for ${pr.pr_url}:`,

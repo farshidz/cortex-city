@@ -22,6 +22,7 @@ test("github exports are reachable via module namespace", () => {
   assert.equal(typeof github.getPRDiffHash, "function");
   assert.equal(typeof github.getCommitMergeBaseSha, "function");
   assert.equal(typeof github.getPRHeadSha, "function");
+  assert.equal(typeof github.getPRSnapshots, "function");
   assert.equal(typeof github.getPRStateHash, "function");
   assert.equal(typeof github.listReviewerAuthoredComments, "function");
   assert.equal(typeof github.reviewDiffIdentityHash, "function");
