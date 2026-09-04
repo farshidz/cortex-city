@@ -8,11 +8,18 @@ import * as github from "./github";
 
 const {
   parsePRUrl,
+  firstLineOf,
   isNoChecksError,
   serializeCheckStates,
   isCommentFromSubmittedReview,
   isHashSignificantReview,
 } = github.__testUtils;
+
+test("firstLineOf returns a compact thread pointer", () => {
+  assert.equal(firstLineOf("\n  First finding.  \nMore detail"), "First finding.");
+  assert.equal(firstLineOf("   \n"), "(no text)");
+  assert.equal(firstLineOf("a".repeat(205)), `${"a".repeat(197)}...`);
+});
 
 test("github exports are reachable via module namespace", () => {
   assert.equal(typeof github.getAuthenticatedUserLogin, "function");

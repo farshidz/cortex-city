@@ -2127,6 +2127,7 @@ export async function deliverReviewerComment(
 
 export const __testUtils = {
   parsePRUrl,
+  firstLineOf,
   isNoChecksError,
   serializeCheckStates,
   isCommentFromSubmittedReview,
