@@ -694,6 +694,78 @@ test("pollOnce reuses one batched snapshot for task PR polling", async () => {
   assert.equal(h.builderCalls.length, 0);
 });
 
+test("pollOnce falls back before scheduling when a page-2 check makes the snapshot incomplete", async () => {
+  const task = makeTask({
+    pr_status: "clean",
+    last_review_gh_state: "previous-state",
+  });
+  const prUrl = task.pr_url!;
+  const controlUrl = "https://github.com/acme/widget/pull/2";
+  const controlTask = makeTask({
+    id: "task-2",
+    pr_url: controlUrl,
+    reviewer_agent_enabled: false,
+    pr_status: "clean",
+    last_review_gh_state: "control-state",
+  });
+  const h = makeHarness({
+    tasks: [task, controlTask],
+    prHeadShas: { [prUrl]: "oldSha" },
+    reviews: { [prUrl]: makeTaskReviewRow() },
+  });
+  let fallbackStatusCalls = 0;
+  h.deps.getPRSnapshots = async () => ({
+    [controlUrl]: {
+      pr_url: controlUrl,
+      state: "open",
+      head_sha: "control-head",
+      base_branch: "main",
+      pr_status: "clean",
+      checks_state: "test=SUCCESS",
+      updated_at: controlTask.updated_at,
+      observation_key: "control-snapshot",
+    },
+  });
+  h.deps.getPRStatus = async () => {
+    fallbackStatusCalls += 1;
+    return "checks_pending";
+  };
+  const stateHashUrls: string[] = [];
+  h.deps.getPRStateHash = async (url) => {
+    stateHashUrls.push(url);
+    return url === controlUrl ? "control-state" : "changed-state";
+  };
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.equal(fallbackStatusCalls, 1);
+  assert.equal(h.tasks[0].pr_status, "checks_pending");
+  assert.deepEqual(stateHashUrls, [controlUrl]);
+  assert.equal(h.builderCalls.length, 0);
+});
+
+test("pollOnce uses lifecycle fallback for a snapshot omitted after a field-level error", async () => {
+  const task = makeTask({ pr_status: "clean" });
+  const prUrl = task.pr_url!;
+  let lifecycleCalls = 0;
+  const h = makeHarness({
+    tasks: [task],
+    prHeadShas: { [prUrl]: "oldSha" },
+    reviews: { [prUrl]: makeTaskReviewRow() },
+    isPRMergedOrClosed: async () => {
+      lifecycleCalls += 1;
+      return "closed";
+    },
+  });
+  h.deps.getPRSnapshots = async () => ({});
+
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+
+  assert.ok(lifecycleCalls >= 1);
+  assert.equal(h.tasks[0].status, "closed");
+  assert.equal(h.builderCalls.length, 0);
+});
+
 test("pollOnce runs a tier-1 verification round seeded with its open threads", async () => {
   const task = makeTask();
   const prUrl = task.pr_url!;

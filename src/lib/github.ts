@@ -138,6 +138,10 @@ interface GraphQLSnapshotNode {
   };
 }
 
+interface GraphQLResponseError {
+  path?: Array<string | number>;
+}
+
 interface ReviewCommentItem {
   id: number;
   pull_request_review_id: number | null;
@@ -383,9 +387,37 @@ function snapshotCheckState(node: GraphQLSnapshotNode): {
   pending: boolean;
   complete: boolean;
 } {
-  const contexts =
-    node.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts;
-  const checks = (contexts?.nodes || [])
+  const rollup = node.commits?.nodes?.[0]?.commit?.statusCheckRollup;
+  if (rollup === null) {
+    return { serialized: "", pending: false, complete: true };
+  }
+
+  const contexts = rollup?.contexts;
+  const nodes = contexts?.nodes;
+  const complete =
+    Array.isArray(nodes) &&
+    typeof contexts?.pageInfo?.hasNextPage === "boolean" &&
+    !contexts.pageInfo.hasNextPage &&
+    nodes.every((check) => {
+      if (check.__typename === "CheckRun") {
+        return (
+          typeof check.name === "string" &&
+          check.name.length > 0 &&
+          typeof check.status === "string" &&
+          check.status.length > 0 &&
+          Object.prototype.hasOwnProperty.call(check, "conclusion") &&
+          (check.conclusion === null || typeof check.conclusion === "string")
+        );
+      }
+      return (
+        check.__typename === "StatusContext" &&
+        typeof check.context === "string" &&
+        check.context.length > 0 &&
+        typeof check.state === "string" &&
+        check.state.length > 0
+      );
+    });
+  const checks = (complete ? nodes : [])
     .map((check) => {
       if (check.__typename === "CheckRun") {
         return {
@@ -411,7 +443,7 @@ function snapshotCheckState(node: GraphQLSnapshotNode): {
   return {
     serialized: checks.map((check) => `${check.name}=${check.state}`).join(","),
     pending: checks.some((check) => check.pending),
-    complete: contexts?.pageInfo?.hasNextPage !== true,
+    complete,
   };
 }
 
@@ -443,17 +475,59 @@ function parseSnapshot(
   node: GraphQLSnapshotNode
 ): GitHubPRSnapshot | undefined {
   const headSha = (node.headRefOid || "").trim();
-  if (!headSha) return undefined;
-  const stateValue = (node.state || "").toUpperCase();
-  const state: GitHubPRSnapshot["state"] =
-    node.mergedAt || stateValue === "MERGED"
+  const checks = snapshotCheckState(node);
+  const state = (node.state || "").toUpperCase();
+  if (
+    !["OPEN", "CLOSED", "MERGED"].includes(state) ||
+    typeof node.headRefOid !== "string" ||
+    !node.headRefOid.trim() ||
+    typeof node.baseRefName !== "string" ||
+    !node.baseRefName.trim() ||
+    typeof node.mergeable !== "string" ||
+    !node.mergeable ||
+    typeof node.mergeStateStatus !== "string" ||
+    !node.mergeStateStatus ||
+    typeof node.updatedAt !== "string" ||
+    !node.updatedAt ||
+    !Object.prototype.hasOwnProperty.call(node, "mergedAt") ||
+    (node.mergedAt !== null && typeof node.mergedAt !== "string") ||
+    !Object.prototype.hasOwnProperty.call(node, "mergeCommit") ||
+    (node.mergeCommit !== null &&
+      (typeof node.mergeCommit?.oid !== "string" || !node.mergeCommit.oid)) ||
+    !checks.complete ||
+    !Array.isArray(node.reviews?.nodes) ||
+    node.reviews.nodes.length > 1 ||
+    !node.reviews.nodes.every(
+      (review) =>
+        typeof review.databaseId === "number" &&
+        typeof review.state === "string" &&
+        Boolean(review.state) &&
+        Object.prototype.hasOwnProperty.call(review, "submittedAt") &&
+        (review.submittedAt === null ||
+          typeof review.submittedAt === "string") &&
+        Object.prototype.hasOwnProperty.call(review, "commit") &&
+        (review.commit === null ||
+          (typeof review.commit?.oid === "string" && Boolean(review.commit.oid)))
+    ) ||
+    !Array.isArray(node.comments?.nodes) ||
+    node.comments.nodes.length > 1 ||
+    !node.comments.nodes.every(
+      (comment) =>
+        typeof comment.databaseId === "number" &&
+        typeof comment.updatedAt === "string" &&
+        Boolean(comment.updatedAt)
+    )
+  ) {
+    return undefined;
+  }
+  const lifecycleState: GitHubPRSnapshot["state"] =
+    node.mergedAt || state === "MERGED"
       ? "merged"
-      : stateValue === "CLOSED"
+      : state === "CLOSED"
         ? "closed"
         : "open";
-  const checks = snapshotCheckState(node);
   const observation = {
-    state,
+    state: lifecycleState,
     head_sha: headSha,
     base_branch: (node.baseRefName || "").trim(),
     merge_commit_sha: node.mergeCommit?.oid || "",
@@ -466,7 +540,7 @@ function parseSnapshot(
   };
   return {
     pr_url: target.url,
-    state,
+    state: lifecycleState,
     head_sha: headSha,
     base_branch: observation.base_branch,
     merge_commit_sha: observation.merge_commit_sha || undefined,
@@ -524,12 +598,15 @@ export async function getPRSnapshots(
     }
 
     let data: Record<string, Record<string, GraphQLSnapshotNode | null> | null>;
+    let errors: GraphQLResponseError[] = [];
     try {
       const parsedResponse = JSON.parse(result.stdout) as {
         data?: Record<string, Record<string, GraphQLSnapshotNode | null> | null>;
+        errors?: GraphQLResponseError[];
       };
       if (!parsedResponse.data) throw new Error("GitHub returned no data");
       data = parsedResponse.data;
+      errors = Array.isArray(parsedResponse.errors) ? parsedResponse.errors : [];
     } catch (error) {
       throw new Error(
         `Failed to parse PR snapshot response: ${
@@ -539,6 +616,14 @@ export async function getPRSnapshots(
     }
 
     for (const target of targets) {
+      const hasGraphQLError = errors.some((error) => {
+        if (!Array.isArray(error.path)) return true;
+        const repoIndex = error.path.indexOf(target.repoAlias);
+        if (repoIndex < 0) return false;
+        const prPath = error.path[repoIndex + 1];
+        return prPath === undefined || prPath === target.prAlias;
+      });
+      if (hasGraphQLError) continue;
       const node = data[target.repoAlias]?.[target.prAlias];
       if (!node) continue;
       const snapshot = parseSnapshot(target, node);

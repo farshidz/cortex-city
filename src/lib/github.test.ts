@@ -57,11 +57,11 @@ if (response.stderr) {
   process.stderr.write(response.stderr);
 }
 
+process.stdout.write(response.stdout || "");
+
 if (response.exitCode) {
   process.exit(response.exitCode);
 }
-
-process.stdout.write(response.stdout || "");
 `
   );
   chmodSync(binaryPath, 0o755);
@@ -167,6 +167,44 @@ function prDeliveryTargetKey(): string {
 
 function checksKey(prUrl: string): string {
   return `pr checks ${prUrl} --json name,state --jq [.[] | .name + "=" + .state] | sort | join(",")`;
+}
+
+function completeSnapshotNode(headSha: string) {
+  return {
+    state: "OPEN",
+    mergedAt: null,
+    mergeCommit: null,
+    headRefOid: headSha,
+    baseRefName: "main",
+    mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN",
+    updatedAt: "2026-05-01T00:00:00Z",
+    commits: {
+      nodes: [
+        {
+          commit: {
+            statusCheckRollup: {
+              contexts: {
+                nodes: [
+                  {
+                    __typename: "CheckRun",
+                    name: "test",
+                    status: "COMPLETED",
+                    conclusion: "SUCCESS",
+                  },
+                ],
+                pageInfo: { hasNextPage: false },
+              },
+            },
+          },
+        },
+      ],
+    },
+    reviews: { nodes: [] },
+    comments: {
+      nodes: [{ databaseId: 7, updatedAt: "2026-05-01T00:00:00Z" }],
+    },
+  };
 }
 
 test("getPRSnapshots batches PR state, refs, and checks into one GraphQL call", () => {
@@ -310,6 +348,129 @@ test("getPRSnapshots batches PR state, refs, and checks into one GraphQL call", 
     result.snapshots[firstUrl].observation_key,
     result.snapshots[secondUrl].observation_key
   );
+});
+
+test("getPRSnapshots omits a PR whose check connection has another page", () => {
+  const workspace = setupWorkspace();
+  const firstUrl = "https://github.com/acme/widget/pull/123";
+  const secondUrl = "https://github.com/acme/widget/pull/124";
+  const partial = completeSnapshotNode("head-123");
+  partial.commits.nodes[0].commit.statusCheckRollup.contexts.pageInfo.hasNextPage =
+    true;
+
+  const result = runGithubScript(
+    workspace,
+    {
+      __graphql_snapshots__: {
+        stdout: JSON.stringify({
+          data: {
+            r0: {
+              p0: partial,
+              p1: completeSnapshotNode("head-124"),
+            },
+          },
+        }),
+      },
+    },
+    `
+      const snapshots = await getPRSnapshots(${JSON.stringify([
+        firstUrl,
+        secondUrl,
+      ])});
+      console.log(JSON.stringify(Object.keys(snapshots).sort()));
+    `
+  ) as string[];
+
+  assert.deepEqual(result, [secondUrl]);
+});
+
+test("getPRSnapshots omits only the PR affected by a field-level GraphQL error", () => {
+  const workspace = setupWorkspace();
+  const firstUrl = "https://github.com/acme/widget/pull/123";
+  const secondUrl = "https://github.com/acme/widget/pull/124";
+  const partial = {
+    ...completeSnapshotNode("head-123"),
+    mergeStateStatus: undefined,
+  };
+  const result = runGithubScript(
+    workspace,
+    {
+      __graphql_snapshots__: {
+        stdout: JSON.stringify({
+          data: {
+            r0: {
+              p0: partial,
+              p1: completeSnapshotNode("head-124"),
+            },
+          },
+          errors: [
+            {
+              message: "Could not resolve merge state",
+              path: ["r0", "p0", "mergeStateStatus"],
+            },
+          ],
+        }),
+        stderr: "GraphQL: Could not resolve merge state",
+        exitCode: 1,
+      },
+    },
+    `
+      const snapshots = await getPRSnapshots(${JSON.stringify([
+        firstUrl,
+        secondUrl,
+      ])});
+      console.log(JSON.stringify(Object.keys(snapshots).sort()));
+    `
+  ) as string[];
+
+  assert.deepEqual(result, [secondUrl]);
+});
+
+test("getPRSnapshots omits structurally incomplete scheduling data without an error path", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const result = runGithubScript(
+    workspace,
+    {
+      __graphql_snapshots__: {
+        stdout: JSON.stringify({
+          data: {
+            r0: {
+              p0: { ...completeSnapshotNode("head-123"), baseRefName: undefined },
+            },
+          },
+        }),
+      },
+    },
+    `
+      const snapshots = await getPRSnapshots([${JSON.stringify(prUrl)}]);
+      console.log(JSON.stringify(snapshots));
+    `
+  ) as Record<string, unknown>;
+
+  assert.deepEqual(result, {});
+});
+
+test("getPRSnapshots omits the batch when GraphQL returns an unscoped error", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const result = runGithubScript(
+    workspace,
+    {
+      __graphql_snapshots__: {
+        stdout: JSON.stringify({
+          data: { r0: { p0: completeSnapshotNode("head-123") } },
+          errors: [{ message: "Snapshot query was only partially evaluated" }],
+        }),
+      },
+    },
+    `
+      const snapshots = await getPRSnapshots([${JSON.stringify(prUrl)}]);
+      console.log(JSON.stringify(snapshots));
+    `
+  ) as Record<string, unknown>;
+
+  assert.deepEqual(result, {});
 });
 
 test("snapshot observation keys cache detailed PR activity across consumers", () => {
