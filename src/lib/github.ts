@@ -36,9 +36,110 @@ interface ExecResult {
   error: string;
 }
 
+const GITHUB_RATE_LIMIT_INITIAL_BACKOFF_MS = 60_000;
+const GITHUB_RATE_LIMIT_MAX_BACKOFF_MS = 15 * 60_000;
+let githubRateLimitBlockedUntil = 0;
+let githubRateLimitNextBackoffMs = GITHUB_RATE_LIMIT_INITIAL_BACKOFF_MS;
+
+function isGitHubRateLimitError(message: string): boolean {
+  return /rate.?limit|secondary rate/i.test(message);
+}
+
+function activeGitHubRateLimitBackoff(): string | undefined {
+  if (Date.now() >= githubRateLimitBlockedUntil) return undefined;
+  return `GitHub rate-limit backoff is active until ${new Date(
+    githubRateLimitBlockedUntil
+  ).toISOString()}.`;
+}
+
+function recordGitHubRateLimit(): void {
+  const now = Date.now();
+  if (now < githubRateLimitBlockedUntil) return;
+  githubRateLimitBlockedUntil = now + githubRateLimitNextBackoffMs;
+  githubRateLimitNextBackoffMs = Math.min(
+    githubRateLimitNextBackoffMs * 2,
+    GITHUB_RATE_LIMIT_MAX_BACKOFF_MS
+  );
+  console.error(
+    `[github] Rate limited; backing off until ${new Date(
+      githubRateLimitBlockedUntil
+    ).toISOString()}`
+  );
+}
+
+function recordSuccessfulGitHubRequest(): void {
+  if (Date.now() < githubRateLimitBlockedUntil) return;
+  githubRateLimitBlockedUntil = 0;
+  githubRateLimitNextBackoffMs = GITHUB_RATE_LIMIT_INITIAL_BACKOFF_MS;
+}
+
 interface StatusCheckRollupItem {
   name?: string;
   state?: string;
+}
+
+export interface GitHubPRSnapshot {
+  pr_url: string;
+  state: "open" | "merged" | "closed";
+  head_sha: string;
+  base_branch: string;
+  merge_commit_sha?: string;
+  pr_status: PRStatus;
+  checks_state: string;
+  updated_at: string;
+  // Changes when a head, check, review, conversation activity, base, or
+  // lifecycle field visible to the batch query changes.
+  observation_key: string;
+}
+
+interface GraphQLCheckNode {
+  __typename?: "CheckRun" | "StatusContext";
+  name?: string;
+  context?: string;
+  status?: string;
+  conclusion?: string | null;
+  state?: string;
+}
+
+interface GraphQLSnapshotNode {
+  state?: string;
+  mergedAt?: string | null;
+  mergeCommit?: { oid?: string } | null;
+  headRefOid?: string;
+  baseRefName?: string;
+  mergeable?: string;
+  mergeStateStatus?: string;
+  updatedAt?: string;
+  commits?: {
+    nodes?: Array<{
+      commit?: {
+        statusCheckRollup?: {
+          contexts?: {
+            nodes?: GraphQLCheckNode[];
+            pageInfo?: { hasNextPage?: boolean };
+          };
+        } | null;
+      };
+    }>;
+  };
+  reviews?: {
+    nodes?: Array<{
+      databaseId?: number;
+      state?: string;
+      submittedAt?: string | null;
+      commit?: { oid?: string } | null;
+    }>;
+  };
+  comments?: {
+    nodes?: Array<{
+      databaseId?: number;
+      updatedAt?: string;
+    }>;
+  };
+}
+
+interface GraphQLResponseError {
+  path?: Array<string | number>;
 }
 
 interface ReviewCommentItem {
@@ -218,19 +319,339 @@ function parsePRUrl(url: string): PRInfo | null {
   return { owner: match[1], repo: match[2], number: match[3] };
 }
 
+const PR_SNAPSHOT_BATCH_SIZE = 50;
+
+const PR_SNAPSHOT_FIELDS = `
+  state
+  mergedAt
+  mergeCommit { oid }
+  headRefOid
+  baseRefName
+  mergeable
+  mergeStateStatus
+  updatedAt
+  commits(last: 1) {
+    nodes {
+      commit {
+        statusCheckRollup {
+          contexts(first: 100) {
+            nodes {
+              __typename
+              ... on CheckRun { name status conclusion }
+              ... on StatusContext { context state }
+            }
+            pageInfo { hasNextPage }
+          }
+        }
+      }
+    }
+  }
+  reviews(last: 1) {
+    nodes { databaseId state submittedAt commit { oid } }
+  }
+  comments(last: 1) {
+    nodes { databaseId updatedAt }
+  }
+`;
+
+interface SnapshotTarget extends PRInfo {
+  url: string;
+  repoAlias: string;
+  prAlias: string;
+}
+
+function buildPRSnapshotQuery(targets: SnapshotTarget[]): string {
+  const repositories = new Map<string, SnapshotTarget[]>();
+  for (const target of targets) {
+    const key = `${target.owner}/${target.repo}`;
+    const current = repositories.get(key) || [];
+    current.push(target);
+    repositories.set(key, current);
+  }
+
+  const fields = [...repositories.values()].map((repoTargets) => {
+    const first = repoTargets[0];
+    const pullRequests = repoTargets
+      .map(
+        (target) =>
+          `${target.prAlias}:pullRequest(number:${target.number}){${PR_SNAPSHOT_FIELDS}}`
+      )
+      .join("\n");
+    return `${first.repoAlias}:repository(owner:${JSON.stringify(first.owner)},name:${JSON.stringify(first.repo)}){${pullRequests}}`;
+  });
+  return `query CortexCityPullRequestSnapshots {${fields.join("\n")}}`;
+}
+
+function snapshotCheckState(node: GraphQLSnapshotNode): {
+  serialized: string;
+  pending: boolean;
+  complete: boolean;
+} {
+  const rollup = node.commits?.nodes?.[0]?.commit?.statusCheckRollup;
+  if (rollup === null) {
+    return { serialized: "", pending: false, complete: true };
+  }
+
+  const contexts = rollup?.contexts;
+  const nodes = contexts?.nodes;
+  const complete =
+    Array.isArray(nodes) &&
+    typeof contexts?.pageInfo?.hasNextPage === "boolean" &&
+    !contexts.pageInfo.hasNextPage &&
+    nodes.every((check) => {
+      if (check.__typename === "CheckRun") {
+        return (
+          typeof check.name === "string" &&
+          check.name.length > 0 &&
+          typeof check.status === "string" &&
+          check.status.length > 0 &&
+          Object.prototype.hasOwnProperty.call(check, "conclusion") &&
+          (check.conclusion === null || typeof check.conclusion === "string")
+        );
+      }
+      return (
+        check.__typename === "StatusContext" &&
+        typeof check.context === "string" &&
+        check.context.length > 0 &&
+        typeof check.state === "string" &&
+        check.state.length > 0
+      );
+    });
+  const checks = (complete ? nodes : [])
+    .map((check) => {
+      if (check.__typename === "CheckRun") {
+        return {
+          name: check.name || "",
+          state:
+            check.status === "COMPLETED"
+              ? check.conclusion || "COMPLETED"
+              : check.status || "UNKNOWN",
+          pending: check.status !== "COMPLETED",
+        };
+      }
+      return {
+        name: check.context || "",
+        state: check.state || "UNKNOWN",
+        pending: check.state === "PENDING" || check.state === "EXPECTED",
+      };
+    })
+    .sort((a, b) =>
+      a.name === b.name
+        ? a.state.localeCompare(b.state)
+        : a.name.localeCompare(b.name)
+    );
+  return {
+    serialized: checks.map((check) => `${check.name}=${check.state}`).join(","),
+    pending: checks.some((check) => check.pending),
+    complete,
+  };
+}
+
+function snapshotPRStatus(
+  node: GraphQLSnapshotNode,
+  checks: ReturnType<typeof snapshotCheckState>
+): PRStatus {
+  if (checks.pending) return "checks_pending";
+  if (!checks.complete) return "unknown";
+
+  switch ((node.mergeStateStatus || "").toUpperCase()) {
+    case "CLEAN":
+      return "clean";
+    case "DIRTY":
+      return "conflicts";
+    case "UNSTABLE":
+      return "unstable";
+    case "BLOCKED":
+      return (node.mergeable || "").toUpperCase() === "MERGEABLE"
+        ? "needs_approval"
+        : "checks_failing";
+    default:
+      return "unknown";
+  }
+}
+
+function parseSnapshot(
+  target: SnapshotTarget,
+  node: GraphQLSnapshotNode
+): GitHubPRSnapshot | undefined {
+  const headSha = (node.headRefOid || "").trim();
+  const checks = snapshotCheckState(node);
+  const state = (node.state || "").toUpperCase();
+  if (
+    !["OPEN", "CLOSED", "MERGED"].includes(state) ||
+    typeof node.headRefOid !== "string" ||
+    !node.headRefOid.trim() ||
+    typeof node.baseRefName !== "string" ||
+    !node.baseRefName.trim() ||
+    typeof node.mergeable !== "string" ||
+    !node.mergeable ||
+    typeof node.mergeStateStatus !== "string" ||
+    !node.mergeStateStatus ||
+    typeof node.updatedAt !== "string" ||
+    !node.updatedAt ||
+    !Object.prototype.hasOwnProperty.call(node, "mergedAt") ||
+    (node.mergedAt !== null && typeof node.mergedAt !== "string") ||
+    !Object.prototype.hasOwnProperty.call(node, "mergeCommit") ||
+    (node.mergeCommit !== null &&
+      (typeof node.mergeCommit?.oid !== "string" || !node.mergeCommit.oid)) ||
+    !checks.complete ||
+    !Array.isArray(node.reviews?.nodes) ||
+    node.reviews.nodes.length > 1 ||
+    !node.reviews.nodes.every(
+      (review) =>
+        typeof review.databaseId === "number" &&
+        typeof review.state === "string" &&
+        Boolean(review.state) &&
+        Object.prototype.hasOwnProperty.call(review, "submittedAt") &&
+        (review.submittedAt === null ||
+          typeof review.submittedAt === "string") &&
+        Object.prototype.hasOwnProperty.call(review, "commit") &&
+        (review.commit === null ||
+          (typeof review.commit?.oid === "string" && Boolean(review.commit.oid)))
+    ) ||
+    !Array.isArray(node.comments?.nodes) ||
+    node.comments.nodes.length > 1 ||
+    !node.comments.nodes.every(
+      (comment) =>
+        typeof comment.databaseId === "number" &&
+        typeof comment.updatedAt === "string" &&
+        Boolean(comment.updatedAt)
+    )
+  ) {
+    return undefined;
+  }
+  const lifecycleState: GitHubPRSnapshot["state"] =
+    node.mergedAt || state === "MERGED"
+      ? "merged"
+      : state === "CLOSED"
+        ? "closed"
+        : "open";
+  const observation = {
+    state: lifecycleState,
+    head_sha: headSha,
+    base_branch: (node.baseRefName || "").trim(),
+    merge_commit_sha: node.mergeCommit?.oid || "",
+    mergeable: node.mergeable || "",
+    merge_state_status: node.mergeStateStatus || "",
+    updated_at: node.updatedAt || "",
+    checks: checks.serialized,
+    latest_review: node.reviews?.nodes?.[0] || null,
+    latest_comment: node.comments?.nodes?.[0] || null,
+  };
+  return {
+    pr_url: target.url,
+    state: lifecycleState,
+    head_sha: headSha,
+    base_branch: observation.base_branch,
+    merge_commit_sha: observation.merge_commit_sha || undefined,
+    pr_status: snapshotPRStatus(node, checks),
+    checks_state: checks.serialized,
+    updated_at: observation.updated_at,
+    observation_key: createHash("sha256")
+      .update(JSON.stringify(observation))
+      .digest("hex")
+      .slice(0, 16),
+  };
+}
+
+// Resolve the cheap fields needed by every worker poll in one GraphQL request
+// for the normal task set. Larger sets are split to keep query cost and node
+// count bounded.
+export async function getPRSnapshots(
+  prUrls: string[]
+): Promise<Record<string, GitHubPRSnapshot>> {
+  const parsed = [...new Set(prUrls)]
+    .map((url) => ({ url, parsed: parsePRUrl(url) }))
+    .filter(
+      (entry): entry is { url: string; parsed: PRInfo } => entry.parsed !== null
+    );
+  const snapshots: Record<string, GitHubPRSnapshot> = {};
+
+  for (let offset = 0; offset < parsed.length; offset += PR_SNAPSHOT_BATCH_SIZE) {
+    const chunk = parsed.slice(offset, offset + PR_SNAPSHOT_BATCH_SIZE);
+    const repoAliases = new Map<string, string>();
+    const targets: SnapshotTarget[] = chunk.map((entry, index) => {
+      const repoKey = `${entry.parsed.owner}/${entry.parsed.repo}`;
+      let repoAlias = repoAliases.get(repoKey);
+      if (!repoAlias) {
+        repoAlias = `r${repoAliases.size}`;
+        repoAliases.set(repoKey, repoAlias);
+      }
+      return {
+        ...entry.parsed,
+        url: entry.url,
+        repoAlias,
+        prAlias: `p${index}`,
+      };
+    });
+    const result = await execFileResult("gh", [
+      "api",
+      "graphql",
+      "-f",
+      `query=${buildPRSnapshotQuery(targets)}`,
+    ]);
+    // GitHub returns partial GraphQL data alongside errors when one requested
+    // PR is missing. Keep the valid snapshots instead of discarding the whole
+    // batch because `gh` used a non-zero exit code for that partial response.
+    if (!result.stdout.trim()) {
+      throw new Error(result.stderr.trim() || "Failed to fetch PR snapshots.");
+    }
+
+    let data: Record<string, Record<string, GraphQLSnapshotNode | null> | null>;
+    let errors: GraphQLResponseError[] = [];
+    try {
+      const parsedResponse = JSON.parse(result.stdout) as {
+        data?: Record<string, Record<string, GraphQLSnapshotNode | null> | null>;
+        errors?: GraphQLResponseError[];
+      };
+      if (!parsedResponse.data) throw new Error("GitHub returned no data");
+      data = parsedResponse.data;
+      errors = Array.isArray(parsedResponse.errors) ? parsedResponse.errors : [];
+    } catch (error) {
+      throw new Error(
+        `Failed to parse PR snapshot response: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+
+    for (const target of targets) {
+      const hasGraphQLError = errors.some((error) => {
+        if (!Array.isArray(error.path)) return true;
+        const repoIndex = error.path.indexOf(target.repoAlias);
+        if (repoIndex < 0) return false;
+        const prPath = error.path[repoIndex + 1];
+        return prPath === undefined || prPath === target.prAlias;
+      });
+      if (hasGraphQLError) continue;
+      const node = data[target.repoAlias]?.[target.prAlias];
+      if (!node) continue;
+      const snapshot = parseSnapshot(target, node);
+      if (snapshot) snapshots[target.url] = snapshot;
+    }
+  }
+
+  return snapshots;
+}
+
 function execResult(cmd: string): Promise<ExecResult> {
+  const backoffError = activeGitHubRateLimitBackoff();
+  if (backoffError) {
+    return Promise.resolve({ ok: false, output: "", error: backoffError });
+  }
   return new Promise((resolve) => {
     execCb(cmd, { encoding: "utf-8", timeout: 30000 }, (err, stdout, stderr) => {
       if (err) {
         const msg = (stderr || err.message || "").trim();
-        if (msg.includes("rate limit")) {
-          console.error(`[github] Rate limited: ${cmd.slice(0, 80)}`);
+        if (isGitHubRateLimitError(msg)) {
+          recordGitHubRateLimit();
         } else if (msg) {
           console.error(`[github] Command failed: ${cmd.slice(0, 80)} — ${msg.slice(0, 200)}`);
         }
         resolve({ ok: false, output: "", error: msg });
         return;
       }
+      recordSuccessfulGitHubRequest();
       resolve({
         ok: true,
         output: (stdout || "").trim(),
@@ -285,6 +706,83 @@ async function execPaginatedArrayStrict<T>(endpoint: string): Promise<T[] | null
     items.push(...(page as T[]));
   }
   return items;
+}
+
+interface PRActivity {
+  reviews: ReviewItem[] | null;
+  comments: ReviewCommentItem[] | null;
+  issueComments: IssueCommentItem[] | null;
+}
+
+const PR_ACTIVITY_CACHE_MAX_ENTRIES = 512;
+const prActivityCache = new Map<
+  string,
+  { observationKey: string; activity: PRActivity }
+>();
+
+function cachePRActivity(
+  prUrl: string,
+  observationKey: string,
+  activity: PRActivity
+): void {
+  prActivityCache.delete(prUrl);
+  prActivityCache.set(prUrl, { observationKey, activity });
+  while (prActivityCache.size > PR_ACTIVITY_CACHE_MAX_ENTRIES) {
+    const oldest = prActivityCache.keys().next().value;
+    if (typeof oldest !== "string") break;
+    prActivityCache.delete(oldest);
+  }
+}
+
+async function getPRActivity(
+  prUrl: string,
+  observationKey?: string,
+  scope: "reviews" | "all" = "all"
+): Promise<PRActivity | null> {
+  const cached = observationKey ? prActivityCache.get(prUrl) : undefined;
+  const matchingCache =
+    cached && cached.observationKey === observationKey
+      ? cached.activity
+      : undefined;
+  const hasRequestedSurfaces =
+    scope === "reviews"
+      ? Boolean(matchingCache?.reviews)
+      : Boolean(
+          matchingCache?.reviews &&
+            matchingCache.comments &&
+            matchingCache.issueComments
+        );
+  if (cached && hasRequestedSurfaces) {
+    // Refresh insertion order so the bounded map behaves as an LRU cache.
+    prActivityCache.delete(prUrl);
+    prActivityCache.set(prUrl, cached);
+    return cached.activity;
+  }
+
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return null;
+  const [reviews, comments, issueComments] = await Promise.all([
+    matchingCache?.reviews
+      ? Promise.resolve(matchingCache.reviews)
+      : execPaginatedArrayStrict<ReviewItem>(
+          `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
+        ),
+    scope === "reviews" || matchingCache?.comments
+      ? Promise.resolve(matchingCache?.comments || null)
+      : execPaginatedArrayStrict<ReviewCommentItem>(
+          `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
+        ),
+    scope === "reviews" || matchingCache?.issueComments
+      ? Promise.resolve(matchingCache?.issueComments || null)
+      : execPaginatedArrayStrict<IssueCommentItem>(
+          `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
+        ),
+  ]);
+  const activity = { reviews, comments, issueComments };
+  if (observationKey) {
+    cachePRActivity(prUrl, observationKey, activity);
+  }
+  return activity;
 }
 
 function serializeCheckStates(checks: StatusCheckRollupItem[]): string {
@@ -450,22 +948,19 @@ export async function getPRDiffHash(
 // reply-round trigger, so a reviewer comment never counts as someone talking to
 // it, an unsubmitted draft never counts as published, and a submitted review
 // whose feedback is only in its body is not missed.
-export async function getLatestForeignCommentAt(prUrl: string): Promise<string> {
-  const pr = parsePRUrl(prUrl);
-  if (!pr) return "";
-
-  const [reviews, comments, issueComments] = await Promise.all([
-    execPaginatedArrayStrict<ReviewItem>(
-      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
-    ),
-    execPaginatedArrayStrict<ReviewCommentItem>(
-      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
-    ),
-    execPaginatedArrayStrict<IssueCommentItem>(
-      `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
-    ),
-  ]);
-  if (!reviews || !comments || !issueComments) return "";
+export async function getLatestForeignCommentAt(
+  prUrl: string,
+  observationKey?: string
+): Promise<string> {
+  const activity = await getPRActivity(prUrl, observationKey);
+  if (
+    !activity?.reviews ||
+    !activity.comments ||
+    !activity.issueComments
+  ) {
+    return "";
+  }
+  const { reviews, comments, issueComments } = activity;
 
   const identity = await reviewerCommentIdentity(prUrl, [
     ...comments,
@@ -1069,54 +1564,51 @@ export async function listReviewerAuthoredComments(
   return receipts;
 }
 
-export async function getPRStateHash(prUrl: string): Promise<string> {
+export async function getPRStateHash(
+  prUrl: string,
+  snapshot?: GitHubPRSnapshot
+): Promise<string> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return "";
 
-  const [prData, reviews, comments, issueComments, checksResult] = await Promise.all([
-    execJsonStrict<{
-      headRefOid?: string;
-      statusCheckRollup?: StatusCheckRollupItem[];
-    }>(
-      `gh pr view ${prUrl} --json headRefOid,statusCheckRollup`
-    ),
-    execPaginatedArrayStrict<ReviewItem>(
-      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
-    ),
-    execPaginatedArrayStrict<ReviewCommentItem>(
-      `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`
-    ),
-    execPaginatedArrayStrict<IssueCommentItem>(
-      `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`
-    ),
-    execResult(
-      `gh pr checks ${prUrl} --json name,state --jq '[.[] | .name + "=" + .state] | sort | join(",")'`
-    ),
-  ]);
-  if (
-    !prData ||
-    typeof prData.headRefOid !== "string" ||
-    !reviews ||
-    !comments ||
-    !issueComments
-  ) {
-    return "";
-  }
-
-  const headSha = prData.headRefOid.trim();
-  if (!headSha) return "";
-
-  let ciStatus = checksResult.output;
-  if (!checksResult.ok) {
-    if (isNoChecksError(checksResult.error)) {
+  let headSha = snapshot?.head_sha.trim() || "";
+  let ciStatus = snapshot?.checks_state ?? "";
+  let activity: PRActivity | null;
+  if (snapshot) {
+    activity = await getPRActivity(prUrl, snapshot.observation_key);
+  } else {
+    const [prData, checksResult, fetchedActivity] = await Promise.all([
+      execJsonStrict<{
+        headRefOid?: string;
+        statusCheckRollup?: StatusCheckRollupItem[];
+      }>(`gh pr view ${prUrl} --json headRefOid,statusCheckRollup`),
+      execResult(
+        `gh pr checks ${prUrl} --json name,state --jq '[.[] | .name + "=" + .state] | sort | join(",")'`
+      ),
+      getPRActivity(prUrl),
+    ]);
+    if (!prData || typeof prData.headRefOid !== "string") return "";
+    headSha = prData.headRefOid.trim();
+    if (!checksResult.ok) {
+      if (!isNoChecksError(checksResult.error)) return "";
       const checks = Array.isArray(prData.statusCheckRollup)
         ? prData.statusCheckRollup
         : [];
       ciStatus = serializeCheckStates(checks);
     } else {
-      return "";
+      ciStatus = checksResult.output;
     }
+    activity = fetchedActivity;
   }
+  if (
+    !headSha ||
+    !activity?.reviews ||
+    !activity.comments ||
+    !activity.issueComments
+  ) {
+    return "";
+  }
+  const { reviews, comments, issueComments } = activity;
 
   const submittedIds = new Set(
     reviews
@@ -1267,14 +1759,13 @@ export interface MyReviewSignals {
 
 export async function getMyReviewSignals(
   prUrl: string,
-  login: string
+  login: string,
+  observationKey?: string
 ): Promise<MyReviewSignals> {
-  const pr = parsePRUrl(prUrl);
-  if (!pr || !login) return {};
-  const reviews = await execPaginatedArrayStrict<PRReviewItem>(
-    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`
-  );
-  if (!reviews) return {};
+  if (!parsePRUrl(prUrl) || !login) return {};
+  const activity = await getPRActivity(prUrl, observationKey, "reviews");
+  if (!activity?.reviews) return {};
+  const reviews = activity.reviews as PRReviewItem[];
   const mine = reviews.filter((r) => r.user?.login === login && r.commit_id);
   if (mine.length === 0) return {};
 
@@ -1351,6 +1842,17 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
   const results = [...resultsByUrl.values()];
   if (results.length === 0) return [];
 
+  let snapshots: Record<string, GitHubPRSnapshot> = {};
+  try {
+    snapshots = await getPRSnapshots(
+      results.map((pr) => (pr.url || "").trim()).filter(Boolean)
+    );
+  } catch {
+    // Keep inbound discovery available if the batch query is temporarily
+    // unavailable. The legacy per-PR reads preserve the fail-closed behavior.
+    snapshots = {};
+  }
+
   const enriched = await Promise.all(
     results.map(async (pr): Promise<ReviewRequest | null> => {
       const url = (pr.url || "").trim();
@@ -1360,16 +1862,24 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
         return null;
       }
 
-      const [headData, signals] = await Promise.all([
-        execJsonStrict<PRViewResult>(`gh pr view ${url} --json headRefOid`),
+      const snapshot = snapshots[url];
+      const [headSha, signals] = await Promise.all([
+        snapshot
+          ? Promise.resolve(snapshot.head_sha)
+          : execJsonStrict<PRViewResult>(`gh pr view ${url} --json headRefOid`).then(
+              (headData) => headData?.headRefOid?.trim() || ""
+            ),
         myLogin
-          ? getMyReviewSignals(url, myLogin).catch(
+          ? getMyReviewSignals(
+              url,
+              myLogin,
+              snapshot?.observation_key
+            ).catch(
               (): MyReviewSignals => ({})
             )
           : Promise.resolve<MyReviewSignals>({}),
       ]);
 
-      const headSha = headData?.headRefOid?.trim() || "";
       if (!headSha) return null;
 
       return {
@@ -1385,6 +1895,9 @@ export async function getReviewRequestedPRs(): Promise<ReviewRequest[]> {
         head_sha: headSha,
         created_at: pr.createdAt || "",
         updated_at: pr.updatedAt || "",
+        ...(snapshot?.observation_key
+          ? { github_observation_key: snapshot.observation_key }
+          : {}),
         my_last_review_sha: signals.last_review_sha,
         my_approval_sha: signals.approval_sha,
         my_changes_requested_sha: signals.changes_requested_sha,
@@ -1448,16 +1961,26 @@ function execFileResult(
   command: string,
   args: string[]
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  const backoffError = activeGitHubRateLimitBackoff();
+  if (backoffError) {
+    return Promise.resolve({ ok: false, stdout: "", stderr: backoffError });
+  }
   return new Promise((resolve) => {
     execFileCb(
       command,
       args,
       { encoding: "utf-8", timeout: 30000 },
       (err, stdout, stderr) => {
+        const errorOutput = (stderr || (err?.message ?? "")).toString();
+        if (err && isGitHubRateLimitError(errorOutput)) {
+          recordGitHubRateLimit();
+        } else if (!err) {
+          recordSuccessfulGitHubRequest();
+        }
         resolve({
           ok: !err,
           stdout: (stdout || "").toString(),
-          stderr: (stderr || (err?.message ?? "")).toString(),
+          stderr: errorOutput,
         });
       }
     );
@@ -1689,6 +2212,7 @@ export async function deliverReviewerComment(
 
 export const __testUtils = {
   parsePRUrl,
+  firstLineOf,
   isNoChecksError,
   serializeCheckStates,
   isCommentFromSubmittedReview,

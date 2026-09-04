@@ -45,7 +45,7 @@ A new lightweight, **task-free** runner — review summarization does not spawn 
 - Manual **force-regenerate** is still synchronous (`POST /api/reviews/summarize`) — the user is in front of the page waiting; bypassing the worker keeps the latency tight. The endpoint reuses the same `spawnReviewSummary` and adds its pid to `activeReviewPids` so a worker tick fired mid-run won't double-spawn.
 - Follow-up Q&A (`POST /api/reviews/followup`) also runs synchronously — user-initiated, short-lived, no worker involvement.
 
-GitHub data: `gh search prs user-review-requested:@me --state=open --json …` plus `gh search prs reviewed-by:<login> --state=open --json …` plus `gh search prs label:cortex-city-review --state=open --json …`, de-duplicated, then per-PR `gh pr view` calls to enrich with head SHA + mergeable state, parallelized. Self-authored PRs are filtered out unless they appear in the label search. Those self-authored rows retain comment actions but suppress owner approval/change-request actions.
+GitHub data: `gh search prs user-review-requested:@me --state=open --json …` plus `gh search prs reviewed-by:<login> --state=open --json …` plus `gh search prs label:cortex-city-review --state=open --json …`, de-duplicated, then enriched in batched GraphQL queries with up to 50 PRs per query. Each snapshot includes lifecycle state, head and base SHAs, mergeability, checks, and the latest review and issue-comment timestamps. Detailed review, inline-comment, and issue-comment activity is cached under an observation key derived from that snapshot and refreshed only when the observed PR state changes. A PR whose check connection has another page, whose scheduling fields are incomplete, or whose fields have GraphQL errors is omitted from the snapshot map so the per-PR helpers handle it. Self-authored PRs are filtered out unless they appear in the label search. Those self-authored rows retain comment actions but suppress owner approval/change-request actions.
 
 **Session lifecycle:**
 - Each summary run captures the session id (`session_id` on Claude's JSON result, `thread.started.thread_id` on Codex — same fields the existing runner reads in `agent-runner.ts:614,1221`) and stores it on the cached `ReviewSummary`.
@@ -110,7 +110,7 @@ max_parallel_reviews?: number;      // default 2; cap on worker-spawned review r
 ```
 
 ### 2. `src/lib/github.ts` (extend)
-Add `getReviewRequestedPRs()` — single `gh search prs` call, JSON-parsed; for each result run `gh pr view <url> --json headRefOid,state,mergeable,mergeableState` in parallel to enrich. Reuse the existing `getPRStatus()` helper rather than duplicating the mergeable-state logic.
+Add `getReviewRequestedPRs()` — collect and de-duplicate the review-request, reviewed-by, and label searches, then enrich their URLs through `getPRSnapshots()`. The snapshot loader groups repositories into batched GraphQL queries of up to 50 PRs and returns lifecycle, head/base, merge, check, and latest-activity fields. Use the snapshot observation key to reuse cached detailed activity until the observed PR state changes. Omit snapshots with paginated checks, incomplete scheduling fields, or field-level GraphQL errors so the existing per-PR helpers provide a complete fallback result.
 
 ```ts
 export async function getReviewRequestedPRs(): Promise<ReviewRequest[]>
