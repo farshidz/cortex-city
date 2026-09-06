@@ -1,0 +1,26 @@
+name: Hash stability probe
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "hash stability probe"
+
+  build-go-images:
+    name: Build Go Images
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "hash stability probe"
+
+  comment-preview-link:
+    name: comment-preview-link
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "hash stability probe"
