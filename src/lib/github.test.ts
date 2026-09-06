@@ -166,7 +166,7 @@ function prDeliveryTargetKey(): string {
 }
 
 function checksKey(prUrl: string): string {
-  return `pr checks ${prUrl} --json name,state --jq [.[] | .name + "=" + .state] | sort | join(",")`;
+  return `pr checks ${prUrl} --json name,state`;
 }
 
 function completeSnapshotNode(headSha: string) {
@@ -348,6 +348,72 @@ test("getPRSnapshots batches PR state, refs, and checks into one GraphQL call", 
     result.snapshots[firstUrl].observation_key,
     result.snapshots[secondUrl].observation_key
   );
+});
+
+test("getPRStateHash uses the same check ordering for polling and completion", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const checkNames = [
+    "Build and Test",
+    "Build Go Images",
+    "comment-preview-link",
+    "Detect Changes",
+    "Lint",
+    "Lint Python",
+  ];
+  const snapshotNode = completeSnapshotNode("abc123");
+  snapshotNode.commits.nodes[0].commit.statusCheckRollup.contexts.nodes =
+    checkNames.map((name) => ({
+      __typename: "CheckRun",
+      name,
+      status: "COMPLETED",
+      conclusion: "SUCCESS",
+    }));
+  const directChecks = [...checkNames].reverse().map((name) => ({
+    name,
+    state: "SUCCESS",
+  }));
+
+  const result = runGithubScript(
+    workspace,
+    {
+      __graphql_snapshots__: {
+        stdout: JSON.stringify({ data: { r0: { p0: snapshotNode } } }),
+      },
+      [prViewKey(prUrl)]: {
+        stdout: JSON.stringify({
+          headRefOid: "abc123",
+          statusCheckRollup: directChecks,
+        }),
+      },
+      [checksKey(prUrl)]: { stdout: JSON.stringify(directChecks) },
+      [reviewsKey()]: { stdout: JSON.stringify([[]]) },
+      [reviewCommentsKey()]: { stdout: JSON.stringify([[]]) },
+      [issueCommentsKey()]: { stdout: JSON.stringify([[]]) },
+    },
+    `
+      const snapshots = await getPRSnapshots([${JSON.stringify(prUrl)}]);
+      const snapshot = snapshots[${JSON.stringify(prUrl)}];
+      const pollingHash = await getPRStateHash(${JSON.stringify(prUrl)}, snapshot);
+      const completionHash = await getPRStateHash(${JSON.stringify(prUrl)});
+      console.log(JSON.stringify({
+        checksState: snapshot?.checks_state,
+        pollingHash,
+        completionHash,
+      }));
+    `
+  ) as {
+    checksState: string;
+    pollingHash: string;
+    completionHash: string;
+  };
+
+  assert.equal(
+    result.checksState,
+    "Build Go Images=SUCCESS,Build and Test=SUCCESS,Detect Changes=SUCCESS," +
+      "Lint Python=SUCCESS,Lint=SUCCESS,comment-preview-link=SUCCESS"
+  );
+  assert.equal(result.pollingHash, result.completionHash);
 });
 
 test("getPRSnapshots omits a PR whose check connection has another page", () => {
@@ -659,7 +725,7 @@ test("getPRStateHash fails closed when a GitHub review fetch is throttled", () =
     },
     [reviewCommentsKey()]: { stdout: JSON.stringify([[]]) },
     [issueCommentsKey()]: { stdout: JSON.stringify([[]]) },
-    [checksKey(prUrl)]: { stdout: "" },
+    [checksKey(prUrl)]: { stdout: "[]" },
   };
 
   const hash = runGithubScript(
@@ -764,7 +830,7 @@ test("getPRStateHash ignores pending inline review comments", () => {
     [issueCommentsKey()]: {
       stdout: JSON.stringify([[{ id: 200 }]]),
     },
-    [checksKey(prUrl)]: { stdout: "" },
+    [checksKey(prUrl)]: { stdout: "[]" },
   };
 
   const hash = runGithubScript(
@@ -799,7 +865,7 @@ test("getPRStateHash ignores only tracked decision comments", () => {
     [reviewsKey()]: { stdout: JSON.stringify([reviews]) },
     [reviewCommentsKey()]: { stdout: JSON.stringify([[]]) },
     [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
-    [checksKey(prUrl)]: { stdout: "" },
+    [checksKey(prUrl)]: { stdout: "[]" },
   });
   const hashFor = (
     issueComments: Array<{ id: number; body: string }>,
@@ -903,7 +969,7 @@ test("getPRStateHash ignores every reviewer-authored comment surface", () => {
         [reviewsKey()]: { stdout: JSON.stringify([reviews]) },
         [reviewCommentsKey()]: { stdout: JSON.stringify([reviewComments]) },
         [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
-        [checksKey(prUrl)]: { stdout: "" },
+        [checksKey(prUrl)]: { stdout: "[]" },
       },
       `
         const hash = await getPRStateHash(${JSON.stringify(prUrl)});
@@ -1011,7 +1077,7 @@ test("a copied reviewer prefix only suppresses when the author shares the review
         [reviewsKey()]: { stdout: JSON.stringify([reviews]) },
         [reviewCommentsKey()]: { stdout: JSON.stringify([reviewComments]) },
         [issueCommentsKey()]: { stdout: JSON.stringify([issueComments]) },
-        [checksKey(prUrl)]: { stdout: "" },
+        [checksKey(prUrl)]: { stdout: "[]" },
       },
       `
         const hash = await getPRStateHash(${JSON.stringify(prUrl)});
@@ -1456,7 +1522,7 @@ test("getPRStateHash ignores empty approvals but keeps their inline comments", (
       ]),
     },
     [issueCommentsKey()]: { stdout: JSON.stringify([[]]) },
-    [checksKey(prUrl)]: { stdout: "" },
+    [checksKey(prUrl)]: { stdout: "[]" },
   };
 
   const hash = runGithubScript(

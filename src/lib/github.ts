@@ -434,14 +434,9 @@ function snapshotCheckState(node: GraphQLSnapshotNode): {
         state: check.state || "UNKNOWN",
         pending: check.state === "PENDING" || check.state === "EXPECTED",
       };
-    })
-    .sort((a, b) =>
-      a.name === b.name
-        ? a.state.localeCompare(b.state)
-        : a.name.localeCompare(b.name)
-    );
+    });
   return {
-    serialized: checks.map((check) => `${check.name}=${check.state}`).join(","),
+    serialized: serializeCheckStates(checks),
     pending: checks.some((check) => check.pending),
     complete,
   };
@@ -791,6 +786,27 @@ function serializeCheckStates(checks: StatusCheckRollupItem[]): string {
     .map((check) => `${check.name}=${check.state}`)
     .sort()
     .join(",");
+}
+
+function parseCheckStates(raw: string): StatusCheckRollupItem[] | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      !Array.isArray(parsed) ||
+      !parsed.every(
+        (check) =>
+          check !== null &&
+          typeof check === "object" &&
+          typeof (check as StatusCheckRollupItem).name === "string" &&
+          typeof (check as StatusCheckRollupItem).state === "string"
+      )
+    ) {
+      return null;
+    }
+    return parsed as StatusCheckRollupItem[];
+  } catch {
+    return null;
+  }
 }
 
 function isNoChecksError(message: string): boolean {
@@ -1582,9 +1598,7 @@ export async function getPRStateHash(
         headRefOid?: string;
         statusCheckRollup?: StatusCheckRollupItem[];
       }>(`gh pr view ${prUrl} --json headRefOid,statusCheckRollup`),
-      execResult(
-        `gh pr checks ${prUrl} --json name,state --jq '[.[] | .name + "=" + .state] | sort | join(",")'`
-      ),
+      execResult(`gh pr checks ${prUrl} --json name,state`),
       getPRActivity(prUrl),
     ]);
     if (!prData || typeof prData.headRefOid !== "string") return "";
@@ -1596,7 +1610,9 @@ export async function getPRStateHash(
         : [];
       ciStatus = serializeCheckStates(checks);
     } else {
-      ciStatus = checksResult.output;
+      const checks = parseCheckStates(checksResult.output);
+      if (!checks) return "";
+      ciStatus = serializeCheckStates(checks);
     }
     activity = fetchedActivity;
   }
