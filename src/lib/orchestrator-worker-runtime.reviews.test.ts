@@ -3426,7 +3426,11 @@ test("pollOnce treats a stale reply decision as a skipped launch", async () => {
   const h = makeHarness({openReviewRequests: [pr], reviews: {[pr.pr_url]: makeSummary(pr, {
     summary: "Reviewed", summary_head_sha: pr.head_sha, summary_diff_hash: "diff-1", effective_diff_hash: "diff-1", effective_diff_head_sha: pr.head_sha, handled_conversation_keys: [],
   })}, prDiffHashes: {[pr.pr_url]: "diff-1"}});
-  h.deps.getReviewConversation = async () => [{key: "pending", id: 1, surface: "issue", body: "Question", updated_at: "2026-05-01"}];
+  h.deps.getReviewConversation = async (_url, observationKey, options) => {
+    assert.equal(observationKey, undefined);
+    assert.equal(options?.background, true);
+    return [{key: "pending", id: 1, surface: "issue", body: "Question", updated_at: "2026-05-01"}];
+  };
   h.deps.spawnReviewSummary = async () => {throw new ReviewRoundObsoleteError("Handled concurrently");};
   const errors: unknown[] = [], logs: string[] = [];
   h.deps.logger = {error: (...args) => {errors.push(args);}, log: (...args) => {logs.push(args.join(" "));}};

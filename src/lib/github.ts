@@ -965,27 +965,36 @@ export async function getPRDiffHash(
 
 // Snapshot published discussion with content versions. Reuse the same provenance
 // rules as the scheduling clock, but include edits and review-state changes.
-const conversationScanCache = new Map<string, {
-  observationKey: string;
+interface ConversationScanCadence {
+  observationKey?: string;
   receiptsKey: string;
-  items: ReviewConversationItem[];
   pageCount: number;
   refreshAfter: number;
-}>();
+}
+const conversationScanCache = new Map<string, ConversationScanCadence & {items: ReviewConversationItem[]}>();
+// Small deadlines outlive LRU snapshot eviction, so a large sweep cannot turn
+// every subsequent poll into a rescan. Expired deadlines are removed on lookup.
+const conversationScanCadence = new Map<string, ConversationScanCadence>();
 const CONVERSATION_SCAN_CACHE_SIZE = 128;
 
-export async function getReviewConversation(prUrl: string, observationKey?: string): Promise<ReviewConversationItem[] | undefined> {
+export async function getReviewConversation(prUrl: string, observationKey?: string, options: {background?: boolean} = {}): Promise<ReviewConversationItem[] | undefined> {
   const pr = parsePRUrl(prUrl);
   if (!pr) return undefined;
-  const cached = observationKey ? conversationScanCache.get(prUrl) : undefined;
+  const background = options.background === true || observationKey !== undefined;
+  const now = Date.now();
+  for (const [url, cadence] of conversationScanCadence) {
+    if (cadence.refreshAfter <= now) conversationScanCadence.delete(url);
+  }
+  const cached = background ? conversationScanCache.get(prUrl) : undefined;
+  const cadence = background ? conversationScanCadence.get(prUrl) : undefined;
   const receipts = receiptedReviewerCommentIds(prUrl);
   const receiptsKey = JSON.stringify([[...receipts.issueIds], [...receipts.reviewCommentIds]]);
-  const matches = cached?.observationKey === observationKey && cached?.receiptsKey === receiptsKey;
-  if (cached && matches && Date.now() < cached.refreshAfter) return cached.items;
+  const matches = cadence?.observationKey === observationKey && cadence?.receiptsKey === receiptsKey;
+  if (cadence && matches && now < cadence.refreshAfter) return cached?.items;
   let pageBudget = Infinity;
-  if (observationKey) {
+  if (background) {
     // Background scans leave capacity for active reviews and other GitHub work.
-    // Run-start/end snapshots omit observationKey and always read fresh versions.
+    // Run-start/end snapshots omit background mode and always read fresh versions.
     const quota = await execFileResult("gh", ["api", "rate_limit"]);
     try {
       const remaining = JSON.parse(quota.stdout).resources.core.remaining;
@@ -1045,14 +1054,16 @@ export async function getReviewConversation(prUrl: string, observationKey?: stri
       }
     }
     const ordered = [...items.slice(reviewCount), ...items.slice(0, reviewCount)];
-    if (observationKey) {
-      conversationScanCache.delete(prUrl);
-      conversationScanCache.set(prUrl, {
-        observationKey, receiptsKey, items: ordered, pageCount,
+    if (background) {
+      const nextCadence = {
+        observationKey, receiptsKey, pageCount,
         // Small discussions refresh after five minutes for older edits that do
         // not change observationKey. Large scans amortize ten seconds per page.
         refreshAfter: Date.now() + Math.max(5 * 60_000, pageCount * 10_000),
-      });
+      };
+      conversationScanCadence.set(prUrl, nextCadence);
+      conversationScanCache.delete(prUrl);
+      conversationScanCache.set(prUrl, {...nextCadence, items: ordered});
       while (conversationScanCache.size > CONVERSATION_SCAN_CACHE_SIZE) {
         conversationScanCache.delete(conversationScanCache.keys().next().value!);
       }

@@ -354,3 +354,5 @@ Notes:
    - The existing task prune phase still runs and is unaffected by the new review prune phase (check worker logs for both phases each tick).
 
 Conversation-version scans cache compact snapshots across unchanged worker polls. Observation or reviewer-receipt changes invalidate the cache. A periodic scan discovers older edits after at least five minutes, extended to ten seconds per page for large discussions. Background scans check remaining GitHub core quota and preserve a 100-request reserve; quota pressure can delay detection. Run-start/end conversation snapshots are fresh.
+
+The worker explicitly marks conversation reads as background even when batch metadata is unavailable. Refresh deadlines survive eviction from the bounded snapshot cache; an evicted unchanged entry defers until its next refresh instead of rescanning on each tick. Deadline metadata expires with its refresh interval.

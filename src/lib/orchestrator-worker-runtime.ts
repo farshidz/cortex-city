@@ -2513,7 +2513,7 @@ async function runReviewPhases(
         let latestConversationAt = "";
         try {
           if (deps.getReviewConversation) {
-            const conversation = await deps.getReviewConversation(pr.pr_url, pr.github_observation_key);
+            const conversation = await deps.getReviewConversation(pr.pr_url, pr.github_observation_key, {background: true});
             if (conversation) decision = decideReviewRound({ ...roundInput, hasUnhandledConversation: unhandledConversation(conversation, cached).length > 0 });
           } else if (deps.getLatestForeignCommentAt) {
             latestConversationAt = await deps.getLatestForeignCommentAt(pr.pr_url, pr.github_observation_key);

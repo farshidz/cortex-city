@@ -1646,3 +1646,29 @@ test("background conversation scans cache unchanged PRs, refresh edits, and resp
   assert.notEqual(result.first, result.refreshed);
   assert.equal(result.fresh, "Edited");
 });
+
+
+test("background fallback stays throttled after snapshot eviction in a large PR sweep", () => {
+  const workspace = setupWorkspace();
+  const responses: Record<string, {stdout: string}> = {"api rate_limit": {stdout: JSON.stringify({resources: {core: {remaining: 5000}}})}};
+  for (let id = 1; id <= 130; id++) {
+    for (const suffix of [`pulls/${id}/reviews`, `pulls/${id}/comments`, `issues/${id}/comments`]) {
+      responses[`api --paginate --slurp repos/acme/widget/${suffix}`] = {stdout: "[[]]"};
+    }
+  }
+  const result = runGithubScript(workspace, responses, `
+    const fs = await import("node:fs");
+    const calls = () => fs.readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf8").trim().split("\\n").filter(Boolean).length;
+    for (let id = 1; id <= 130; id++) await getReviewConversation("https://github.com/acme/widget/pull/" + id, undefined, {background: true});
+    const cold = calls();
+    const evicted = await getReviewConversation("https://github.com/acme/widget/pull/1", undefined, {background: true});
+    for (let id = 2; id <= 130; id++) await getReviewConversation("https://github.com/acme/widget/pull/" + id, undefined, {background: true});
+    const warm = calls();
+    await getReviewConversation("https://github.com/acme/widget/pull/1");
+    console.log(JSON.stringify({cold, warm, evicted: evicted ?? null, fresh: calls()}));
+  `);
+  assert.equal(result.cold, 520);
+  assert.equal(result.warm, result.cold);
+  assert.equal(result.evicted, null);
+  assert.equal(result.fresh, result.warm + 3);
+});
