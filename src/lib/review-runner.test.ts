@@ -5265,3 +5265,26 @@ test("disk write race does not corrupt reviews.json under concurrent summarizati
     [requestA.pr_url, requestB.pr_url].sort()
   );
 });
+
+
+test("saved sibling-list lessons survive wrapper projection and tags stay scoped", () => {
+  const workspace = setupRunnerWorkspace("review-runner-learnings-grammar-");
+  const result = runTsxScript(workspace, [
+    `import { writeReviewLearnings } from ${JSON.stringify(moduleUrl("src/lib/review-learnings-store.ts"))};`,
+    `import { buildReviewWrapperPrompt } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+  ], `
+    const outputs = [];
+    for (const marker of ["+ ", "1. ", "  - "]) {
+      const content = marker + "FIRST " + "a".repeat(400) + "\\n" + marker + "SECOND " + "b".repeat(400);
+      await writeReviewLearnings(content);
+      const prompt = buildReviewWrapperPrompt(${JSON.stringify(baseConfig({review_learning_enabled: true}))}, ${JSON.stringify(sampleRequest())});
+      outputs.push(prompt.includes("FIRST") && prompt.includes("SECOND"));
+    }
+    await writeReviewLearnings("- [repo: acme/widget ] Scoped guidance");
+    const scoped = buildReviewWrapperPrompt(${JSON.stringify(baseConfig({review_learning_enabled: true}))}, ${JSON.stringify(sampleRequest())});
+    let rejected = false;
+    try { await writeReviewLearnings("- [repo:acme/widget Missing close"); } catch { rejected = true; }
+    console.log(JSON.stringify({outputs, scoped: scoped.includes("Scoped guidance"), rejected}));
+  `, prependBinToPath(workspace));
+  assert.deepEqual(result, {outputs: [true, true, true], scoped: true, rejected: true});
+});
