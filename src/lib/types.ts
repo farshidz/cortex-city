@@ -448,6 +448,9 @@ export interface ReviewSummary extends ReviewRequest {
   // than the reviewer created at or before this instant do not trigger a reply
   // round.
   last_conversation_seen_at?: string;
+  // Exact published conversation versions handled by completed rounds.
+  // Undefined is legacy timestamp tracking; an empty array is an initialized ledger.
+  handled_conversation_keys?: string[];
   // Effective diff the most recent completed round of any tier covered. A tier-1
   // verification round advances this without rewriting the summary, so the same
   // diff is not verified twice.

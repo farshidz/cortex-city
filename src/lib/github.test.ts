@@ -82,7 +82,7 @@ function runGithubScript(
     [
       "--eval",
       [
-        `import { deliverReviewerComment, getCommitMergeBaseSha, getMyReviewSignals, getPRHeadSha, getPRSnapshots, getPRStateHash, getSubmittedCommentIds, getLatestForeignCommentAt, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { deliverReviewerComment, getCommitMergeBaseSha, getMyReviewSignals, getPRHeadSha, getPRSnapshots, getPRStateHash, getSubmittedCommentIds, getLatestForeignCommentAt, getReviewConversation, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
         `import { readFileSync } from "node:fs";`,
         "(async () => {",
         body,
@@ -1541,4 +1541,21 @@ test("getPRStateHash ignores empty approvals but keeps their inline comments", (
     .digest("hex")
     .slice(0, 16);
   assert.equal(hash, expected);
+});
+
+
+test("conversation snapshots retain edited versions across surfaces and exclude reviewer output and drafts", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const foreign = { login: "octocat" };
+  const result = runGithubScript(workspace, {
+    "api user --jq .login": { stdout: "me" },
+    [reviewsKey()]: { stdout: JSON.stringify([[{id: 1, state: "CHANGES_REQUESTED", body: "Split this", user: foreign}, {id: 2, state: "PENDING", body: "Draft", user: foreign}]]) },
+    [reviewCommentsKey()]: { stdout: JSON.stringify([[{id: 1, pull_request_review_id: 1, body: "Inline", user: foreign}, {id: 2, pull_request_review_id: 2, body: "Draft inline", user: foreign}]]) },
+    [issueCommentsKey()]: { stdout: JSON.stringify([[{id: 1, body: "Edited", user: foreign, created_at: "2026-05-01T00:00:00Z", updated_at: "2026-05-02T00:00:00Z"}, {id: 2, body: "**🤖[Cortex City Reviewer]** Reply", user: {login: "me"}}]]) },
+  }, `console.log(JSON.stringify(await getReviewConversation(${JSON.stringify(prUrl)})));`);
+  assert.deepEqual(result.map((item: {surface: string}) => item.surface), ["review_comment", "issue", "review"]);
+  assert.equal(new Set(result.map((item: {key: string}) => item.key)).size, 3);
+  assert.equal(result[1].updated_at, "2026-05-02T00:00:00Z");
+  assert.match(result[2].key, /^review:1:CHANGES_REQUESTED:/);
 });

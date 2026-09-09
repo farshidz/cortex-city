@@ -1,6 +1,7 @@
 // This module owns a single worker poll. The long-running loop, heartbeat, and
 // signal handling stay in src/orchestrator-worker.ts so tests can exercise one
 // poll without touching process lifecycle behavior.
+import { unhandledConversation } from "./review-conversation";
 import { statSync } from "fs";
 import { spawnAgentSession, removeWorktree } from "./agent-runner";
 import {
@@ -11,6 +12,7 @@ import {
 import {
   deliverReviewerComment,
   getLatestForeignCommentAt,
+  getReviewConversation,
   drainMyPendingReview,
   getCommitMergeBaseSha,
   getPRBaseBranch,
@@ -211,6 +213,7 @@ export interface WorkerRuntimeDeps {
   // comparing head SHAs.
   getPRDiffHash?: typeof getPRDiffHash;
   getLatestForeignCommentAt?: typeof getLatestForeignCommentAt;
+  getReviewConversation?: typeof getReviewConversation;
   // Absent leaves a tier-1 round to rediscover its open findings from its own
   // GitHub comments.
   listUnresolvedReviewerThreads?: typeof listUnresolvedReviewerThreads;
@@ -256,6 +259,7 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
   getPRBaseBranch,
   getPRDiffHash,
   getLatestForeignCommentAt,
+  getReviewConversation,
   getPRHeadSha,
   getPRMergeCommitSha,
   getPRSnapshots,
@@ -624,6 +628,7 @@ export interface ReviewRoundInput {
   // Newest comment by anyone other than the reviewer, or "" / absent when the
   // caller has not looked yet.
   latestConversationAt?: string;
+  hasUnhandledConversation?: boolean;
   config: Pick<
     ReturnType<typeof readConfig>,
     "review_debounce_seconds" | "reviewer_tiers" | "review_runtime" | "review_effort" | "review_model" | "default_agent_runner" | "default_codex_model" | "default_codex_effort" | "default_claude_model" | "default_claude_effort"
@@ -713,7 +718,7 @@ export function decideReviewRound(
     };
   }
 
-  if (hasUnansweredConversation(review, input.latestConversationAt)) {
+  if (input.hasUnhandledConversation ?? hasUnansweredConversation(review, input.latestConversationAt)) {
     return { round: "reply", tier: tier1Enabled ? 1 : 2, reason: "conversation" };
   }
   return { reason: "up_to_date" };
@@ -2324,7 +2329,8 @@ async function runReviewPhases(
           effective_diff_head_sha:
             !reviewContextChanged && diffHash ? pr.head_sha : undefined,
           head_first_seen_at: observedAt,
-          last_conversation_seen_at: reviewContextChanged
+          handled_conversation_keys: reviewContextChanged ? undefined : current.handled_conversation_keys,
+        last_conversation_seen_at: reviewContextChanged
             ? undefined
             : current.last_conversation_seen_at,
           generated_at: reviewContextChanged ? "" : current.generated_at,
@@ -2399,6 +2405,7 @@ async function runReviewPhases(
             ? pr.head_sha
             : current.effective_diff_head_sha,
         head_first_seen_at: current.head_first_seen_at,
+        handled_conversation_keys: reviewContextChanged ? undefined : current.handled_conversation_keys,
         last_conversation_seen_at: reviewContextChanged
           ? undefined
           : current.last_conversation_seen_at,
@@ -2489,14 +2496,16 @@ async function runReviewPhases(
       if (
         !decision.round &&
         decision.reason === "up_to_date" &&
-        deps.getLatestForeignCommentAt
+        (deps.getReviewConversation || deps.getLatestForeignCommentAt)
       ) {
         let latestConversationAt = "";
         try {
-          latestConversationAt = await deps.getLatestForeignCommentAt(
-            pr.pr_url,
-            pr.github_observation_key
-          );
+          if (deps.getReviewConversation) {
+            const conversation = await deps.getReviewConversation(pr.pr_url, pr.github_observation_key);
+            if (conversation) decision = decideReviewRound({ ...roundInput, hasUnhandledConversation: unhandledConversation(conversation, cached).length > 0 });
+          } else if (deps.getLatestForeignCommentAt) {
+            latestConversationAt = await deps.getLatestForeignCommentAt(pr.pr_url, pr.github_observation_key);
+          }
         } catch (error) {
           deps.logger.error(
             `[worker] Failed to read conversation timestamps for ${pr.pr_url}:`,

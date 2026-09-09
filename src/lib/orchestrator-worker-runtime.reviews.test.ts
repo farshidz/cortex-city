@@ -3356,3 +3356,26 @@ test("pollOnce will not clear a condition recorded after the drain it inspected"
   // later reviewer comment with no record left of it.
   assert.equal(h.reviews[pr.pr_url].pending_review_error, newer);
 });
+
+
+test("pollOnce uses handled versions to suppress overlap while preserving an edited comment", async () => {
+  const pr = makeRequest();
+  const item = {key: "issue:1::original", surface: "issue" as const, id: 1, body: "Thanks", updated_at: "2026-05-01T00:30:00Z"};
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: makeSummary(pr, {
+      summary: "reviewed", summary_head_sha: pr.head_sha, summary_diff_hash: "diff-1",
+      effective_diff_hash: "diff-1", effective_diff_head_sha: pr.head_sha,
+      last_conversation_seen_at: "2026-05-01T00:00:00Z", handled_conversation_keys: [item.key],
+    }) },
+    prDiffHashes: { [pr.pr_url]: "diff-1" },
+    foreignCommentAt: { [pr.pr_url]: item.updated_at },
+  });
+  h.deps.getReviewConversation = async () => [item];
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 0);
+  h.deps.getReviewConversation = async () => [{...item, key: "issue:1::edited", body: "Actually, please clarify"}];
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 1);
+  assert.equal(h.spawnRounds[0].round, "reply");
+});

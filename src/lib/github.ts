@@ -1,3 +1,4 @@
+import { conversationKey, type ReviewConversationItem } from "./review-conversation";
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
 import { mkdirSync } from "fs";
@@ -143,6 +144,7 @@ interface GraphQLResponseError {
 }
 
 interface ReviewCommentItem {
+  updated_at?: string;
   id: number;
   pull_request_review_id: number | null;
   body?: string | null;
@@ -151,6 +153,7 @@ interface ReviewCommentItem {
 }
 
 interface ReviewItem {
+  updated_at?: string;
   id: number;
   state?: string;
   body?: string | null;
@@ -159,6 +162,7 @@ interface ReviewItem {
 }
 
 interface IssueCommentItem {
+  updated_at?: string;
   id: number;
   body?: string | null;
   user?: { login?: string };
@@ -957,6 +961,34 @@ export async function getPRDiffHash(
   // yields no identity, which schedules a review instead of trusting this one.
   const observedHeadSha = await getPRHeadSha(prUrl);
   return observedHeadSha === expectedHeadSha ? hash : "";
+}
+
+// Snapshot published discussion with content versions. Reuse the same provenance
+// rules as the scheduling clock, but include edits and review-state changes.
+export async function getReviewConversation(prUrl: string, observationKey?: string): Promise<ReviewConversationItem[] | undefined> {
+  const activity = await getPRActivity(prUrl, observationKey);
+  if (!activity?.reviews || !activity.comments || !activity.issueComments) return undefined;
+  const { reviews, comments, issueComments } = activity;
+  const identity = await reviewerCommentIdentity(prUrl, [...comments, ...issueComments, ...reviews]);
+  const submittedIds = new Set(reviews.filter((review) => review.state !== "PENDING").map((review) => review.id));
+  const items: ReviewConversationItem[] = [];
+  const add = (surface: ReviewConversationItem["surface"], item: { id: number; body?: string | null; created_at?: string; updated_at?: string; submitted_at?: string; state?: string }) => {
+    const body = item.body || "";
+    const state = surface === "review" ? item.state || "" : "";
+    items.push({ key: conversationKey(surface, item.id, body, state), surface, id: item.id, body, state, updated_at: item.updated_at || item.submitted_at || item.created_at || "" });
+  };
+  for (const comment of comments) {
+    if (isCommentFromSubmittedReview(comment, submittedIds) && !isReviewerAuthoredComment(identity, "review_comment", comment)) add("review_comment", comment);
+  }
+  for (const comment of issueComments) {
+    if (!isReviewerAuthoredComment(identity, "issue", comment)) add("issue", comment);
+  }
+  for (const review of reviews) {
+    if (review.state === "PENDING" || !(review.body || "").trim()) continue;
+    if (identity.authorLogin && review.user?.login === identity.authorLogin && isReviewerAuthoredCommentBody(review.body)) continue;
+    add("review", review);
+  }
+  return items;
 }
 
 // The newest published conversation on this PR that the reviewer did not author,

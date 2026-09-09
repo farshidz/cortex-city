@@ -1809,13 +1809,14 @@ test("a reply round answers conversation without touching the stored review", ()
   const scenarioFile = path.join(workspace, "scenario.json");
   const argsFile = path.join(workspace, "agent-args.json");
   const ghStateFile = path.join(workspace, "gh-state.json");
+  const coveredKey = `issue:700::${createHash("sha256").update("Please clarify").digest("hex")}`;
   writeJson(ghStateFile, {
     prs: {
       "acme/widget#1": {
         state: "open",
         merged: false,
         headRefOid: "abc123",
-        issueComments: [],
+        issueComments: [{ id: 700, body: "Please clarify", user: { login: "octocat" }, created_at: "2026-05-01T00:30:00Z" }],
         reviews: [],
         comments: [],
         checks: [],
@@ -1827,7 +1828,7 @@ test("a reply round answers conversation without touching the stored review", ()
       stdout: JSON.stringify({
         session_id: "claude-reply-session",
         result:
-          "Answered the thread; my earlier request was out of scope.\n\n## Agent Status\nAgent status: `replied`",
+          "Answered the thread; my earlier request was out of scope.\n\n## Agent Status\nAgent status: `replied`" + `\n<!-- cortex-city-handled: ${JSON.stringify([coveredKey])} -->`,
         is_error: false,
       }),
     },
@@ -1871,7 +1872,9 @@ test("a reply round answers conversation without touching the stored review", ()
     }
   );
 
+  assert.deepEqual(result.persisted.handled_conversation_keys, [coveredKey]);
   const prompt = result.args.stdin;
+  assert.ok(prompt.includes(coveredKey));
   assert.match(prompt, /Cortex City reply round protocol/);
   assert.doesNotMatch(prompt, /Cortex City review protocol/);
   // The reply round leaves the review of the code exactly as it was.
