@@ -11,6 +11,7 @@ import {
   shouldRetryErroredReview,
   type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
+import { ReviewRoundObsoleteError } from "./review-runner";
 import type { GitHubPRSnapshot, PendingReviewDrain } from "./github";
 import {
   deriveReviewState,
@@ -3417,4 +3418,20 @@ test("pollOnce will not clear a condition recorded after the drain it inspected"
   // schedule or retry a PENDING review, so the newer draft would swallow every
   // later reviewer comment with no record left of it.
   assert.equal(h.reviews[pr.pr_url].pending_review_error, newer);
+});
+
+
+test("pollOnce treats a stale reply decision as a skipped launch", async () => {
+  const pr = makeRequest();
+  const h = makeHarness({openReviewRequests: [pr], reviews: {[pr.pr_url]: makeSummary(pr, {
+    summary: "Reviewed", summary_head_sha: pr.head_sha, summary_diff_hash: "diff-1", effective_diff_hash: "diff-1", effective_diff_head_sha: pr.head_sha, handled_conversation_keys: [],
+  })}, prDiffHashes: {[pr.pr_url]: "diff-1"}});
+  h.deps.getReviewConversation = async () => [{key: "pending", id: 1, surface: "issue", body: "Question", updated_at: "2026-05-01"}];
+  h.deps.spawnReviewSummary = async () => {throw new ReviewRoundObsoleteError("Handled concurrently");};
+  const errors: unknown[] = [], logs: string[] = [];
+  h.deps.logger = {error: (...args) => {errors.push(args);}, log: (...args) => {logs.push(args.join(" "));}};
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.activeReviewPids.size, 0);
+  assert.equal(errors.length, 0);
+  assert.ok(logs.some(line => line.includes("Skipped stale reply decision")));
 });

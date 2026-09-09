@@ -1929,7 +1929,7 @@ function runCheapReplyRound(
         headRefOid: "abc123",
         issueComments: [],
         nextIssueCommentId: 9200,
-        reviews: [],
+        reviews: [{id: 99, state: "COMMENTED", body: "Please clarify", user: {login: "octocat"}, submitted_at: "2026-05-01T00:30:00Z"}],
         comments: [],
         checks: [],
       },
@@ -2124,7 +2124,7 @@ test("a tier-2 reply round hands a settled verdict on without tiering", () => {
         merged: false,
         headRefOid: "abc123",
         issueComments: [],
-        reviews: [],
+        reviews: [{id: 99, state: "COMMENTED", body: "Please clarify", user: {login: "octocat"}, submitted_at: "2026-05-01T00:30:00Z"}],
         comments: [],
         checks: [],
       },
@@ -2286,7 +2286,7 @@ test("a reply round escalates a material discovery to a human decision", () => {
         headRefOid: "abc123",
         issueComments: [],
         nextIssueCommentId: 9100,
-        reviews: [],
+        reviews: [{id: 99, state: "COMMENTED", body: "Please clarify", user: {login: "octocat"}, submitted_at: "2026-05-01T00:30:00Z"}],
         comments: [],
         checks: [],
       },
@@ -2360,6 +2360,8 @@ test("a reply round escalates a material discovery to a human decision", () => {
 
 test("a reply round with no recognized status fails toward a review round", () => {
   const workspace = setupRunnerWorkspace("review-runner-reply-unparseable-");
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, {prs: {"acme/widget#1": {reviews: [{id: 99, state: "COMMENTED", body: "Please clarify", user: {login: "octocat"}, submitted_at: "2026-05-01T00:30:00Z"}]}}});
   const scenarioFile = path.join(workspace, "scenario.json");
   writeJson(scenarioFile, {
     claude: {
@@ -2399,6 +2401,7 @@ test("a reply round with no recognized status fails toward a review round", () =
     {
       ...prependBinToPath(workspace),
       FAKE_AGENT_SCENARIO_FILE: scenarioFile,
+      FAKE_GH_STATE_FILE: ghStateFile,
     }
   );
 
@@ -5396,4 +5399,43 @@ test("conversation snapshots hold run ownership and preserve finalization during
       assert.equal(result.saved.summary, "New summary");
     }
   }
+});
+
+
+test("a delayed worker conversation scan cannot relaunch a reply handled by a manual run", () => {
+  const workspace = setupRunnerWorkspace("review-stale-reply-");
+  const request = sampleRequest();
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const item = {id: 701, body: "Please explain", user: {login: "octocat"}, updated_at: "2026-05-01T00:30:00Z"};
+  const key = `issue:701::${createHash("sha256").update(item.body).digest("hex")}`;
+  writeJson(ghStateFile, {prs: {"acme/widget#1": {state: "open", headRefOid: "abc123", reviews: [], comments: [], issueComments: [item]}}});
+  writeJson(scenarioFile, {claude: {stdout: JSON.stringify({session_id: "manual", result: `Manual result.\n## Agent Status\nAgent status: needs_author_changes\n<!-- cortex-city-handled: ${JSON.stringify([key])} -->`, is_error: false})}});
+  const result = runTsxScript(workspace, [
+    `import { spawnReviewSummary, summarizePR, ReviewRoundObsoleteError } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+    `import { upsertReviewSummary, getReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    `import { getReviewConversation } from ${JSON.stringify(moduleUrl("src/lib/github.ts"))};`,
+    `import { decideReviewRound } from ${JSON.stringify(moduleUrl("src/lib/orchestrator-worker-runtime.ts"))};`,
+    `import { unhandledConversation } from ${JSON.stringify(moduleUrl("src/lib/review-conversation.ts"))};`,
+  ], `
+    const request = ${JSON.stringify(request)};
+    const initial = {...request, summary: "Initial", generated_at: "2026-05-01", summary_head_sha: request.head_sha, summary_diff_hash: "diff-1", effective_diff_hash: "diff-1", effective_diff_head_sha: request.head_sha, handled_conversation_keys: []};
+    await upsertReviewSummary(initial);
+    // Capture the worker's observation, then delay its return across a complete manual run.
+    const observation = await getReviewConversation(request.pr_url);
+    let returnObservation;
+    const delayedWorkerScan = new Promise(resolve => { returnObservation = () => resolve(observation); });
+    const manual = await summarizePR(request, {runtime: "claude"});
+    returnObservation();
+    const staleItems = await delayedWorkerScan;
+    const decision = decideReviewRound({review: initial, diffHash: "diff-1", config: ${JSON.stringify(baseConfig())}, hasUnhandledConversation: unhandledConversation(staleItems, initial).length > 0});
+    let skipped = false;
+    try { const spawned = await spawnReviewSummary(request, {runtime: "claude", round: decision.round}); await spawned.done; }
+    catch (error) { skipped = error instanceof ReviewRoundObsoleteError; }
+    console.log(JSON.stringify({round: decision.round, skipped, before: manual, after: getReviewSummary(request.pr_url)}));
+  `, {...prependBinToPath(workspace), FAKE_AGENT_SCENARIO_FILE: scenarioFile, FAKE_GH_STATE_FILE: ghStateFile});
+  assert.equal(result.round, "reply");
+  assert.equal(result.skipped, true);
+  assert.deepEqual(result.after, result.before);
+  assert.deepEqual(result.after.handled_conversation_keys, [key]);
 });

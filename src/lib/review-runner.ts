@@ -88,6 +88,7 @@ const REVIEW_RUN_LOCK_STALE_MS = 30_000;
 const REVIEW_RUN_LOCK_UPDATE_MS = 10_000;
 
 export class ReviewRunInFlightError extends Error {}
+export class ReviewRoundObsoleteError extends Error {}
 
 function isProcessRunning(pid?: number): boolean {
   if (typeof pid !== "number" || !Number.isFinite(pid)) return false;
@@ -1703,6 +1704,9 @@ async function spawnReviewSummaryUnderLock(
     console.warn(`[review-runner] Conversation snapshot unavailable for ${target.pr_url}:`, error);
     return undefined;
   });
+  if (replyRound && conversationBefore && unhandledConversation(conversationBefore, cachedBefore).length === 0) {
+    throw new ReviewRoundObsoleteError(`No unhandled conversation remains for ${target.pr_url}`);
+  }
   const prompt = conversationBefore
     ? `${roundPrompt}\n\n${conversationPrompt(unhandledConversation(conversationBefore, cachedBefore))}`
     : roundPrompt;

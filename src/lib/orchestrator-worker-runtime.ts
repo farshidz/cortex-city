@@ -55,6 +55,7 @@ import { reviewCoversHeadSha, summaryCoversHead } from "./review-status";
 import { spawnReviewRetro } from "./review-learnings-runner";
 import {
   isReviewTieringEnabled,
+  ReviewRoundObsoleteError,
   resolveReviewOpts,
   spawnReviewSummary,
   type ReviewRoundKind,
@@ -2502,8 +2503,8 @@ async function runReviewPhases(
       };
       let decision = decideReviewRound(roundInput);
       // Looking for conversation happens only once the code itself needs no
-      // round. The batch observation key makes this a cached read while the PR
-      // remains unchanged.
+      // round. The runner revalidates the resulting decision under ownership
+      // because another process may handle the conversation during this read.
       if (
         !decision.round &&
         decision.reason === "up_to_date" &&
@@ -2602,6 +2603,10 @@ async function runReviewPhases(
           `[worker] Spawned tier-${tier} ${round} round for ${pr.pr_url} (${decision.reason})`
         );
       } catch (error) {
+        if (error instanceof ReviewRoundObsoleteError) {
+          deps.logger.log(`[worker] Skipped stale reply decision for ${pr.pr_url}: conversation already handled`);
+          continue;
+        }
         deps.logger.error(
           `[worker] Failed to spawn review summary for ${pr.pr_url}:`,
           error
