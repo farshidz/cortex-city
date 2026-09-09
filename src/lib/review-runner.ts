@@ -1688,6 +1688,7 @@ export async function spawnReviewSummary(
     effective_diff_head_sha: cachedBefore?.effective_diff_head_sha,
     head_first_seen_at: cachedBefore?.head_first_seen_at,
     last_conversation_seen_at: cachedBefore?.last_conversation_seen_at,
+    prior_review_had_no_findings: cachedBefore?.prior_review_had_no_findings,
     last_round_diff_hash: cachedBefore?.last_round_diff_hash,
     last_round_head_sha: cachedBefore?.last_round_head_sha,
     pending_tier2_reason: cachedBefore?.pending_tier2_reason,
@@ -2388,6 +2389,13 @@ export async function spawnReviewSummary(
         // standing one alone. A tier-1 round does replace it: `fixes_verified`
         // and `escalate` both mean the standing verdict no longer describes
         // this diff, and the queued tier-2 pass owns the next one.
+        prior_review_had_no_findings: reviewContextChangedDuringRun
+          ? undefined
+          : successful && !verificationRound
+            ? headMovedDuringRun && agentReviewStatus === "ready_for_human_approval" || undefined
+            : successful && agentReviewStatus && agentReviewStatus !== "ready_for_human_approval"
+              ? undefined
+              : latestBeforeSave.prior_review_had_no_findings,
         agent_review_status: successful
           ? headMovedDuringRun || reviewContextChangedDuringRun
             ? undefined

@@ -692,7 +692,12 @@ export function decideReviewRound(
     }
     return {
       round: "review",
-      tier: tier1Enabled && hasSummary && !tier2Pending ? 1 : 2,
+      // A ready verdict from the full reviewer establishes that no findings
+      // remain across all feedback surfaces. A changed diff needs discovery,
+      // so skip the verification round that would only hand it back to tier 2.
+      tier: tier1Enabled && hasSummary && !tier2Pending &&
+        review.agent_review_status !== "ready_for_human_approval" &&
+        !review.prior_review_had_no_findings ? 1 : 2,
       reason: hasSummary ? "diff_changed" : "initial",
     };
   }
@@ -2332,6 +2337,11 @@ async function runReviewPhases(
           session_profile: reviewContextChanged
             ? undefined
             : current.session_profile,
+          prior_review_had_no_findings: reviewContextChanged
+            ? undefined
+            : current.agent_review_status
+              ? current.agent_review_status === "ready_for_human_approval"
+              : current.prior_review_had_no_findings,
           agent_review_status:
             reviewContextChanged || !verdictSurvives
               ? undefined
@@ -2383,6 +2393,7 @@ async function runReviewPhases(
       return {
         ...current,
         ...prFieldsFromRequest(pr),
+        prior_review_had_no_findings: reviewContextChanged ? undefined : current.prior_review_had_no_findings,
         summary: reviewContextChanged ? "" : current.summary,
         summary_head_sha: reviewContextChanged
           ? undefined
