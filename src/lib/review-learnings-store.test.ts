@@ -108,3 +108,17 @@ test("concurrent writes serialize without leaving temp files", () => {
     true
   );
 });
+
+test("an over-budget rewrite preserves the existing learnings", () => {
+  const workspace = createTempWorkspace("review-learnings-budget-preserve-");
+  const result = runStoreScript(workspace, `
+    await store.writeReviewLearnings("- Preserve existing guidance.\\n");
+    let error = "";
+    try {
+      await store.compareAndWriteReviewLearnings("- Preserve existing guidance.\\n", "- " + "x".repeat(13000));
+    } catch (caught) { error = caught.message; }
+    console.log(JSON.stringify({ error, content: store.readReviewLearnings() }));
+  `);
+  assert.match(result.error, /UTF-8 bytes/);
+  assert.equal(result.content, "- Preserve existing guidance.\n");
+});

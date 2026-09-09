@@ -1,3 +1,4 @@
+import { ReviewLearningsBudgetError } from "@/lib/review-learnings-budget";
 import { NextRequest, NextResponse } from "next/server";
 import {
   readReviewLearnings,
@@ -22,7 +23,14 @@ export async function PUT(request: NextRequest) {
     );
   }
   const content = body.content;
-  await writeReviewLearnings(content);
+  try {
+    await writeReviewLearnings(content);
+  } catch (error) {
+    if (error instanceof ReviewLearningsBudgetError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    throw error;
+  }
   const config = readConfig();
   return NextResponse.json({
     content,

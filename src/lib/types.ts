@@ -487,6 +487,8 @@ export interface ReviewSummary extends ReviewRequest {
   error?: string;
   error_at?: string;
   agent_review_status?: ReviewAgentStatus;
+  // Retain the prior no-findings verdict while a changed head awaits review.
+  prior_review_had_no_findings?: boolean;
   // Comments the reviewer posted, recorded per surface. These IDs are filtered
   // from task wakeups and PR-state hashes. Receipts for the two
   // application-owned handoff comments are verified immutable events, matched by
