@@ -1,0 +1,41 @@
+# Review Learnings
+
+- Validate the literal persisted or transmitted value against the downstream contract. Trace every producer and consumer, including aliases, JSON maps, opaque tokens, and normalization before authorization.
+- When keys normalize to the same identifier, reject collisions or define one shared precedence rule. Test reversed insertion orders.
+- Bind UI state, mutation state, and cached async results to the complete selected resource identity. Test switching identity without remounting and responses arriving out of order.
+- Distinguish loading, failure, valid-empty, and loaded catalog states. Keep dependent actions unavailable until usable data exists and provide retry for recoverable failures.
+- Compare normalized saved values with persisted values when warning about consequential changes. Check every editing mode and submission path.
+- Verify runtime flags against the receiving API and its defaults. Check obsolete flags in comments and operator instructions.
+- For dependency fixes, inspect the resolved graph and every installation surface. Scope overrides to compatible versions, verify patch application, and preserve audit enforcement.
+- Trace convention-named build artifacts from producer matrices through upload, consumer allowlists, cleanup, and deployment. Test drift using the producer configuration and actual consumer queries.
+- For distributed limits, identify the protected resource, counter unit, partition count, time window, and per-request cost. A per-key limit does not establish an aggregate bound.
+- Reconcile PR descriptions, durable docs, schema descriptions, examples, and claimed benefits with the final implementation. Group related stale statements into one actionable finding and avoid repeated cosmetic review cycles.
+- Match frontend privilege checks to the backend credential contract, including legacy scopes and mixed credentials. Resource ownership must be enforced independently of credential validity.
+- Test worker setup, execution, teardown, and exception propagation. Background work must preserve the caller-visible failure semantics of the sequential path.
+- For unordered or repeated events, bind durable work to an owner/version and make external effects idempotent. Serialization alone does not establish event order; acknowledgements must follow durable completion.
+- When automation writes into its own triggering event stream, persist the intended action before posting, verify author and exact payload on recovery, and suppress only verified self-authored events.
+- Bound compressed input at decompression, parsing, field, item, and aggregate allocation boundaries. Test malformed encodings and parser-level resource exhaustion.
+- Keep resource-recovery retries bounded and classify failures precisely. Preserve unexpected errors, clean up failed replacements, and test second-attempt failure.
+- For derived-data migrations, test two consecutive runs: the first repairs missing output, the second converges without rebuilding. Keep transient failures retryable.
+- Include every simultaneously live scope in durable cache keys. Distinguish partition identity from invalidation versions; test tenant, index, locale, and mode isolation.
+- Trace credential wiring through configuration, assumed role, IAM policy, secret shape, rotation, and downstream authentication. Verify the deployed process uses the intended identity and that diagnostics do not expose credentials.
+- Trace model/backend selection through availability checks, defaults, overrides, and the final request. Verify session-level versus request-level configuration and preserve the explicitly selected model's request semantics.
+- Define streaming success by delivered observable output. Test every terminal path for consistent user output, diagnostics, cleanup, persistence, and bounded retries before irreversible delivery.
+- Status endpoints must identify the represented process/account, cache age, and access controls. Avoid exposing raw provider responses or credentials.
+- Treat model-produced syntax and links as untrusted input. Validate complete grammars and transformations before granting filter authority, making fetches, or emitting UI actions; cover adversarial boundary cases.
+- When enabling stubs, flags, or alternate implementations, audit observable labels, validation, fallbacks, and rollback paths. Tests must reach the selected implementation and distinguish an inert flag from active behavior.
+- Treat evaluation code as another implementation of the production contract. Reuse production schemas and normalization, count provider/parser failures separately from valid empty results, and inspect the fully rendered prompt.
+- Use one shared actionability rule for persisted review state across scheduling, UI, callbacks, and side effects. A pending successor review must prevent an older verdict from prematurely waking work or approving it.
+- Bind review analysis and publication to an immutable head. Verify claimed commits belong to the current PR, check the final diff, and refresh state before posting a decision. Resolve findings only after verifying the fix.
+- For wire-schema changes, trace all writers, readers, projections, and equality hashes. Check forward and rollback compatibility, omitted/default fields, and consumer-before-producer deployment constraints.
+- Test guards at the real entrypoint with dependencies that fail if reached. A unit test of the guard function alone does not prove ordering or wiring.
+- On full-replacement configuration APIs, trace omitted and invalid values through parsing, persistence, response, and client updates. Preserve the distinction between unset/inherited and explicit overrides.
+- Check scheduler enable/pause behavior across runtime entrypoints, committed infrastructure, manual triggers, and legacy defaults. Make intentional skips observable.
+- For cleanup, compare creation, completion, eligibility, and provider-expiry clocks. Snapshot pagination before deletion, revalidate mutable state, treat authoritative absence as convergence, and propagate permission/server failures.
+- Derive names used by environment variables, IAM policies, and resource consumers from the same naming function. Cover truncation, environment overrides, and provider length/character limits.
+- Treat composed identifiers as opaque unless every producer enforces an unambiguous component alphabet. Prefer explicit structured fields over delimiter-based reconstruction.
+- Verify infrastructure tests select changed paths, enter the relevant branch, synthesize the affected environment, and inspect material output. Passing tests that skip the changed behavior provide no validation.
+- Review feature-flag flips as rollout changes: absent-key defaults, all consumer gates, environment targeting, operator settings, and the blast radius of broad defaults must agree.
+- For stable external endpoints, inspect resource retention, logical identity, traffic binding, service trust, disabled-environment behavior, and upgrades. Resource existence alone does not prove a usable endpoint.
+- For alarms, prove the signal is emitted and the threshold is reachable. Check dimensions, joins, grouping, volume gates, no-data behavior, routing labels, live evidence, and runbook claims.
+- Exercise new endpoints through the public routing path. Carry original resource identity across aliases and proxies, and enforce ownership at the data boundary as well as authentication at the route.
