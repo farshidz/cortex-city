@@ -1805,6 +1805,26 @@ test("buildReviewReplyPrompt promises the decision event only off the cheap tier
   );
 });
 
+test("a missing pre-run conversation snapshot preserves the legacy coverage cutoff", () => {
+  const workspace = setupRunnerWorkspace("review-conversation-missing-");
+  const gh = path.join(workspace, "bin", "gh");
+  renameSync(gh, gh + "-real");
+  writeFileSync(gh, `#!/usr/bin/env node\nif (process.argv.includes("repos/acme/widget/pulls/1/reviews")) process.exit(1);\nprocess.stdout.write(require("node:child_process").execFileSync(__dirname + "/gh-real", process.argv.slice(2)));\n`);
+  chmodSync(gh, 0o755);
+  const request = sampleRequest();
+  const cutoff = "2026-05-01T00:00:00Z";
+  const result = runTsxScript(workspace, [
+    `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+    `import { upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+  ], `
+    await upsertReviewSummary({...${JSON.stringify(request)}, summary: "Previous", generated_at: "2026-05-01", last_conversation_seen_at: ${JSON.stringify(cutoff)}});
+    console.log(JSON.stringify(await summarizePR(${JSON.stringify(request)}, {runtime: "claude"})));
+  `, {...prependBinToPath(workspace), FAKE_AGENT_STDOUT: JSON.stringify({result: "## Agent Status\nAgent status: needs_author_changes", is_error: false})});
+  assert.equal(result.error, undefined);
+  assert.equal(result.last_conversation_seen_at, cutoff);
+  assert.equal(result.handled_conversation_keys, undefined);
+});
+
 test("a reply round answers conversation without touching the stored review", () => {
   const workspace = setupRunnerWorkspace("review-runner-reply-round-");
   const scenarioFile = path.join(workspace, "scenario.json");
@@ -5271,22 +5291,25 @@ test("disk write race does not corrupt reviews.json under concurrent summarizati
 });
 
 
-test("a missing pre-run conversation snapshot preserves the legacy coverage cutoff", () => {
-  const workspace = setupRunnerWorkspace("review-conversation-missing-");
-  const gh = path.join(workspace, "bin", "gh");
-  renameSync(gh, gh + "-real");
-  writeFileSync(gh, `#!/usr/bin/env node\nif (process.argv.includes("repos/acme/widget/pulls/1/reviews")) process.exit(1);\nprocess.stdout.write(require("node:child_process").execFileSync(__dirname + "/gh-real", process.argv.slice(2)));\n`);
-  chmodSync(gh, 0o755);
-  const request = sampleRequest();
-  const cutoff = "2026-05-01T00:00:00Z";
+
+test("saved sibling-list lessons survive wrapper projection and tags stay scoped", () => {
+  const workspace = setupRunnerWorkspace("review-runner-learnings-grammar-");
   const result = runTsxScript(workspace, [
-    `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
-    `import { upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    `import { writeReviewLearnings } from ${JSON.stringify(moduleUrl("src/lib/review-learnings-store.ts"))};`,
+    `import { buildReviewWrapperPrompt } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
   ], `
-    await upsertReviewSummary({...${JSON.stringify(request)}, summary: "Previous", generated_at: "2026-05-01", last_conversation_seen_at: ${JSON.stringify(cutoff)}});
-    console.log(JSON.stringify(await summarizePR(${JSON.stringify(request)}, {runtime: "claude"})));
-  `, {...prependBinToPath(workspace), FAKE_AGENT_STDOUT: JSON.stringify({result: "## Agent Status\nAgent status: needs_author_changes", is_error: false})});
-  assert.equal(result.error, undefined);
-  assert.equal(result.last_conversation_seen_at, cutoff);
-  assert.equal(result.handled_conversation_keys, undefined);
+    const outputs = [];
+    for (const marker of ["+ ", "1. ", "  - "]) {
+      const content = marker + "FIRST " + "a".repeat(400) + "\\n" + marker + "SECOND " + "b".repeat(400);
+      await writeReviewLearnings(content);
+      const prompt = buildReviewWrapperPrompt(${JSON.stringify(baseConfig({review_learning_enabled: true}))}, ${JSON.stringify(sampleRequest())});
+      outputs.push(prompt.includes("FIRST") && prompt.includes("SECOND"));
+    }
+    await writeReviewLearnings("- [repo: acme/widget ] Scoped guidance");
+    const scoped = buildReviewWrapperPrompt(${JSON.stringify(baseConfig({review_learning_enabled: true}))}, ${JSON.stringify(sampleRequest())});
+    let rejected = false;
+    try { await writeReviewLearnings("- [repo:acme/widget Missing close"); } catch { rejected = true; }
+    console.log(JSON.stringify({outputs, scoped: scoped.includes("Scoped guidance"), rejected}));
+  `, prependBinToPath(workspace));
+  assert.deepEqual(result, {outputs: [true, true, true], scoped: true, rejected: true});
 });

@@ -60,6 +60,7 @@ export default function SettingsPage() {
   const [learningsEditing, setLearningsEditing] = useState(false);
   const [learningsSaving, setLearningsSaving] = useState(false);
   const [learningsContent, setLearningsContent] = useState("");
+  const [learningsError, setLearningsError] = useState("");
   const permissionOptions = form
     ? getPermissionOptions(form.default_agent_runner)
     : [];
@@ -199,17 +200,28 @@ export default function SettingsPage() {
 
   async function saveLearnings() {
     setLearningsSaving(true);
-    await fetch("/api/reviews/learnings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: learningsContent }),
-    });
-    await mutateLearnings();
-    setLearningsEditing(false);
-    setLearningsSaving(false);
+    setLearningsError("");
+    try {
+      const response = await fetch("/api/reviews/learnings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: learningsContent }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `Could not save review learnings (${response.status}).`);
+      }
+      await mutateLearnings();
+      setLearningsEditing(false);
+    } catch (error) {
+      setLearningsError(error instanceof Error ? error.message : "Could not save review learnings.");
+    } finally {
+      setLearningsSaving(false);
+    }
   }
 
   function toggleLearningsEditing() {
+    setLearningsError("");
     if (learningsEditing) {
       setLearningsContent(learnings?.content ?? "");
       setLearningsEditing(false);
@@ -576,7 +588,7 @@ export default function SettingsPage() {
               variant="outline"
               size="sm"
               onClick={toggleLearningsEditing}
-              disabled={!learnings && !learningsEditing}
+              disabled={learningsSaving || (!learnings && !learningsEditing)}
             >
               {learningsEditing ? "Cancel" : "Edit"}
             </Button>
@@ -589,7 +601,9 @@ export default function SettingsPage() {
                 rows={10}
                 value={learningsContent}
                 onChange={(e) => setLearningsContent(e.target.value)}
+                disabled={learningsSaving}
               />
+              {learningsError && <p role="alert" className="text-sm text-destructive">{learningsError}</p>}
               <Button
                 type="button"
                 onClick={saveLearnings}

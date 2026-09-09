@@ -43,6 +43,7 @@ import {
   reviewerCommentBodySha256,
   reviewerCommentSurfaceOf,
 } from "./review-comments";
+import { selectReviewLearnings } from "./review-learnings-budget";
 import { readReviewLearnings } from "./review-learnings-store";
 import {
   getReviewSummary,
@@ -902,7 +903,7 @@ export function buildReviewWrapperPrompt(
   }
 
   if (config.review_learning_enabled !== false) {
-    const learnings = readReviewLearnings().trim();
+    const learnings = selectReviewLearnings(readReviewLearnings(), target.repo_slug);
     if (learnings) {
       sections.push(
         "",

@@ -91,7 +91,12 @@ function runRenderScript(body: string): string[] {
                   Array.isArray(queue) && queue.length > 0
                     ? queue.shift()
                     : initial;
-                return react.useState(next);
+                const index = globalThis.__STATE_INDEX__ = (globalThis.__STATE_INDEX__ || 0) + 1;
+                const [value, setter] = react.useState(next);
+                return [value, (updated) => {
+                  globalThis.__STATE_UPDATES__?.push({ index, value: updated });
+                  setter(updated);
+                }];
               },
             };
           }
@@ -181,6 +186,7 @@ function runRenderScript(body: string): string[] {
           async function renderPage(relativePath, props = {}, stateOverrides = []) {
             const Component = await loadComponent(relativePath);
             globalThis.__STATE_OVERRIDES__ = [...stateOverrides];
+            globalThis.__STATE_INDEX__ = 0;
             return render(
               React.createElement(
                 AppRouterContext.Provider,
@@ -1738,4 +1744,34 @@ test("root layout renders navigation around page content", () => {
   assert.match(html, /commit 1234567/);
   assert.match(html, /title="1234567890abcdef"/);
   assert.match(html, /aria-current="page"/);
+});
+
+
+test("settings keeps a rejected learnings draft in edit mode and shows the API error", () => {
+  const output = runRenderScript(`
+    const draft = "- My unsaved lesson";
+    const message = "Each review lesson must fit within 600 UTF-8 bytes.";
+    const requests = [];
+    globalThis.fetch = async (url, options) => {
+      requests.push({url, body: JSON.parse(options.body)});
+      return {ok: false, status: 400, json: async () => ({error: message})};
+    };
+    await renderPage("./src/app/settings/page.tsx", {}, [false, config, true, false, draft, ""]);
+    globalThis.__STATE_UPDATES__ = [];
+    globalThis.__MUTATE_COUNT__ = 0;
+    const save = handlers.find((handler) => handler.fn.name === "saveLearnings");
+    await save.fn();
+    const updates = globalThis.__STATE_UPDATES__;
+    const html = await renderPage("./src/app/settings/page.tsx", {}, [false, config, true, false, draft, message]);
+    console.log(JSON.stringify({requests, updates, mutations: globalThis.__MUTATE_COUNT__, hasDraft: html.includes(draft), hasError: html.includes(message) && html.includes('role="alert"')}));
+  `);
+  const result = JSON.parse(output[0]);
+  assert.deepEqual(result.requests, [{url: "/api/reviews/learnings", body: {content: "- My unsaved lesson"}}]);
+  assert.equal(result.mutations, 0);
+  assert.equal(result.updates.some((update: {index: number; value: unknown}) => update.index === 3 && update.value === false), false);
+  assert.equal(result.updates.some((update: {index: number}) => update.index === 5), false);
+  assert.equal(result.updates.findLast((update: {index: number}) => update.index === 4).value, false);
+  assert.equal(result.updates.findLast((update: {index: number}) => update.index === 6).value, "Each review lesson must fit within 600 UTF-8 bytes.");
+  assert.equal(result.hasDraft, true);
+  assert.equal(result.hasError, true);
 });
