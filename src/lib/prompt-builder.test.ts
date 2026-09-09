@@ -330,7 +330,7 @@ test("buildReviewPrompt maps PR states and replaces every base-branch placeholde
   );
 
   assert.match(result, /PR=https:\/\/github.com\/farshidz\/marqo-cortex-city\/pull\/123/);
-  assert.match(result, /Status=Checks are failing\. Fix CI failures related to or caused by this PR\./);
+  assert.match(result, /Status=Checks are failing\. Fix CI failures related to or caused by this PR\. Report unrelated failures without fixing them or creating subtasks for them\./);
   assert.match(result, /Base=develop/);
   assert.match(result, /Again=develop/);
   assert.match(result, /## Agent Review Context\nReview Context/);
@@ -518,4 +518,12 @@ test("buildCleanupPrompt and manual helpers provide the expected fallbacks", () 
   assert.equal(result.manual, "investigate flaky CI");
   assert.equal(result.resume, "continue");
   assert.equal(result.emptyManual, "");
+});
+
+
+test("actual shared builder templates contain the complete CI scope policy", () => {
+  for (const template of ["initial.md", "review.md"]) {
+    const content = readFileSync(path.join(REPO_ROOT, "prompts", "templates", template), "utf-8");
+    assert.ok(content.includes("Fix CI failures related to or caused by this PR. Report unrelated failures in your final summary without fixing them or creating subtasks for them."), template);
+  }
 });
