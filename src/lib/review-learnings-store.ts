@@ -13,6 +13,8 @@ import path from "path";
 import { snapshotCortex } from "./cortex-git";
 import { ensureCortexDir, getCortexPath } from "./store";
 
+import { validateReviewLearnings } from "./review-learnings-budget";
+
 let writeLock: Promise<void> = Promise.resolve();
 const LOCK_STALE_MS = 5 * 60 * 1000;
 const LOCK_TIMEOUT_MS = 10_000;
@@ -94,6 +96,7 @@ export function readReviewLearnings(): string {
 }
 
 function writeLearningsFile(content: string): void {
+  validateReviewLearnings(content);
   ensureCortexDir();
   const file = getLearningsFile();
   const temp = path.join(

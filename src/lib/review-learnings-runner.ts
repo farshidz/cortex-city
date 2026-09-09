@@ -1,3 +1,4 @@
+import { MAX_REVIEW_LEARNINGS_BYTES, MAX_REVIEW_LESSON_BYTES } from "./review-learnings-budget";
 import type { ChildProcess } from "child_process";
 import { LowDiskSpaceError } from "./disk-guard";
 import { patchReviewSummary } from "./review-store";
@@ -31,7 +32,9 @@ Curation rules:
 - Discard vague platitudes.
 - Prefer generic lessons. Record a repo-specific lesson only when it genuinely cannot be generalized, and tag it with the repo slug.
 - Integrate into the whole file: merge duplicates, drop weak or stale entries.
-- Stay under a hard budget of roughly 30 to 40 lessons.
+- Keep the entire file under ${MAX_REVIEW_LEARNINGS_BYTES} UTF-8 bytes (roughly 3,000 English tokens), with at most 40 lessons and ${MAX_REVIEW_LESSON_BYTES} bytes per lesson. These size limits are enforced on save.
+- Use one Markdown bullet per lesson. Keep each lesson to one or two short sentences; remove incident histories and long example lists.
+- Prefix repository-specific bullets with [repo:owner/repository]. Leave general lessons untagged.
 - Preserve human-edited content. Do not silently delete lessons that read as deliberate human guidance.
 - Output the complete rewritten Markdown file only. The result text is the new file contents.`;
 

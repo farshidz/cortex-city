@@ -766,6 +766,46 @@ test("pollOnce uses lifecycle fallback for a snapshot omitted after a field-leve
   assert.equal(h.builderCalls.length, 0);
 });
 
+test("a changed diff after a ready verdict skips empty verification", () => {
+  const config = makeConfig({ reviewer_tiers: { tier1: { effort: "medium" }, tier2: { effort: "xhigh" } } });
+  const review = makeSummary(makeRequest({ head_sha: "new-head" }), {
+    summary: "No outstanding findings on the previous head.",
+    summary_head_sha: "old-head",
+    summary_diff_hash: "old-diff",
+    agent_review_status: "ready_for_human_approval",
+  });
+  assert.deepEqual(decideReviewRound({ review, diffHash: "new-diff", config }), {
+    round: "review", tier: 2, reason: "diff_changed",
+  });
+  assert.deepEqual(decideReviewRound({ review, diffHash: "old-diff", config }), { reason: "up_to_date" });
+  for (const status of ["needs_author_changes", "needs_human_decision", undefined] as const) {
+    assert.deepEqual(decideReviewRound({ review: { ...review, agent_review_status: status }, diffHash: "new-diff", config }), {
+      round: "review", tier: 1, reason: "diff_changed",
+    });
+  }
+});
+
+
+test("pollOnce preserves a ready verdict for tier selection across a changed-head debounce", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } }, review_debounce_seconds: 60 },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: { [prUrl]: makeTaskReviewRow({ agent_review_status: "ready_for_human_approval" }) },
+    prDiffHashes: { [prUrl]: "diff-2" },
+  });
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 0);
+  assert.equal(h.reviews[prUrl].agent_review_status, undefined);
+  assert.equal(h.reviews[prUrl].prior_review_had_no_findings, true);
+  h.reviews[prUrl].head_first_seen_at = "2020-01-01T00:00:00Z";
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 1);
+  assert.equal(h.spawnRounds[0].tier, 2);
+});
+
 test("pollOnce runs a tier-1 verification round seeded with its open threads", async () => {
   const task = makeTask();
   const prUrl = task.pr_url!;
@@ -3355,44 +3395,4 @@ test("pollOnce will not clear a condition recorded after the drain it inspected"
   // schedule or retry a PENDING review, so the newer draft would swallow every
   // later reviewer comment with no record left of it.
   assert.equal(h.reviews[pr.pr_url].pending_review_error, newer);
-});
-
-test("a changed diff after a ready verdict skips empty verification", () => {
-  const config = makeConfig({ reviewer_tiers: { tier1: { effort: "medium" }, tier2: { effort: "xhigh" } } });
-  const review = makeSummary(makeRequest({ head_sha: "new-head" }), {
-    summary: "No outstanding findings on the previous head.",
-    summary_head_sha: "old-head",
-    summary_diff_hash: "old-diff",
-    agent_review_status: "ready_for_human_approval",
-  });
-  assert.deepEqual(decideReviewRound({ review, diffHash: "new-diff", config }), {
-    round: "review", tier: 2, reason: "diff_changed",
-  });
-  assert.deepEqual(decideReviewRound({ review, diffHash: "old-diff", config }), { reason: "up_to_date" });
-  for (const status of ["needs_author_changes", "needs_human_decision", undefined] as const) {
-    assert.deepEqual(decideReviewRound({ review: { ...review, agent_review_status: status }, diffHash: "new-diff", config }), {
-      round: "review", tier: 1, reason: "diff_changed",
-    });
-  }
-});
-
-
-test("pollOnce preserves a ready verdict for tier selection across a changed-head debounce", async () => {
-  const task = makeTask();
-  const prUrl = task.pr_url!;
-  const h = makeHarness({
-    config: { reviewer_tiers: { tier1: { effort: "low" } }, review_debounce_seconds: 60 },
-    tasks: [task],
-    prHeadShas: { [prUrl]: "fixedSha" },
-    reviews: { [prUrl]: makeTaskReviewRow({ agent_review_status: "ready_for_human_approval" }) },
-    prDiffHashes: { [prUrl]: "diff-2" },
-  });
-  await pollOnce(new Map(), h.deps, h.activeReviewPids);
-  assert.equal(h.spawnRounds.length, 0);
-  assert.equal(h.reviews[prUrl].agent_review_status, undefined);
-  assert.equal(h.reviews[prUrl].prior_review_had_no_findings, true);
-  h.reviews[prUrl].head_first_seen_at = "2020-01-01T00:00:00Z";
-  await pollOnce(new Map(), h.deps, h.activeReviewPids);
-  assert.equal(h.spawnRounds.length, 1);
-  assert.equal(h.spawnRounds[0].tier, 2);
 });
