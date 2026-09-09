@@ -965,15 +965,39 @@ export async function getPRDiffHash(
 
 // Snapshot published discussion with content versions. Reuse the same provenance
 // rules as the scheduling clock, but include edits and review-state changes.
+const conversationScanCache = new Map<string, {
+  observationKey: string;
+  receiptsKey: string;
+  items: ReviewConversationItem[];
+  pageCount: number;
+  refreshAfter: number;
+}>();
+const CONVERSATION_SCAN_CACHE_SIZE = 128;
+
 export async function getReviewConversation(prUrl: string, observationKey?: string): Promise<ReviewConversationItem[] | undefined> {
-  // Always acquire current versions. Older edited comments need not change the
-  // batch query's newest-comment observation key.
-  void observationKey;
   const pr = parsePRUrl(prUrl);
   if (!pr) return undefined;
+  const cached = observationKey ? conversationScanCache.get(prUrl) : undefined;
+  const receipts = receiptedReviewerCommentIds(prUrl);
+  const receiptsKey = JSON.stringify([[...receipts.issueIds], [...receipts.reviewCommentIds]]);
+  const matches = cached?.observationKey === observationKey && cached?.receiptsKey === receiptsKey;
+  if (cached && matches && Date.now() < cached.refreshAfter) return cached.items;
+  let pageBudget = Infinity;
+  if (observationKey) {
+    // Background scans leave capacity for active reviews and other GitHub work.
+    // Run-start/end snapshots omit observationKey and always read fresh versions.
+    const quota = await execFileResult("gh", ["api", "rate_limit"]);
+    try {
+      const remaining = JSON.parse(quota.stdout).resources.core.remaining;
+      if (!quota.ok || !Number.isFinite(remaining)) return undefined;
+      pageBudget = Math.max(0, remaining - 100);
+      if (pageBudget < (cached?.pageCount ?? 3)) return matches ? cached?.items : undefined;
+    } catch { return undefined; }
+  }
   const items: ReviewConversationItem[] = [];
   const submittedIds = new Set<number>();
   let retainedBodyBytes = 0;
+  let pageCount = 0;
   const add = (surface: ReviewConversationItem["surface"], item: { id: number; body?: string | null; created_at?: string; updated_at?: string; submitted_at?: string; state?: string }) => {
     const body = item.body || "";
     const state = surface === "review" ? item.state || "" : "";
@@ -986,6 +1010,8 @@ export async function getReviewConversation(prUrl: string, observationKey?: stri
     for (let page = 1; ; page++) {
       // Ten bodies fit in a bounded subprocess buffer, including JSON escaping.
       // Only this page's full bodies are retained while computing their hashes.
+      if (pageCount >= pageBudget) throw new Error("Conversation background scan quota exhausted");
+      pageCount++;
       const result = await execFileResult("gh", ["api", `${endpoint}?per_page=10&page=${page}`], 8 * 1024 * 1024);
       if (!result.ok) throw new Error("Conversation page unavailable");
       const rows: unknown = JSON.parse(result.stdout);
@@ -1018,7 +1044,20 @@ export async function getReviewConversation(prUrl: string, observationKey?: stri
         if (!isReviewerAuthoredComment(identity, "issue", comment)) add("issue", comment);
       }
     }
-    return [...items.slice(reviewCount), ...items.slice(0, reviewCount)];
+    const ordered = [...items.slice(reviewCount), ...items.slice(0, reviewCount)];
+    if (observationKey) {
+      conversationScanCache.delete(prUrl);
+      conversationScanCache.set(prUrl, {
+        observationKey, receiptsKey, items: ordered, pageCount,
+        // Small discussions refresh after five minutes for older edits that do
+        // not change observationKey. Large scans amortize ten seconds per page.
+        refreshAfter: Date.now() + Math.max(5 * 60_000, pageCount * 10_000),
+      });
+      while (conversationScanCache.size > CONVERSATION_SCAN_CACHE_SIZE) {
+        conversationScanCache.delete(conversationScanCache.keys().next().value!);
+      }
+    }
+    return ordered;
   } catch {
     return undefined;
   }

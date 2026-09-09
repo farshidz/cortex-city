@@ -1602,3 +1602,47 @@ test("bounded conversation acquisition drains bodies larger than the old subproc
     assert.equal(round.firstKey, `issue:1::${createHash("sha256").update(bodies[0].body).digest("hex")}`);
   }
 });
+
+
+test("background conversation scans cache unchanged PRs, refresh edits, and respect quota", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const result = runGithubScript(workspace, {
+    "api rate_limit": {stdout: JSON.stringify({resources: {core: {remaining: 5000}}})},
+    [reviewsKey()]: {stdout: "[[]]"},
+    [reviewCommentsKey()]: {stdout: "[[]]"},
+    [issueCommentsKey()]: {stdout: JSON.stringify([[{id: 1, body: "Original", user: {login: "octocat"}}]])},
+  }, `
+    const fs = await import("node:fs");
+    const responseFile = process.env.FAKE_GH_RESPONSES_FILE;
+    const calls = () => fs.readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf8").trim().split("\\n").filter(Boolean).length;
+    const first = await getReviewConversation(${JSON.stringify(prUrl)}, "stable");
+    const afterFirst = calls();
+    await getReviewConversation(${JSON.stringify(prUrl)}, "stable");
+    const afterCached = calls();
+    const responses = JSON.parse(fs.readFileSync(responseFile, "utf8"));
+    responses[${JSON.stringify(issueCommentsKey())}].stdout = JSON.stringify([[{id: 1, body: "Edited", user: {login: "octocat"}}]]);
+    fs.writeFileSync(responseFile, JSON.stringify(responses));
+    const now = Date.now;
+    Date.now = () => now() + 6 * 60_000;
+    const refreshed = await getReviewConversation(${JSON.stringify(prUrl)}, "stable");
+    Date.now = now;
+    const afterRefreshed = calls();
+    await getReviewConversation(${JSON.stringify(prUrl)}, "changed");
+    const afterChanged = calls();
+    responses["api rate_limit"].stdout = JSON.stringify({resources: {core: {remaining: 101}}});
+    fs.writeFileSync(responseFile, JSON.stringify(responses));
+    const deferred = await getReviewConversation(${JSON.stringify(prUrl)}, "another-change");
+    const afterDeferred = calls();
+    const fresh = await getReviewConversation(${JSON.stringify(prUrl)});
+    console.log(JSON.stringify({afterFirst, afterCached, afterRefreshed, afterChanged, afterDeferred, deferred: deferred ?? null, first: first[0].key, refreshed: refreshed[0].key, fresh: fresh[0].body}));
+  `);
+  assert.equal(result.afterFirst, 4);
+  assert.equal(result.afterCached, result.afterFirst);
+  assert.equal(result.afterRefreshed, result.afterFirst + 4);
+  assert.equal(result.afterChanged, result.afterRefreshed + 4);
+  assert.equal(result.afterDeferred, result.afterChanged + 1);
+  assert.equal(result.deferred, null);
+  assert.notEqual(result.first, result.refreshed);
+  assert.equal(result.fresh, "Edited");
+});
