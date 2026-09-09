@@ -3375,3 +3375,24 @@ test("a changed diff after a ready verdict skips empty verification", () => {
     });
   }
 });
+
+
+test("pollOnce preserves a ready verdict for tier selection across a changed-head debounce", async () => {
+  const task = makeTask();
+  const prUrl = task.pr_url!;
+  const h = makeHarness({
+    config: { reviewer_tiers: { tier1: { effort: "low" } }, review_debounce_seconds: 60 },
+    tasks: [task],
+    prHeadShas: { [prUrl]: "fixedSha" },
+    reviews: { [prUrl]: makeTaskReviewRow({ agent_review_status: "ready_for_human_approval" }) },
+    prDiffHashes: { [prUrl]: "diff-2" },
+  });
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 0);
+  assert.equal(h.reviews[prUrl].agent_review_status, undefined);
+  assert.equal(h.reviews[prUrl].prior_review_had_no_findings, true);
+  h.reviews[prUrl].head_first_seen_at = "2020-01-01T00:00:00Z";
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 1);
+  assert.equal(h.spawnRounds[0].tier, 2);
+});
