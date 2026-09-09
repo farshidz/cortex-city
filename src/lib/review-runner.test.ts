@@ -3583,6 +3583,30 @@ test("spawnReviewSummary preserves review signals updated while the run is in fl
   assert.equal(result.persisted.review_state, "approved");
 });
 
+test("a full review preserves no-findings evidence when its head advances during the run", () => {
+  for (const verdict of ["ready_for_human_approval", "needs_author_changes"]) {
+    const workspace = setupRunnerWorkspace("review-runner-ready-head-move-");
+    const scenarioFile = path.join(workspace, "scenario.json");
+    const ghStateFile = path.join(workspace, "gh-state.json");
+    writeJson(ghStateFile, {prs: {"acme/widget#1": {headRefOid: "old-head", reviews: [], issueComments: [], comments: []}}});
+    writeJson(scenarioFile, {claude: {stdout: JSON.stringify({session_id: "full-review", result: `## Summary\nReviewed old head.\n\n## Agent Status\nAgent status: ${verdict}`, is_error: false}), sleepMs: 100}});
+    const request = sampleRequest({source: "task", task_id: "task-1", head_sha: "old-head"});
+    const result = runTsxScript(workspace, [
+      `import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { patchReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ], `
+      const fs = await import("node:fs");
+      const spawned = await spawnReviewSummary(${JSON.stringify(request)}, {runtime: "claude", tier: 2});
+      await patchReviewSummary(${JSON.stringify(request.pr_url)}, {head_sha: "new-head", prior_review_had_no_findings: true});
+      fs.writeFileSync(${JSON.stringify(ghStateFile)}, JSON.stringify({prs: {"acme/widget#1": {headRefOid: "new-head", reviews: [], issueComments: [], comments: []}}}));
+      console.log(JSON.stringify(await spawned.done));
+    `, {...prependBinToPath(workspace), FAKE_AGENT_SCENARIO_FILE: scenarioFile, FAKE_GH_STATE_FILE: ghStateFile});
+    assert.equal(result.head_sha, "new-head");
+    assert.equal(result.agent_review_status, undefined);
+    assert.equal(result.prior_review_had_no_findings, verdict === "ready_for_human_approval" ? true : undefined);
+  }
+});
+
 test("spawnReviewSummary preserves a newer task target reconciled during the run", () => {
   const workspace = setupRunnerWorkspace("review-runner-head-race-");
   const scenarioFile = path.join(workspace, "scenario.json");
