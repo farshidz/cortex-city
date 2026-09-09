@@ -20,8 +20,9 @@ for (const file of readdirSync(directory).filter((name) => /^run-events-.*\.json
   }
 }
 const groups = new Map(), prs = new Map();
-function add(map, key, meta, completed, saved) {
-  const row = map.get(key) || {key, rounds: 0, measured_rounds: 0, unknown_usage_rounds: 0, incomplete_rounds: 0, failed_rounds: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, duration_ms: 0, verdicts: {}};
+function add(map, dimensions, meta, completed, saved) {
+  const key = JSON.stringify(dimensions);
+  const row = map.get(key) || {...dimensions, rounds: 0, measured_rounds: 0, unknown_usage_rounds: 0, incomplete_rounds: 0, failed_rounds: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, duration_ms: 0, verdicts: {}};
   row.rounds++;
   if (!saved && meta.event !== "review_launch_failed") row.incomplete_rounds++;
   if (completed?.runtime_failed || saved?.error || meta.event === "review_launch_failed") row.failed_rounds++;
@@ -39,8 +40,8 @@ for (const run of runs.values()) {
   if (!meta || meta.scheduled !== true || meta.experiment !== "review-reuse-v1" || !["fresh", "reuse"].includes(meta.group) || Date.parse(meta.started_at) < from || Date.parse(meta.started_at) >= until) continue;
   const completed = run.review_runtime_completed;
   const outcome = run.review_completion_failed || run.review_saved;
-  const key = [meta.deployment_revision, meta.group, meta.runtime, meta.model, meta.effort, meta.tier, meta.round, meta.resumed ? "resumed" : "fresh", meta.had_prior_summary ? "followup" : "initial"].join("/");
-  add(groups, key, meta, completed, outcome);
-  add(prs, `${meta.deployment_revision}/${meta.group}/${meta.pr_url}`, meta, completed, outcome);
+  const dimensions = {deployment_revision: meta.deployment_revision, group: meta.group, source: meta.source || "inbound", runtime: meta.runtime, model: meta.model, effort: meta.effort, tier: meta.tier, round: meta.round, resumed: Boolean(meta.resumed), initial: !meta.had_prior_summary};
+  add(groups, dimensions, meta, completed, outcome);
+  add(prs, {deployment_revision: meta.deployment_revision, group: meta.group, pr_url: meta.pr_url}, meta, completed, outcome);
 }
 console.log(JSON.stringify({start, end, malformed_lines: malformed, usage_scope: "runtime thread; native per-request tokens", groups: [...groups.values()], prs: [...prs.values()]}, null, 2));

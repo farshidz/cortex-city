@@ -6,12 +6,12 @@ Updated: 2026-09-09. The work list is approved for implementation in separate PR
 
 | Item | Status | Scope and acceptance criteria |
 | --- | --- | --- |
-| Record launch reasons | Implemented in the reuse/usage PR | Persist the scheduling reason, task/PR, run identifier, triggering GitHub state, and previous run result. Cover builder and scheduled reviewer launches. Records must support reconstructing why the same work ran again. |
-| Run a 50/50 review-session reuse experiment | Implemented; activate after preceding deployments | Assign PRs consistently to reuse or fresh sessions. The reuse group retains compatible sessions per runtime/model/effort/tier and starts fresh when none exists. Record assignment and actual reuse separately. Keep builder reuse unchanged. |
-| Record complete review usage | Implemented in the reuse/usage PR | Record every round's input, cached input, output, duration, runtime/model/effort/tier, and failure outcome. Preserve session identifiers and counter baselines; detect counter resets and avoid summing cumulative usage as per-round usage. Include verification and escalation rounds in comparisons. |
-| Skip verification when no findings remain and a full review is required | [PR #120](https://github.com/farshidz/cortex-city/pull/120) | Go directly to the required full review when there is nothing for the verification tier to check. Confirm absence across inline findings, review bodies, and PR-level findings; an empty unresolved-inline-thread list alone is insufficient. Preserve a no-findings verdict for scheduling after head changes; clear the visible verdict until the new code is reviewed. |
+| Record launch reasons | Implemented in [PR #122](https://github.com/farshidz/cortex-city/pull/122) | Persist the scheduling reason, task/PR, run identifier, triggering GitHub state, and previous run result. Cover builder and scheduled reviewer launches. Records must support reconstructing why the same work ran again. |
+| Run a 50/50 review-session reuse experiment | Enabled by [PR #122](https://github.com/farshidz/cortex-city/pull/122) deployment after preceding fixes | Assign PRs consistently to reuse or fresh sessions. The reuse group retains compatible sessions per runtime/model/effort/tier and starts fresh when none exists. Record assignment and actual reuse separately. Keep builder reuse unchanged. |
+| Record review runtime usage | Implemented in [PR #122](https://github.com/farshidz/cortex-city/pull/122) | Record every round's runtime-thread input, cached input, output, duration, runtime/model/effort/tier, and failure outcome. Separate child-agent sessions are not included. Preserve session identifiers and counter baselines; detect counter resets and avoid summing cumulative usage as per-round usage. Include verification and escalation rounds in comparisons. |
+| Skip verification when no findings remain and a full review is required | [PR #120 merged and deployed](https://github.com/farshidz/cortex-city/pull/120) | Go directly to the required full review when there is nothing for the verification tier to check. Confirm absence across inline findings, review bodies, and PR-level findings; an empty unresolved-inline-thread list alone is insufficient. Preserve a no-findings verdict for scheduling after head changes; clear the visible verdict until the new code is reviewed. |
 | Stop reprocessing already-handled conversation | [PR #121](https://github.com/farshidz/cortex-city/pull/121) | The timestamp-based record of seen conversation causes repeat reply rounds. Evidence and proposed direction are below. Preserve comments that arrive during a run but were not handled. |
-| Bound and curate injected review learnings | [PR #119](https://github.com/farshidz/cortex-city/pull/119) | Enforce a token budget, shorten lessons, and select relevant guidance. Current full-review prompts include the entire learnings file. Keep this fixed during the reuse experiment so it does not distort the comparison. |
+| Bound and curate injected review learnings | [PR #119 merged and deployed](https://github.com/farshidz/cortex-city/pull/119); curated production guidance installed | Enforce a 12,000-byte file budget and 600-byte lesson limit, shorten lessons, and select relevant guidance. Keep this fixed during the reuse experiment so it does not distort the comparison. |
 | Stop builders creating out-of-scope CI subtasks | [PR #118 merged](https://github.com/farshidz/cortex-city/pull/118); production agent prompt updated | Tell builders to fix CI failures related to or caused by the PR and report the rest. Replace the instruction to create tasks for unrelated failures and align the other CI wording. No task-creation gate or existing-session changes. |
 
 Implement CI scope, learnings, and scheduling fixes before activating the reuse experiment. Keep scheduling and prompts stable during the comparison; separate measurement windows by deployed version if further changes are necessary.
@@ -27,13 +27,13 @@ Implementation and analysis instructions: [review-reuse-experiment.md](review-re
 - Inspect review outcomes for stale conclusions or missed feedback before deciding whether to retain reuse.
 - Subscription allowance savings cannot be inferred directly from API token prices.
 - Do not change prompts, learnings, builder reuse, or scheduling during the measurement window.
-- Experiment activation and the analysis date are not yet set. No automatic follow-up has been scheduled.
+- The measurement window starts when PR #122 is deployed. Use its deployment timestamp and analyze one week later; the run-event records include the deployed revision. No automatic follow-up has been scheduled.
 
 ## Reply-trigger investigation
 
-The scheduler compares the newest non-reviewer comment/review timestamp against `last_conversation_seen_at`. On successful completion, the runner sets that field to **run start minus 60 seconds**, regardless of which comments the agent actually handled.
+Before PR #121, the scheduler compared the newest non-reviewer comment/review timestamp against `last_conversation_seen_at`. On successful completion, the runner set that field to **run start minus 60 seconds**, regardless of which comments the agent actually handled.
 
-Relevant code:
+Code inspected before the fix:
 
 - `src/lib/github.ts`: `getLatestForeignCommentAt` collects published non-reviewer conversation timestamps.
 - `src/lib/orchestrator-worker-runtime.ts`: `hasUnansweredConversation` compares that timestamp with `last_conversation_seen_at`.
@@ -71,11 +71,11 @@ Across the 17 completed reply rounds examined, the newest qualifying conversatio
 
 Not every no-reply outcome is a scheduling defect. Some new comments only acknowledge a finding. A new unprefixed comment from the shared `farshidz` account also legitimately counts as external conversation under the current attribution rules; its authorship cannot be inferred from the account alone.
 
-### Proposed fix direction
+### Implemented fix
 
-Track the actual conversation items consumed or handled by each round, using identifiers that distinguish inline comments, PR comments, and review bodies. Preserve a version/body hash if edits should count as new input. Capture the initial input snapshot and explicitly acknowledge additional items handled during execution.
+Each round tracks handled conversation versions using the surface, identifier, review state, and body hash. The runner captures the initial snapshot, embeds bounded pending discussion, and validates explicit acknowledgements against snapshots taken before and after execution.
 
-Schedule a reply only when relevant items remain unhandled. A round that decides an acknowledgement needs no reply should still mark that item handled. Failed rounds must not acknowledge unprocessed input.
+The scheduler launches a reply when relevant versions remain unhandled. Successful rounds can acknowledge items that need no reply. Failed rounds preserve pending input.
 
 Do not simply move the timestamp to run completion: that could suppress a comment arriving after the agent's last read. Removing the one-minute overlap alone would not fix the during-run cases. Use comment versions to preserve edits and late-arriving feedback.
 
@@ -115,11 +115,11 @@ Examples:
 
 ### Cause
 
-The production agent instruction at `.cortex/prompts/agents/marqo-agentic-swe.md:19` says:
+At inspection, the production agent instruction at `.cortex/prompts/agents/marqo-agentic-swe.md:19` said:
 
 > Do not make large changes that are out of scope for the task to fix CI failures. Instead, create a new task to address these.
 
-The builder is following an explicit instruction to move unrelated work into new tasks. Additional contributors:
+The builder was following an explicit instruction to move unrelated work into new tasks. Additional contributors:
 
 - `src/lib/prompt-builder.ts` describes failing checks as “Checks are failing — fix CI during this run,” without a scope qualifier.
 - `prompts/templates/review.md` defines completion in terms of addressing all comments and CI issues, without distinguishing unrelated failures.
@@ -131,4 +131,4 @@ Replace the CI instruction with:
 
 > Fix CI failures related to or caused by this PR. Report unrelated failures in your final summary without fixing them or creating subtasks for them.
 
-Align the other builder CI wording with this instruction. This is a prompt-only change; no task-creation gate, changes to existing sessions, or changes to other follow-up workflows are planned. The shared prompts are updated in this PR. After merge, replace the conflicting instruction in the production agent prompt with the same sentence; that runtime configuration is excluded from repository deployment.
+Align the other builder CI wording with this instruction. This is a prompt-only change; no task-creation gate, changes to existing sessions, or changes to other follow-up workflows are planned. PR #118 updated the shared prompts. The conflicting production agent instruction was replaced and verified after merge; a backup was retained. That runtime configuration is excluded from repository deployment.

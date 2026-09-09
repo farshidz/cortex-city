@@ -42,11 +42,17 @@ const { appendFileSync, readFileSync } = require("fs");
 const responses = JSON.parse(readFileSync(process.env.FAKE_GH_RESPONSES_FILE, "utf8"));
 const key = process.argv.slice(2).join(" ");
 appendFileSync(process.env.FAKE_GH_CALLS_FILE, JSON.stringify(key) + "\\n");
-const response = responses[key] || (
+let response = responses[key] || (
   key.startsWith("api graphql -f query=query CortexCityPullRequestSnapshots")
     ? responses.__graphql_snapshots__
     : undefined
 );
+
+if (!response && key.includes("?per_page=10&page=")) {
+  const [endpoint, pageText] = key.slice(4).split("?per_page=10&page=");
+  const all = responses["api --paginate --slurp " + endpoint];
+  if (all) response = all.exitCode ? all : {stdout: JSON.stringify(JSON.parse(all.stdout).flat().slice((Number(pageText) - 1) * 10, Number(pageText) * 10))};
+}
 
 if (!response) {
   process.stderr.write("No fake gh response for: " + key);
@@ -82,7 +88,7 @@ function runGithubScript(
     [
       "--eval",
       [
-        `import { deliverReviewerComment, getCommitMergeBaseSha, getMyReviewSignals, getPRHeadSha, getPRSnapshots, getPRStateHash, getSubmittedCommentIds, getLatestForeignCommentAt, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+        `import { deliverReviewerComment, getCommitMergeBaseSha, getMyReviewSignals, getPRHeadSha, getPRSnapshots, getPRStateHash, getSubmittedCommentIds, getLatestForeignCommentAt, getReviewConversation, listReviewerAuthoredComments } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
         `import { readFileSync } from "node:fs";`,
         "(async () => {",
         body,
@@ -1541,4 +1547,128 @@ test("getPRStateHash ignores empty approvals but keeps their inline comments", (
     .digest("hex")
     .slice(0, 16);
   assert.equal(hash, expected);
+});
+
+
+test("conversation snapshots retain edited versions across surfaces and exclude reviewer output and drafts", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const foreign = { login: "octocat" };
+  const result = runGithubScript(workspace, {
+    "api user --jq .login": { stdout: "me" },
+    [reviewsKey()]: { stdout: JSON.stringify([[{id: 1, state: "CHANGES_REQUESTED", body: "Split this", user: foreign}, {id: 2, state: "PENDING", body: "Draft", user: foreign}]]) },
+    [reviewCommentsKey()]: { stdout: JSON.stringify([[{id: 1, pull_request_review_id: 1, body: "Inline", user: foreign}, {id: 2, pull_request_review_id: 2, body: "Draft inline", user: foreign}]]) },
+    [issueCommentsKey()]: { stdout: JSON.stringify([[{id: 1, body: "Edited", user: foreign, created_at: "2026-05-01T00:00:00Z", updated_at: "2026-05-02T00:00:00Z"}, {id: 2, body: "**🤖[Cortex City Reviewer]** Reply", user: {login: "me"}}]]) },
+  }, `console.log(JSON.stringify(await getReviewConversation(${JSON.stringify(prUrl)})));`);
+  assert.deepEqual(result.map((item: {surface: string}) => item.surface), ["review_comment", "issue", "review"]);
+  assert.equal(new Set(result.map((item: {key: string}) => item.key)).size, 3);
+  assert.equal(result[1].updated_at, "2026-05-02T00:00:00Z");
+  assert.match(result[2].key, /^review:1:CHANGES_REQUESTED:/);
+});
+
+
+test("bounded conversation acquisition drains bodies larger than the old subprocess buffer", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const bodies = Array.from({length: 65}, (_, id) => ({id: id + 1, body: String(id) + "x".repeat(65_000), user: {login: "octocat"}}));
+  assert.ok(Buffer.byteLength(JSON.stringify(bodies)) > 1024 * 1024);
+  const result = runGithubScript(workspace, {
+    [reviewsKey()]: {stdout: "[[]]"},
+    [reviewCommentsKey()]: {stdout: "[[]]"},
+    [issueCommentsKey()]: {stdout: JSON.stringify([bodies])},
+  }, `
+    const conversationModule = await import(${JSON.stringify(pathToFileURL(path.join(REPO_ROOT, "src/lib/review-conversation.ts")).href)});
+    const {conversationPrompt, MAX_CONVERSATION_PROMPT_BYTES, mergeConversationCoverage, unhandledConversation} = conversationModule.default || conversationModule;
+    let state = {handled_conversation_keys: []};
+    const snapshots = [];
+    for (let round = 0; round < 2; round++) {
+      const items = await getReviewConversation(${JSON.stringify(prUrl)});
+      const pending = unhandledConversation(items, state);
+      const prompt = conversationPrompt(pending);
+      const batch = JSON.parse(prompt.split(/<unhandled_conversation[^>]*>\\n/)[1].split("\\n</unhandled_conversation>")[0]);
+      snapshots.push({count: items.length, retained: items.reduce((n, item) => n + Buffer.byteLength(item.body), 0), promptBytes: Buffer.byteLength(prompt), batchCount: batch.length, omitted: batch.every(item => item.body_omitted), firstKey: items[0].key});
+      state = {handled_conversation_keys: mergeConversationCoverage(state, items, items, batch.map(item => item.key))};
+    }
+    const remaining = unhandledConversation(await getReviewConversation(${JSON.stringify(prUrl)}), state).length;
+    console.log(JSON.stringify({snapshots, remaining, limit: MAX_CONVERSATION_PROMPT_BYTES}));
+  `);
+  assert.equal(result.remaining, 0);
+  assert.deepEqual(result.snapshots.map((round: {batchCount: number}) => round.batchCount), [50, 15]);
+  for (const round of result.snapshots) {
+    assert.equal(round.count, 65);
+    assert.ok(round.retained <= 24_000);
+    assert.ok(round.promptBytes <= result.limit);
+    assert.equal(round.omitted, true);
+    assert.equal(round.firstKey, `issue:1::${createHash("sha256").update(bodies[0].body).digest("hex")}`);
+  }
+});
+
+
+test("background conversation scans cache unchanged PRs, refresh edits, and respect quota", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const result = runGithubScript(workspace, {
+    "api rate_limit": {stdout: JSON.stringify({resources: {core: {remaining: 5000}}})},
+    [reviewsKey()]: {stdout: "[[]]"},
+    [reviewCommentsKey()]: {stdout: "[[]]"},
+    [issueCommentsKey()]: {stdout: JSON.stringify([[{id: 1, body: "Original", user: {login: "octocat"}}]])},
+  }, `
+    const fs = await import("node:fs");
+    const responseFile = process.env.FAKE_GH_RESPONSES_FILE;
+    const calls = () => fs.readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf8").trim().split("\\n").filter(Boolean).length;
+    const first = await getReviewConversation(${JSON.stringify(prUrl)}, "stable");
+    const afterFirst = calls();
+    await getReviewConversation(${JSON.stringify(prUrl)}, "stable");
+    const afterCached = calls();
+    const responses = JSON.parse(fs.readFileSync(responseFile, "utf8"));
+    responses[${JSON.stringify(issueCommentsKey())}].stdout = JSON.stringify([[{id: 1, body: "Edited", user: {login: "octocat"}}]]);
+    fs.writeFileSync(responseFile, JSON.stringify(responses));
+    const now = Date.now;
+    Date.now = () => now() + 6 * 60_000;
+    const refreshed = await getReviewConversation(${JSON.stringify(prUrl)}, "stable");
+    Date.now = now;
+    const afterRefreshed = calls();
+    await getReviewConversation(${JSON.stringify(prUrl)}, "changed");
+    const afterChanged = calls();
+    responses["api rate_limit"].stdout = JSON.stringify({resources: {core: {remaining: 101}}});
+    fs.writeFileSync(responseFile, JSON.stringify(responses));
+    const deferred = await getReviewConversation(${JSON.stringify(prUrl)}, "another-change");
+    const afterDeferred = calls();
+    const fresh = await getReviewConversation(${JSON.stringify(prUrl)});
+    console.log(JSON.stringify({afterFirst, afterCached, afterRefreshed, afterChanged, afterDeferred, deferred: deferred ?? null, first: first[0].key, refreshed: refreshed[0].key, fresh: fresh[0].body}));
+  `);
+  assert.equal(result.afterFirst, 4);
+  assert.equal(result.afterCached, result.afterFirst);
+  assert.equal(result.afterRefreshed, result.afterFirst + 4);
+  assert.equal(result.afterChanged, result.afterRefreshed + 4);
+  assert.equal(result.afterDeferred, result.afterChanged + 1);
+  assert.equal(result.deferred, null);
+  assert.notEqual(result.first, result.refreshed);
+  assert.equal(result.fresh, "Edited");
+});
+
+
+test("background fallback stays throttled after snapshot eviction in a large PR sweep", () => {
+  const workspace = setupWorkspace();
+  const responses: Record<string, {stdout: string}> = {"api rate_limit": {stdout: JSON.stringify({resources: {core: {remaining: 5000}}})}};
+  for (let id = 1; id <= 130; id++) {
+    for (const suffix of [`pulls/${id}/reviews`, `pulls/${id}/comments`, `issues/${id}/comments`]) {
+      responses[`api --paginate --slurp repos/acme/widget/${suffix}`] = {stdout: "[[]]"};
+    }
+  }
+  const result = runGithubScript(workspace, responses, `
+    const fs = await import("node:fs");
+    const calls = () => fs.readFileSync(process.env.FAKE_GH_CALLS_FILE, "utf8").trim().split("\\n").filter(Boolean).length;
+    for (let id = 1; id <= 130; id++) await getReviewConversation("https://github.com/acme/widget/pull/" + id, undefined, {background: true});
+    const cold = calls();
+    const evicted = await getReviewConversation("https://github.com/acme/widget/pull/1", undefined, {background: true});
+    for (let id = 2; id <= 130; id++) await getReviewConversation("https://github.com/acme/widget/pull/" + id, undefined, {background: true});
+    const warm = calls();
+    await getReviewConversation("https://github.com/acme/widget/pull/1");
+    console.log(JSON.stringify({cold, warm, evicted: evicted ?? null, fresh: calls()}));
+  `);
+  assert.equal(result.cold, 520);
+  assert.equal(result.warm, result.cold);
+  assert.equal(result.evicted, null);
+  assert.equal(result.fresh, result.warm + 3);
 });

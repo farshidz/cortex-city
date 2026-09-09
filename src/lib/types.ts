@@ -446,10 +446,13 @@ export interface ReviewSummary extends ReviewRequest {
   // When the worker first observed the current `head_sha`. Anchors the review
   // debounce window; stacked PRs share the newest value in their stack.
   head_first_seen_at?: string;
-  // Everything a completed round had already seen: comments by anyone other
-  // than the reviewer created at or before this instant do not trigger a reply
-  // round.
+  // Legacy migration cutoff, used only until handled_conversation_keys exists.
+  // It cannot prove that a current review body/state version was handled.
   last_conversation_seen_at?: string;
+  // Exact published conversation versions explicitly handled by successful rounds.
+  // Missing receipts and unread arrivals remain pending; edits form new versions.
+  // Undefined is legacy timestamp tracking; an empty array is an initialized ledger.
+  handled_conversation_keys?: string[];
   // Effective diff the most recent completed round of any tier covered. A tier-1
   // verification round advances this without rewriting the summary, so the same
   // diff is not verified twice.
