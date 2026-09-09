@@ -2330,7 +2330,7 @@ async function runReviewPhases(
             !reviewContextChanged && diffHash ? pr.head_sha : undefined,
           head_first_seen_at: observedAt,
           handled_conversation_keys: reviewContextChanged ? undefined : current.handled_conversation_keys,
-        last_conversation_seen_at: reviewContextChanged
+          last_conversation_seen_at: reviewContextChanged
             ? undefined
             : current.last_conversation_seen_at,
           generated_at: reviewContextChanged ? "" : current.generated_at,

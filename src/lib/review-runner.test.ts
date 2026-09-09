@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -5267,4 +5268,25 @@ test("disk write race does not corrupt reviews.json under concurrent summarizati
     Object.keys(persisted).sort(),
     [requestA.pr_url, requestB.pr_url].sort()
   );
+});
+
+
+test("a missing pre-run conversation snapshot preserves the legacy coverage cutoff", () => {
+  const workspace = setupRunnerWorkspace("review-conversation-missing-");
+  const gh = path.join(workspace, "bin", "gh");
+  renameSync(gh, gh + "-real");
+  writeFileSync(gh, `#!/usr/bin/env node\nif (process.argv.includes("repos/acme/widget/pulls/1/reviews")) process.exit(1);\nprocess.stdout.write(require("node:child_process").execFileSync(__dirname + "/gh-real", process.argv.slice(2)));\n`);
+  chmodSync(gh, 0o755);
+  const request = sampleRequest();
+  const cutoff = "2026-05-01T00:00:00Z";
+  const result = runTsxScript(workspace, [
+    `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+    `import { upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+  ], `
+    await upsertReviewSummary({...${JSON.stringify(request)}, summary: "Previous", generated_at: "2026-05-01", last_conversation_seen_at: ${JSON.stringify(cutoff)}});
+    console.log(JSON.stringify(await summarizePR(${JSON.stringify(request)}, {runtime: "claude"})));
+  `, {...prependBinToPath(workspace), FAKE_AGENT_STDOUT: JSON.stringify({result: "## Agent Status\nAgent status: needs_author_changes", is_error: false})});
+  assert.equal(result.error, undefined);
+  assert.equal(result.last_conversation_seen_at, cutoff);
+  assert.equal(result.handled_conversation_keys, undefined);
 });

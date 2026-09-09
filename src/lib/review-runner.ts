@@ -2363,7 +2363,7 @@ export async function spawnReviewSummary(
         // cheap round that failed to finish did not, even though it escalates
         // rather than recording an error, so the conversation stays owed.
         last_conversation_seen_at:
-          reviewContextChangedDuringRun || !successful || cheapTierRunFailed
+          reviewContextChangedDuringRun || !successful || cheapTierRunFailed || !conversationBefore
             ? latestBeforeSave.last_conversation_seen_at
             : new Date(
                 new Date(runStartedAt).getTime() -
@@ -2372,7 +2372,7 @@ export async function spawnReviewSummary(
         handled_conversation_keys:
           reviewContextChangedDuringRun || !successful || cheapTierRunFailed || !conversationBefore
             ? latestBeforeSave.handled_conversation_keys
-            : mergeConversationCoverage(latestBeforeSave, conversationBefore, conversationAfter ?? [], coverage.keys),
+            : mergeConversationCoverage(latestBeforeSave, conversationBefore, conversationAfter, coverage.keys),
         generated_at: reviewContextChangedDuringRun
           ? ""
           : rewritesSummary
