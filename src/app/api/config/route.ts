@@ -96,6 +96,12 @@ export async function PUT(request: NextRequest) {
     else delete mutableUpdated[key];
   }
 
+  if (hasOwn("review_session_reuse_experiment")) {
+    const value = body.review_session_reuse_experiment;
+    if (value == null) delete mutableUpdated.review_session_reuse_experiment;
+    else if (typeof value !== "boolean") return NextResponse.json({error: "review_session_reuse_experiment must be a boolean"}, {status: 400});
+  }
+
   if (hasOwn("reviewer_tiers")) {
     const tiers = normalizeReviewerTiers(body.reviewer_tiers);
     if (tiers) mutableUpdated.reviewer_tiers = tiers;

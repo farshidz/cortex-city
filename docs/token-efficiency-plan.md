@@ -6,17 +6,19 @@ Updated: 2026-09-09. The work list is approved for implementation in separate PR
 
 | Item | Status | Scope and acceptance criteria |
 | --- | --- | --- |
-| Record launch reasons | Agreed | Persist the scheduling reason, task/PR, run identifier, triggering GitHub state, and previous run result. Cover builder and scheduled reviewer launches. Records must support reconstructing why the same work ran again. |
-| Run a 50/50 review-session reuse experiment | Agreed | Assign PRs consistently to reuse or fresh sessions. The reuse group retains compatible sessions per runtime/model/effort/tier and starts fresh when none exists. Record assignment and actual reuse separately. Keep builder reuse unchanged. |
-| Record complete review usage | Included in experiment | Record every round's input, cached input, output, duration, runtime/model/effort/tier, and failure outcome. Preserve session identifiers and counter baselines; detect counter resets and avoid summing cumulative usage as per-round usage. Include verification and escalation rounds in comparisons. |
-| Skip verification when no findings remain and a full review is required | Added to the fix list | Go directly to the required full review when there is nothing for the verification tier to check. Confirm absence across inline findings, review bodies, and PR-level findings; an empty unresolved-inline-thread list alone is insufficient. Detailed design pending. |
-| Stop reprocessing already-handled conversation | Approved for implementation | The timestamp-based record of seen conversation causes repeat reply rounds. Evidence and proposed direction are below. Preserve comments that arrive during a run but were not handled. |
-| Bound and curate injected review learnings | Approved for implementation | Enforce a token budget, shorten lessons, and select relevant guidance. Current full-review prompts include the entire learnings file. Keep this fixed during the reuse experiment so it does not distort the comparison. |
-| Stop builders creating out-of-scope CI subtasks | Agreed: prompt-only change | Tell builders to fix CI failures related to or caused by the PR and report the rest. Replace the instruction to create tasks for unrelated failures and align the other CI wording. No task-creation gate or existing-session changes. |
+| Record launch reasons | Implemented in the reuse/usage PR | Persist the scheduling reason, task/PR, run identifier, triggering GitHub state, and previous run result. Cover builder and scheduled reviewer launches. Records must support reconstructing why the same work ran again. |
+| Run a 50/50 review-session reuse experiment | Implemented; activate after preceding deployments | Assign PRs consistently to reuse or fresh sessions. The reuse group retains compatible sessions per runtime/model/effort/tier and starts fresh when none exists. Record assignment and actual reuse separately. Keep builder reuse unchanged. |
+| Record complete review usage | Implemented in the reuse/usage PR | Record every round's input, cached input, output, duration, runtime/model/effort/tier, and failure outcome. Preserve session identifiers and counter baselines; detect counter resets and avoid summing cumulative usage as per-round usage. Include verification and escalation rounds in comparisons. |
+| Skip verification when no findings remain and a full review is required | [PR #120](https://github.com/farshidz/cortex-city/pull/120) | Go directly to the required full review when there is nothing for the verification tier to check. Confirm absence across inline findings, review bodies, and PR-level findings; an empty unresolved-inline-thread list alone is insufficient. Preserve a no-findings verdict for scheduling after head changes; clear the visible verdict until the new code is reviewed. |
+| Stop reprocessing already-handled conversation | [PR #121](https://github.com/farshidz/cortex-city/pull/121) | The timestamp-based record of seen conversation causes repeat reply rounds. Evidence and proposed direction are below. Preserve comments that arrive during a run but were not handled. |
+| Bound and curate injected review learnings | [PR #119](https://github.com/farshidz/cortex-city/pull/119) | Enforce a token budget, shorten lessons, and select relevant guidance. Current full-review prompts include the entire learnings file. Keep this fixed during the reuse experiment so it does not distort the comparison. |
+| Stop builders creating out-of-scope CI subtasks | [PR #118 merged](https://github.com/farshidz/cortex-city/pull/118); production agent prompt updated | Tell builders to fix CI failures related to or caused by the PR and report the rest. Replace the instruction to create tasks for unrelated failures and align the other CI wording. No task-creation gate or existing-session changes. |
 
 Implement CI scope, learnings, and scheduling fixes before activating the reuse experiment. Keep scheduling and prompts stable during the comparison; separate measurement windows by deployed version if further changes are necessary.
 
 ## Reuse experiment
+
+Implementation and analysis instructions: [review-reuse-experiment.md](review-reuse-experiment.md).
 
 - Compare one week of production traffic starting at deployment, not the date of this document.
 - PR-level assignment is approximately 50/50; individual round counts need not be equal.

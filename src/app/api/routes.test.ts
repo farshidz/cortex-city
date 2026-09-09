@@ -2773,3 +2773,16 @@ test("tasks route links and syncs issue on POST and PUT", () => {
     `)
   );
 });
+
+
+test("config route preserves a disabled review reuse experiment and rejects non-booleans", () => {
+  runRouteAssertions(withCortexState(`
+    const route = await loadRoute("./src/app/api/config/route.ts");
+    const put = (value) => route.PUT(request("http://localhost/api/config", {method: "PUT", headers: {"content-type": "application/json"}, body: JSON.stringify({review_session_reuse_experiment: value})}));
+    assert.equal((await json(await put(false))).body.review_session_reuse_experiment, false);
+    const rejected = await json(await put("false"));
+    assert.equal(rejected.status, 400);
+    assert.equal(readJson(path.join(cortexDir, "config.json")).review_session_reuse_experiment, false);
+    assert.equal((await json(await put(true))).body.review_session_reuse_experiment, true);
+  `));
+});

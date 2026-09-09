@@ -71,7 +71,7 @@ test("runtime session hygiene protects live stores and conservatively prunes old
     writeFileSync(
       path.join(cortexDir, "reviews.json"),
       JSON.stringify({
-        active: { session_id: activeReviewId },
+        active: { scheduled_review_sessions: {tier1: {session_id: activeReviewId}} },
         final: {
           session_id: finalReviewId,
           final_at: "2026-01-01T00:00:00.000Z",

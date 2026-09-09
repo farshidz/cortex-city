@@ -1,3 +1,4 @@
+import { recordRunEvent, readCodexRoundUsage, countersReset, claudeRoundUsage, type ReviewTokenUsage } from "./review-run-telemetry";
 import { spawn, type ChildProcess } from "child_process";
 import { createHash, randomUUID } from "crypto";
 import { mkdirSync } from "fs";
@@ -282,7 +283,10 @@ export interface SpawnOpts {
 export interface RunOutput {
   session_id?: string;
   result_text: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: { input_tokens?: number; cached_input_tokens?: number; cache_creation_input_tokens?: number; output_tokens?: number };
+  round_usage?: ReviewTokenUsage;
+  usage_status?: string;
+  usage_turn_ids?: string[];
   duration_ms?: number;
   exit_code: number | null;
   stderr: string;
@@ -393,10 +397,8 @@ function savedSessionProfile(
   };
 }
 
-// Answers one question: may a Q&A follow-up resume the stored CLI session?
-// Scheduled review rounds never resume (they always start a fresh session and
-// reconstruct context from the stored summary and GitHub), so a stored
-// `session_id` is only ever a pointer for interactive follow-up questions.
+// The summary's session pointer is reserved for interactive Q&A. Scheduled
+// experiment sessions are tracked separately by resolved profile.
 export function isReviewSessionCompatible(
   request: ReviewRequest,
   cached: ReviewSummary | undefined,
@@ -1367,6 +1369,7 @@ export function spawnRuntime(
   const workspaceDiskGuardOptions = diskGuardOptions.targetPath
     ? diskGuardOptions
     : { ...diskGuardOptions, targetPath: workspace.path };
+  const runtimeEnv = buildEnv();
   let child: ChildProcess | undefined;
   try {
     if (!diskGuardOptions.targetPath) {
@@ -1378,7 +1381,7 @@ export function spawnRuntime(
     child = spawn(command, args, {
       cwd: workspace.path,
       env: {
-        ...buildEnv(),
+        ...runtimeEnv,
         TMPDIR: workspace.path,
         TMP: workspace.path,
         TEMP: workspace.path,
@@ -1514,6 +1517,7 @@ export function spawnRuntime(
           if (event.type === "turn.completed" && event.usage) {
             usage = {
               input_tokens: event.usage.input_tokens,
+              cached_input_tokens: event.usage.cached_input_tokens,
               output_tokens: event.usage.output_tokens,
             };
           }
@@ -1550,9 +1554,13 @@ export function spawnRuntime(
           usage: parsed.usage
             ? {
                 input_tokens: parsed.usage.input_tokens,
+                cached_input_tokens: parsed.usage.cache_read_input_tokens,
+                cache_creation_input_tokens: parsed.usage.cache_creation_input_tokens,
                 output_tokens: parsed.usage.output_tokens,
               }
             : undefined,
+          round_usage: claudeRoundUsage(parsed.usage),
+          usage_status: claudeRoundUsage(parsed.usage) ? "claude_invocation_usage" : "usage_unavailable",
           duration_ms:
             typeof parsed.duration_ms === "number" ? parsed.duration_ms : duration,
           exit_code: code,
@@ -1596,7 +1604,11 @@ export function spawnRuntime(
     child.stdin?.end(prompt);
   });
 
-  const done = runtimeDone.finally(async () => {
+  const done = runtimeDone.then(async (output) => {
+    if (runtime !== "codex") return output;
+    const measured = await readCodexRoundUsage(output.session_id || resumeSessionId, startedAt, Date.now(), runtimeEnv.CODEX_HOME);
+    return { ...output, round_usage: measured.usage, usage_status: measured.status, usage_turn_ids: measured.turn_ids };
+  }).finally(async () => {
     await releaseReviewWorkspace(workspace, child.pid);
   });
 
@@ -1617,6 +1629,23 @@ export interface SpawnReviewSummaryOptions extends Partial<SpawnOpts> {
   // The reviewer's own unresolved review threads, listed by the orchestrator so
   // a tier-1 round starts from pointers.
   unresolved_threads?: ReviewerThreadSummary[];
+  launch_reason?: string;
+}
+
+export function reviewReuseGroup(prUrl: string): "reuse" | "fresh" {
+  // Fixed assignment keeps a PR's entire sequence in the same experiment arm.
+  return createHash("sha256").update(`review-reuse-v1:${prUrl}`).digest()[0] < 128
+    ? "reuse" : "fresh";
+}
+
+export function reviewReuseProfileKey(request: ReviewRequest, opts: SpawnOpts, tier: ReviewTier = 2): string {
+  return createHash("sha256").update(JSON.stringify({
+    source: reviewSourceOf(request),
+    task_id: request.task_id,
+    task_review_generation: request.task_review_generation,
+    ...snapshotSessionProfile(opts),
+    tier,
+  })).digest("hex");
 }
 
 export interface SpawnedReview {
@@ -1646,11 +1675,12 @@ export async function spawnReviewSummary(
   const target = effectiveReviewRequest(request, cachedBefore);
   const cachedSummaryHeadSha = summaryHeadShaFor(cachedBefore);
   const followupReview = isFollowupReview(target, cachedBefore);
-  // Scheduled review rounds never resume a CLI session: a resumed round starts
-  // cold often enough that the re-warm tax exceeds a fresh session's re-read
-  // cost, and compaction makes the carried memory lossy anyway. The stored
-  // session id survives only so an interactive Q&A follow-up can resume it,
-  // and only while the resolved profile still matches.
+  const experimentEnabled = opts.runtime === "codex" && config.review_session_reuse_experiment !== false;
+  const experimentGroup = experimentEnabled ? reviewReuseGroup(target.pr_url) : "disabled";
+  const reuseProfileKey = reviewReuseProfileKey(target, opts, tier);
+  const priorScheduledSession = experimentGroup === "reuse" && cachedBefore && sameReviewContext(target, cachedBefore)
+    ? cachedBefore?.scheduled_review_sessions?.[reuseProfileKey] : undefined;
+  const resumeSessionId = priorScheduledSession?.session_id;
   const compatibleCachedSessionId = isReviewSessionCompatible(
     target,
     cachedBefore,
@@ -1668,7 +1698,7 @@ export async function spawnReviewSummary(
   // A tier-1 round and a reply round both leave the stored review of the code
   // untouched: neither reviewed it.
   const verificationRound = replyRound || tier1VerificationRound;
-  const prompt = replyRound
+  const freshPrompt = replyRound
     ? buildReviewReplyPrompt(config, target, cachedBefore, cheapTierRound)
     : tier1VerificationRound
       ? buildReviewTier1Prompt(
@@ -1678,6 +1708,12 @@ export async function spawnReviewSummary(
           options.unresolved_threads
         )
       : buildReviewWrapperPrompt(config, target, cachedBefore);
+  const prompt = resumeSessionId
+    ? freshPrompt.replaceAll(
+        "This session is fresh and has no memory of the earlier rounds.",
+        "This session resumes an earlier round. Verify all prior conclusions against the current head and conversation."
+      )
+    : freshPrompt;
   const baseEntry = {
     ...target,
     summary: cachedBefore?.summary ?? "",
@@ -1696,6 +1732,7 @@ export async function spawnReviewSummary(
     model: opts.model,
     session_profile: snapshotSessionProfile(opts),
     session_id: compatibleCachedSessionId,
+    scheduled_review_sessions: cachedBefore && sameReviewContext(target, cachedBefore) ? cachedBefore.scheduled_review_sessions : undefined,
     duration_ms: cachedBefore?.duration_ms,
     input_tokens: cachedBefore?.input_tokens,
     output_tokens: cachedBefore?.output_tokens,
@@ -1719,18 +1756,55 @@ export async function spawnReviewSummary(
 
   const runLock = await acquireReviewRunLock(target.pr_url);
   const runStartedAt = new Date().toISOString();
+  const experimentMetadata = {
+    experiment: experimentEnabled ? "review-reuse-v1" : undefined,
+    group: experimentGroup,
+    run_id: runLock.data.token,
+    pr_url: target.pr_url,
+    head_sha: target.head_sha,
+    round: options.round ?? "review",
+    tier,
+    runtime: opts.runtime,
+    model: opts.model,
+    effort: opts.effort,
+    resumed: Boolean(resumeSessionId),
+    resumed_session_id: resumeSessionId,
+    started_at: runStartedAt,
+    reason: options.launch_reason || "direct_request",
+    diff_hash: options.diff_hash,
+    prior_run_error: cachedBefore?.error,
+    had_prior_summary: Boolean(cachedBefore?.summary),
+    prior_round_diff_hash: cachedBefore?.last_round_diff_hash,
+    prior_round_head_sha: cachedBefore?.last_round_head_sha,
+    prompt_bytes: Buffer.byteLength(prompt, "utf8"),
+  };
+
+  recordRunEvent({event: "review_launch_attempt", ...experimentMetadata});
   let spawned: SpawnResult;
   try {
     spawned = spawnRuntime(
       opts.runtime,
       prompt,
       opts,
-      undefined,
+      resumeSessionId,
       runTimeoutMs,
       {},
       target.pr_url
     );
+    const runtimePid = spawned.pid;
+    recordRunEvent({ event: "review_started", ...experimentMetadata, pid: runtimePid });
+    spawned.done = spawned.done.then((output) => {
+      recordRunEvent({ event: "review_runtime_completed", ...experimentMetadata, pid: runtimePid,
+        session_id: output.session_id, duration_ms: output.duration_ms, exit_code: output.exit_code,
+        termination_reason: output.termination_reason, runtime_failed: Boolean(output.error),
+        raw_usage: output.usage, baseline_raw_usage: priorScheduledSession,
+        counter_reset: countersReset(priorScheduledSession, output.usage),
+        usage: output.round_usage, usage_status: output.usage_status, usage_turn_ids: output.usage_turn_ids,
+      });
+      return output;
+    });
   } catch (error) {
+    recordRunEvent({event: "review_launch_failed", ...experimentMetadata, error: error instanceof Error ? error.message : String(error)});
     await releaseReviewRunLock(runLock);
     const failedAt = new Date().toISOString();
     const message = error instanceof Error ? error.message : String(error);
@@ -1849,6 +1923,7 @@ export async function spawnReviewSummary(
     throw error;
   }
   const { pid, child, done } = spawned;
+
 
   const completion = done.then(async (output) => {
     const finalOutput = output;
@@ -2364,6 +2439,16 @@ export async function spawnReviewSummary(
         effort: opts.effort,
         model: opts.model,
         session_profile: snapshotSessionProfile(opts),
+        scheduled_review_sessions: reviewContextChangedDuringRun
+          ? undefined
+          : experimentGroup === "reuse" && finalOutput.error
+            ? Object.fromEntries(Object.entries(latestBeforeSave.scheduled_review_sessions ?? {}).filter(([key]) => key !== reuseProfileKey))
+          : experimentGroup === "reuse" && finalOutput.session_id
+            ? {
+                ...latestBeforeSave.scheduled_review_sessions,
+                [reuseProfileKey]: { session_id: finalOutput.session_id, ...finalOutput.usage },
+              }
+            : latestBeforeSave.scheduled_review_sessions,
         // The pointer follows the summary being saved, because that is what an
         // interactive Q&A follow-up resumes into. A round that rewrites the
         // summary publishes its own output, so only its session may point at it —
@@ -2378,8 +2463,9 @@ export async function spawnReviewSummary(
               ? finalOutput.session_id
               : compatibleCachedSessionId) || undefined,
         duration_ms: finalOutput.duration_ms,
-        input_tokens: finalOutput.usage?.input_tokens,
-        output_tokens: finalOutput.usage?.output_tokens,
+        input_tokens: finalOutput.round_usage?.input_tokens ?? (!resumeSessionId ? finalOutput.usage?.input_tokens : undefined),
+        cached_input_tokens: finalOutput.round_usage?.cached_input_tokens,
+        output_tokens: finalOutput.round_usage?.output_tokens ?? (!resumeSessionId ? finalOutput.usage?.output_tokens : undefined),
         error: reviewContextChangedDuringRun ? undefined : roundError,
         error_at:
           reviewContextChangedDuringRun || successful ? undefined : generatedAt,
@@ -2448,10 +2534,14 @@ export async function spawnReviewSummary(
         `Review run ownership was lost before saving ${target.pr_url}`
       );
     }
+    recordRunEvent({event: "review_saved", ...experimentMetadata, agent_review_status: saved.agent_review_status, error: saved.error, pending_tier2_reason: saved.pending_tier2_reason});
     if (onComplete) {
       await onComplete(saved);
     }
     return saved;
+  }).catch((error) => {
+    recordRunEvent({event: "review_completion_failed", ...experimentMetadata, error: error instanceof Error ? error.message : String(error)});
+    throw error;
   }).finally(async () => {
     await releaseReviewRunLock(runLock);
   });

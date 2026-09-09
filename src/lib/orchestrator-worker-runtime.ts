@@ -1,3 +1,4 @@
+import { recordRunEvent } from "./review-run-telemetry";
 // This module owns a single worker poll. The long-running loop, heartbeat, and
 // signal handling stay in src/orchestrator-worker.ts so tests can exercise one
 // poll without touching process lifecycle behavior.
@@ -204,6 +205,7 @@ interface WorkerLogger {
 }
 
 export interface WorkerRuntimeDeps {
+  recordRunEvent?: typeof recordRunEvent;
   deleteTask: typeof deleteTask;
   getCommitMergeBaseSha?: typeof getCommitMergeBaseSha;
   getPRBaseBranch?: typeof getPRBaseBranch;
@@ -277,6 +279,7 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
     } catch {}
   },
   logger: console,
+  recordRunEvent,
   readConfig,
   readReviewLearnings,
   readReviewSummaries,
@@ -298,6 +301,8 @@ export const defaultWorkerRuntimeDeps: WorkerRuntimeDeps = {
 
 interface LaunchOptions {
   mode: TaskRunMode;
+  reason: "cleanup" | "resume_requested" | "manual_instruction" | "open_task" | "pr_state_changed" | "conflicts" | "restack" | "broken_stack";
+  trigger?: Record<string, unknown>;
   onComplete?: (taskId: string) => Promise<void> | void;
   postSpawnUpdates?: Partial<Task>;
   preSpawnUpdates?: Partial<Task>;
@@ -747,6 +752,21 @@ async function launchTaskRun(
     });
     launchState.pid = pid;
 
+    deps.recordRunEvent?.({
+      event: "run_launch",
+      kind: "task",
+      run_id: `${task.id}:${pid}:${Date.now()}`,
+      task_id: task.id,
+      pr_url: task.pr_url,
+      pid,
+      mode: options.mode,
+      reason: options.reason,
+      prior_session_id: task.session_id,
+      prior_run_result: task.last_run_result,
+      prior_run_at: task.last_run_at,
+      ...options.trigger,
+    });
+
     activePids.set(task.id, pid);
     await deps.updateTask(task.id, {
       current_run_pid: pid,
@@ -1193,6 +1213,7 @@ export async function pollOnce(
     deps.logger.log(`[worker] Running cleanup for task "${task.title}" (${task.id})`);
     await launchTaskRun(task, activePids, deps, {
       mode: "cleanup",
+      reason: "cleanup",
       onComplete: async (taskId) => {
         const currentTask = await deps.getTask(taskId);
         if (!currentTask) return;
@@ -1378,6 +1399,8 @@ export async function pollOnce(
     );
     const didLaunch = await launchTaskRun(task, activePids, deps, {
       mode: runMode,
+      reason: task.pending_manual_instruction ? "manual_instruction" : "resume_requested",
+      trigger: { resume_requested: task.resume_requested, resume_run_mode: task.resume_run_mode },
       postSpawnUpdates: {
         resume_requested: undefined,
         resume_run_mode: undefined,
@@ -1411,6 +1434,7 @@ export async function pollOnce(
     deps.logger.log(`[worker] Picking up task "${task.title}" (${task.id}) [initial]`);
     const didLaunch = await launchTaskRun(task, activePids, deps, {
       mode: "initial",
+      reason: task.pending_manual_instruction ? "manual_instruction" : "open_task",
       postSpawnUpdates: {
         pending_manual_instruction: undefined,
       },
@@ -1987,6 +2011,8 @@ export async function pollOnce(
       continue;
     }
     let decisionFingerprint: string | undefined;
+    let needsRestack = false;
+    let needsStackDecision = false;
     if (isStackedCandidate) {
       // Re-check the per-entry trigger against the freshest task state so a
       // concurrent hash update does not double-launch the builder.
@@ -2007,6 +2033,8 @@ export async function pollOnce(
           task.stack_decision_requested === closedBaseFingerprint &&
           task.last_agent_report?.status === "blocked"
         );
+      needsRestack = restackRequired;
+      needsStackDecision = brokenStackNeedsDecision;
       decisionFingerprint = closedBaseFingerprint;
       if (
         !hasManualInstruction &&
@@ -2031,6 +2059,22 @@ export async function pollOnce(
     deps.logger.log(`[worker] Picking up task "${task.title}" (${task.id}) [review]`);
     const didLaunch = await launchTaskRun(task, activePids, deps, {
       mode: "review",
+      reason: hasManualInstruction ? "manual_instruction"
+        : needsStackDecision ? "broken_stack"
+          : needsRestack ? "restack"
+            : hasConflicts ? "conflicts" : "pr_state_changed",
+      trigger: {
+        has_conflicts: hasConflicts,
+        restack_required: needsRestack,
+        broken_stack_needs_decision: needsStackDecision,
+        decision_fingerprint: decisionFingerprint,
+        observed_gh_state: candidate.ghState,
+        prior_gh_state: task.last_review_gh_state,
+        observed_entry_hashes: candidate.entryHashes,
+        prior_entry_hashes: candidate.entryHashes
+          ? Object.fromEntries((task.stacked_prs ?? []).map((entry) => [entry.pr_url, entry.last_review_gh_state]))
+          : undefined,
+      },
       postSpawnUpdates: {
         pending_manual_instruction: undefined,
         // Record which broken-stack condition this run surfaces, so its
@@ -2307,10 +2351,8 @@ async function runReviewPhases(
         return {
           ...current,
           ...prFieldsFromRequest(pr),
-          // Scheduled review rounds never resume a session, so `session_id` is
-          // only an interactive Q&A pointer here. It is still dropped on a
-          // context change: a session that reviewed under different task
-          // context must not answer questions about the new one.
+          // The Q&A pointer and scheduled profile sessions both expire on
+          // task-context changes; prior context must not carry into a new task.
           summary: reviewContextChanged ? "" : current.summary,
           summary_head_sha: reviewContextChanged
             ? undefined
@@ -2328,7 +2370,8 @@ async function runReviewPhases(
             ? undefined
             : current.last_conversation_seen_at,
           generated_at: reviewContextChanged ? "" : current.generated_at,
-          session_id: reviewContextChanged ? undefined : current.session_id,
+          scheduled_review_sessions: reviewContextChanged ? undefined : current.scheduled_review_sessions,
+        session_id: reviewContextChanged ? undefined : current.session_id,
           session_profile: reviewContextChanged
             ? undefined
             : current.session_profile,
@@ -2403,6 +2446,7 @@ async function runReviewPhases(
           ? undefined
           : current.last_conversation_seen_at,
         generated_at: reviewContextChanged ? "" : current.generated_at,
+        scheduled_review_sessions: reviewContextChanged ? undefined : current.scheduled_review_sessions,
         session_id: reviewContextChanged ? undefined : current.session_id,
         session_profile: reviewContextChanged
           ? undefined
@@ -2483,6 +2527,7 @@ async function runReviewPhases(
         config,
       };
       let decision = decideReviewRound(roundInput);
+      let observedConversationAt: string | undefined;
       // Looking for conversation happens only once the code itself needs no
       // round. The batch observation key makes this a cached read while the PR
       // remains unchanged.
@@ -2504,6 +2549,7 @@ async function runReviewPhases(
           );
         }
         if (latestConversationAt) {
+          observedConversationAt = latestConversationAt;
           decision = decideReviewRound({ ...roundInput, latestConversationAt });
         }
       }
@@ -2530,6 +2576,7 @@ async function runReviewPhases(
             round,
             tier,
             diff_hash: diffHash,
+            launch_reason: decision.reason,
             ...(unresolvedThreads
               ? { unresolved_threads: unresolvedThreads }
               : {}),
@@ -2581,6 +2628,24 @@ async function runReviewPhases(
         deps.logger.log(
           `[worker] Spawned tier-${tier} ${round} round for ${pr.pr_url} (${decision.reason})`
         );
+        deps.recordRunEvent?.({
+          event: "run_launch",
+          kind: "review",
+          task_id: pr.task_id,
+          pr_url: pr.pr_url,
+          pid,
+          round,
+          tier,
+          reason: decision.reason,
+          head_sha: pr.head_sha,
+          diff_hash: diffHash,
+          prior_round_diff_hash: cached?.last_round_diff_hash,
+          prior_round_head_sha: cached?.last_round_head_sha,
+          observed_conversation_at: observedConversationAt,
+          prior_conversation_seen_at: cached?.last_conversation_seen_at,
+          prior_error_at: cached?.error_at,
+          pending_tier2_reason: cached?.pending_tier2_reason,
+        });
       } catch (error) {
         deps.logger.error(
           `[worker] Failed to spawn review summary for ${pr.pr_url}:`,

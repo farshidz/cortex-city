@@ -27,6 +27,8 @@ import {
   resolveReviewPrompt,
   resolveReviewTierOpts,
   spawnRuntime,
+  reviewReuseGroup,
+  reviewReuseProfileKey,
 } from "./review-runner";
 import {
   createTempWorkspace,
@@ -5264,4 +5266,45 @@ test("disk write race does not corrupt reviews.json under concurrent summarizati
     Object.keys(persisted).sort(),
     [requestA.pr_url, requestB.pr_url].sort()
   );
+});
+
+
+test("review reuse has stable PR assignment and separates tier/runtime/model/effort profiles", () => {
+  const counts = {reuse: 0, fresh: 0};
+  for (let id = 1; id <= 1000; id++) counts[reviewReuseGroup(`https://github.com/acme/widget/pull/${id}`)]++;
+  assert.ok(counts.reuse > 400 && counts.reuse < 600);
+  const request = sampleRequest();
+  const opts = {runtime: "codex" as const, model: "gpt-test", effort: "medium" as const};
+  const key = reviewReuseProfileKey(request, opts, 2);
+  for (const changed of [reviewReuseProfileKey(request, opts, 1), reviewReuseProfileKey(request, {...opts, effort: "high"}, 2), reviewReuseProfileKey(request, {...opts, model: "another"}, 2), reviewReuseProfileKey(request, {...opts, runtime: "claude"}, 2)]) assert.notEqual(key, changed);
+});
+
+test("scheduled reuse resumes only its own compatible tier session and controls stay fresh", () => {
+  for (const group of ["reuse", "fresh", "disabled"] as const) {
+    const request = sampleRequest({pr_url: Array.from({length: 100}, (_, id) => `https://github.com/acme/widget/pull/${id + 1}`).find((url) => reviewReuseGroup(url) === (group === "disabled" ? "reuse" : group))!});
+    const workspace = setupRunnerWorkspace("review-reuse-", {reviewer_tiers: {tier1: {effort: "medium"}}, review_session_reuse_experiment: group !== "disabled"});
+    const scenarioFile = path.join(workspace, "scenario.json");
+    const argsFile = path.join(workspace, "agent-args.json");
+    writeJson(scenarioFile, {codex: {stdout: [
+      {type: "thread.started", thread_id: "scheduled-session"},
+      {type: "item.completed", item: {type: "agent_message", text: "## Agent Status\nAgent status: needs_author_changes"}},
+      {type: "turn.completed", usage: {input_tokens: 100, cached_input_tokens: 50, output_tokens: 10}},
+    ].map((event) => JSON.stringify(event)).join("\n") + "\n"}});
+    const result = runTsxScript(workspace, [
+      `import { summarizePR } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ], `
+      const fs = await import("node:fs");
+      const request = ${JSON.stringify(request)};
+      await upsertReviewSummary({...request, summary: "Previous", generated_at: "2026-01-01", session_id: "qa-only-session", runtime: "codex", effort: "medium", model: "gpt-test"});
+      const invocations = [];
+      for (const tier of [2, 2, 1, 1]) {
+        await summarizePR(request, {runtime: "codex", model: "gpt-test", effort: "medium", tier});
+        invocations.push(JSON.parse(fs.readFileSync(${JSON.stringify(argsFile)}, "utf8")).args);
+      }
+      console.log(JSON.stringify(invocations));
+    `, {...prependBinToPath(workspace), FAKE_AGENT_SCENARIO_FILE: scenarioFile, FAKE_AGENT_ARGS_FILE: argsFile});
+    assert.deepEqual(result.map((args: string[]) => args.includes("resume")), group === "reuse" ? [false, true, false, true] : [false, false, false, false]);
+    for (const args of result) assert.equal(args.includes("qa-only-session"), false);
+  }
 });
