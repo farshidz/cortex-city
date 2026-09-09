@@ -150,6 +150,9 @@ function collectSessionReferences(appDir) {
   };
   const addReviewIds = (target, review) => {
     addSessionId(target, review?.session_id);
+    for (const session of Object.values(review?.scheduled_review_sessions || {})) {
+      addSessionId(target, session?.session_id);
+    }
     if (Array.isArray(review?.followups)) {
       for (const followup of review.followups) {
         addSessionId(target, followup?.session_id);

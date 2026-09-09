@@ -29,7 +29,7 @@ Per user input:
 - Summary: **auto on first view**, cached keyed on PR head SHA, with manual **regenerate** button.
 - Runtime: a single, user-editable **review prompt** lives in Cortex City config (not per-agent). The wrapper prefixes a fixed line `Review this PR: <pr_url>`. User picks **runtime (claude | codex)** and **effort level** in settings (with per-run override on the page).
 - Row actions: Open PR · Regenerate summary · Approve / Request changes (inline GH review) · **Ask follow-up** (chat with the agent about its summary).
-- **Session reuse rule**: the *only* place we resume an existing agent session is the follow-up flow. Initial summary = fresh session. Force-regenerate = fresh session. Follow-up question = resume the session that produced the current cached summary; if that session can no longer be resumed (or no `session_id` was captured), start a new session and seed it with the prior summary as context.
+- **Session reuse rule**: scheduled Codex reviews use the [50/50 reuse experiment](review-reuse-experiment.md), retaining compatible sessions separately by runtime/model/effort/tier and task context. Initial runs and manual regeneration start fresh. Follow-up questions resume the session associated with the cached summary and fall back to a fresh session seeded with that summary when resumption fails. All review and Q&A launches share per-PR ownership.
 - **Garbage collection**: cached review data is pruned 24 hours after the PR is observed merged/closed (or 24 hours after it disappears from the open review live set, treating that as closure). This matches the existing 24h retention for final tasks (`PRUNE_AGE_MS` in `src/lib/orchestrator-worker-runtime.ts:15`).
 
 ## Architecture

@@ -245,6 +245,8 @@ export interface OrchestratorConfig {
   review_model?: string;
   max_parallel_reviews?: number;
   reviewer_tiers?: ReviewerTiers;
+  // Defaults to enabled: stable 50/50 PR assignment for Codex scheduled reviews.
+  review_session_reuse_experiment?: boolean;
   review_learning_enabled?: boolean;
   // How long a PR head must sit still before a changed effective diff schedules
   // a review round. Absent falls back to REVIEW_DEBOUNCE_DEFAULT_SECONDS; 0
@@ -472,8 +474,17 @@ export interface ReviewSummary extends ReviewRequest {
   // Presence means the complete resolved profile was snapshotted, including
   // intentional undefined model/effort values that defer to the CLI.
   session_profile?: ReviewSessionProfile;
+  // Separate from the Q&A pointer: scheduled rounds retain one session per
+  // profile, including tier, even when a verification preserves the summary.
+  scheduled_review_sessions?: Record<string, {
+    session_id: string;
+    input_tokens?: number;
+    cached_input_tokens?: number;
+    output_tokens?: number;
+  }>;
   session_id?: string;
   duration_ms?: number;
+  cached_input_tokens?: number;
   input_tokens?: number;
   output_tokens?: number;
   error?: string;

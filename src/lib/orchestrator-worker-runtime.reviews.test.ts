@@ -3421,6 +3421,20 @@ test("pollOnce will not clear a condition recorded after the drain it inspected"
 });
 
 
+test("pollOnce records the builder launch reason and previous run evidence", async () => {
+  const task = makeTask({status: "open", pr_url: undefined, last_run_result: "error", last_run_at: "2026-01-01T00:00:00Z"});
+  const h = makeHarness({tasks: [task]});
+  const events: Record<string, unknown>[] = [];
+  h.deps.recordRunEvent = (event) => {events.push(event);};
+  await pollOnce(h.activeTaskPids, h.deps, h.activeReviewPids);
+  const launch = events.find((event) => event.kind === "task");
+  assert.equal(launch?.reason, "open_task");
+  assert.equal(launch?.task_id, task.id);
+  assert.equal(launch?.prior_run_result, "error");
+  assert.equal(launch?.prior_run_at, task.last_run_at);
+  assert.equal(typeof launch?.run_id, "string");
+});
+
 test("pollOnce treats a stale reply decision as a skipped launch", async () => {
   const pr = makeRequest();
   const h = makeHarness({openReviewRequests: [pr], reviews: {[pr.pr_url]: makeSummary(pr, {

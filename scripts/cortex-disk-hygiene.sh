@@ -22,6 +22,7 @@ Options:
   --host-metrics-retention-days N Retain host-metrics-*.log for N days. Default: 3.
   --app-log-retention-days N      Retain server-*.log for N days. Default: 14.
   --task-log-retention-days N     Retain task-*.log/jsonl for N days. Default: 14.
+  --run-event-retention-days N    Retain run-events-*.jsonl for N days. Default: 30.
   --cache-retention-days N        Retain stale cache children for N days. Default: 14.
   --tmp-dir DIR                   Cortex-owned temp dir. Default: CORTEX_TMP_DIR or APP_DIR/tmp.
   --tmp-retention-days N          Retain temp candidates for N days. Default: 2.
@@ -71,6 +72,7 @@ TMP_DIR="${CORTEX_TMP_DIR:-}"
 HOST_METRICS_RETENTION_DAYS="${HOST_METRICS_RETENTION_DAYS:-3}"
 APP_LOG_RETENTION_DAYS="${CORTEX_APP_LOG_RETENTION_DAYS:-14}"
 TASK_LOG_RETENTION_DAYS="${CORTEX_TASK_LOG_RETENTION_DAYS:-14}"
+RUN_EVENT_RETENTION_DAYS="${CORTEX_RUN_EVENT_RETENTION_DAYS:-30}"
 CACHE_RETENTION_DAYS="${CORTEX_CACHE_RETENTION_DAYS:-14}"
 BROWSER_CACHE_RETENTION_DAYS="${CORTEX_BROWSER_CACHE_RETENTION_DAYS:-$CACHE_RETENTION_DAYS}"
 TMP_RETENTION_DAYS="${CORTEX_TMP_RETENTION_DAYS:-2}"
@@ -113,6 +115,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --task-log-retention-days)
       TASK_LOG_RETENTION_DAYS="${2:-}"
+      shift
+      ;;
+    --run-event-retention-days)
+      RUN_EVENT_RETENTION_DAYS="${2:-}"
       shift
       ;;
     --cache-retention-days)
@@ -173,6 +179,7 @@ validate_positive_int CORTEX_CACHE_RETENTION_DAYS "$CACHE_RETENTION_DAYS"
 validate_positive_int CORTEX_BROWSER_CACHE_RETENTION_DAYS "$BROWSER_CACHE_RETENTION_DAYS"
 validate_positive_int CORTEX_TMP_RETENTION_DAYS "$TMP_RETENTION_DAYS"
 validate_positive_int CORTEX_REVIEW_WORKSPACE_RETENTION_HOURS "$REVIEW_WORKSPACE_RETENTION_HOURS"
+validate_positive_int CORTEX_RUN_EVENT_RETENTION_DAYS "$RUN_EVENT_RETENTION_DAYS"
 validate_positive_int CORTEX_CODEX_SESSION_RETENTION_DAYS "$CODEX_SESSION_RETENTION_DAYS"
 
 case "$NPM_CACHE_ACTION" in
@@ -710,6 +717,7 @@ summarize_path "${CORTEX_CODEX_SESSIONS_DIR:-$HOME_DIR/.codex/sessions}"
 prune_old_log_files 'host-metrics-*.log' "$HOST_METRICS_RETENTION_DAYS" "host metrics logs"
 prune_old_log_files 'server-*.log' "$APP_LOG_RETENTION_DAYS" "server logs"
 prune_old_log_files 'task-*.log' "$TASK_LOG_RETENTION_DAYS" "task transcript logs"
+prune_old_log_files 'run-events-*.jsonl' "$RUN_EVENT_RETENTION_DAYS" "run event logs"
 prune_old_log_files 'task-*.jsonl' "$TASK_LOG_RETENTION_DAYS" "task machine logs"
 
 prune_npm_cache
