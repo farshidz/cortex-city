@@ -1633,6 +1633,21 @@ export async function spawnReviewSummary(
   options: SpawnReviewSummaryOptions = {},
   onComplete?: (summary: ReviewSummary) => Promise<void> | void
 ): Promise<SpawnedReview> {
+  const runLock = await acquireReviewRunLock(request.pr_url);
+  try {
+    return await spawnReviewSummaryUnderLock(request, options, onComplete, runLock);
+  } catch (error) {
+    await releaseReviewRunLock(runLock);
+    throw error;
+  }
+}
+
+async function spawnReviewSummaryUnderLock(
+  request: ReviewRequest,
+  options: SpawnReviewSummaryOptions,
+  onComplete: ((summary: ReviewSummary) => Promise<void> | void) | undefined,
+  runLock: ReviewRunLock
+): Promise<SpawnedReview> {
   const config = readConfig();
   const tieringEnabled = isReviewTieringEnabled(config);
   // A tier-1 request runs tier 2 when tiering is off, so the rollout flag is a
@@ -1646,6 +1661,9 @@ export async function spawnReviewSummary(
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);
 
   const cachedBefore = getReviewSummary(request.pr_url);
+  if (cachedBefore?.final_at || cachedBefore?.final_state) {
+    throw new Error(`Review is finalized for ${request.pr_url}`);
+  }
   const target = effectiveReviewRequest(request, cachedBefore);
   const cachedSummaryHeadSha = summaryHeadShaFor(cachedBefore);
   const followupReview = isFollowupReview(target, cachedBefore);
@@ -1729,7 +1747,10 @@ export async function spawnReviewSummary(
     ...retroFields(cachedBefore),
   };
 
-  const runLock = await acquireReviewRunLock(target.pr_url);
+  const latestBeforeLaunch = getReviewSummary(target.pr_url);
+  if (latestBeforeLaunch?.final_at || latestBeforeLaunch?.final_state) {
+    throw new Error(`Review was finalized before launching ${target.pr_url}`);
+  }
   const runStartedAt = new Date().toISOString();
   let spawned: SpawnResult;
   try {
@@ -1743,7 +1764,6 @@ export async function spawnReviewSummary(
       target.pr_url
     );
   } catch (error) {
-    await releaseReviewRunLock(runLock);
     const failedAt = new Date().toISOString();
     const message = error instanceof Error ? error.message : String(error);
     await mutateReviewSummary(target.pr_url, (current) => {
@@ -1817,6 +1837,8 @@ export async function spawnReviewSummary(
       );
       if (
         targetChanged ||
+        current?.final_at ||
+        current?.final_state ||
         (current?.current_run_pid && isProcessRunning(current.current_run_pid))
       ) {
         return undefined;
@@ -1857,7 +1879,6 @@ export async function spawnReviewSummary(
     }
   } catch (error) {
     killReviewRuntimeProcess(spawned.child, "SIGTERM");
-    await releaseReviewRunLock(runLock);
     throw error;
   }
   const { pid, child, done } = spawned;

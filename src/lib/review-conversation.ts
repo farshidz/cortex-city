@@ -6,6 +6,7 @@ export interface ReviewConversationItem {
   surface: "issue" | "review_comment" | "review";
   id: number;
   body: string;
+  body_omitted?: boolean;
   state?: string;
   updated_at: string;
 }

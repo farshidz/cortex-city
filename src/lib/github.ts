@@ -966,29 +966,62 @@ export async function getPRDiffHash(
 // Snapshot published discussion with content versions. Reuse the same provenance
 // rules as the scheduling clock, but include edits and review-state changes.
 export async function getReviewConversation(prUrl: string, observationKey?: string): Promise<ReviewConversationItem[] | undefined> {
-  const activity = await getPRActivity(prUrl, observationKey);
-  if (!activity?.reviews || !activity.comments || !activity.issueComments) return undefined;
-  const { reviews, comments, issueComments } = activity;
-  const identity = await reviewerCommentIdentity(prUrl, [...comments, ...issueComments, ...reviews]);
-  const submittedIds = new Set(reviews.filter((review) => review.state !== "PENDING").map((review) => review.id));
+  // Always acquire current versions. Older edited comments need not change the
+  // batch query's newest-comment observation key.
+  void observationKey;
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return undefined;
   const items: ReviewConversationItem[] = [];
+  const submittedIds = new Set<number>();
+  let retainedBodyBytes = 0;
   const add = (surface: ReviewConversationItem["surface"], item: { id: number; body?: string | null; created_at?: string; updated_at?: string; submitted_at?: string; state?: string }) => {
     const body = item.body || "";
     const state = surface === "review" ? item.state || "" : "";
-    items.push({ key: conversationKey(surface, item.id, body, state), surface, id: item.id, body, state, updated_at: item.updated_at || item.submitted_at || item.created_at || "" });
+    const bytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+    const omitBody = bytes > 8_000 || retainedBodyBytes + bytes > 24_000;
+    if (!omitBody) retainedBodyBytes += bytes;
+    items.push({ key: conversationKey(surface, item.id, body, state), surface, id: item.id, body: omitBody ? "" : body, ...(omitBody ? {body_omitted: true} : {}), state, updated_at: item.updated_at || item.submitted_at || item.created_at || "" });
   };
-  for (const comment of comments) {
-    if (isCommentFromSubmittedReview(comment, submittedIds) && !isReviewerAuthoredComment(identity, "review_comment", comment)) add("review_comment", comment);
+  async function* pages<T>(endpoint: string): AsyncGenerator<T[]> {
+    for (let page = 1; ; page++) {
+      // Ten bodies fit in a bounded subprocess buffer, including JSON escaping.
+      // Only this page's full bodies are retained while computing their hashes.
+      const result = await execFileResult("gh", ["api", `${endpoint}?per_page=10&page=${page}`], 8 * 1024 * 1024);
+      if (!result.ok) throw new Error("Conversation page unavailable");
+      const rows: unknown = JSON.parse(result.stdout);
+      if (!Array.isArray(rows) || rows.length > 10) throw new Error("Invalid conversation page");
+      yield rows as T[];
+      if (rows.length < 10) return;
+    }
   }
-  for (const comment of issueComments) {
-    if (!isReviewerAuthoredComment(identity, "issue", comment)) add("issue", comment);
+  try {
+    for await (const reviews of pages<ReviewItem>(`repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`)) {
+      const identity = await reviewerCommentIdentity(prUrl, reviews);
+      for (const review of reviews) {
+        if (review.state === "PENDING") continue;
+        submittedIds.add(review.id);
+        if (!(review.body || "").trim()) continue;
+        if (identity.authorLogin && review.user?.login === identity.authorLogin && isReviewerAuthoredCommentBody(review.body)) continue;
+        add("review", review);
+      }
+    }
+    const reviewCount = items.length;
+    for await (const comments of pages<ReviewCommentItem>(`repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`)) {
+      const identity = await reviewerCommentIdentity(prUrl, comments);
+      for (const comment of comments) {
+        if (isCommentFromSubmittedReview(comment, submittedIds) && !isReviewerAuthoredComment(identity, "review_comment", comment)) add("review_comment", comment);
+      }
+    }
+    for await (const comments of pages<IssueCommentItem>(`repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`)) {
+      const identity = await reviewerCommentIdentity(prUrl, comments);
+      for (const comment of comments) {
+        if (!isReviewerAuthoredComment(identity, "issue", comment)) add("issue", comment);
+      }
+    }
+    return [...items.slice(reviewCount), ...items.slice(0, reviewCount)];
+  } catch {
+    return undefined;
   }
-  for (const review of reviews) {
-    if (review.state === "PENDING" || !(review.body || "").trim()) continue;
-    if (identity.authorLogin && review.user?.login === identity.authorLogin && isReviewerAuthoredCommentBody(review.body)) continue;
-    add("review", review);
-  }
-  return items;
 }
 
 // The newest published conversation on this PR that the reviewer did not author,
@@ -2007,7 +2040,8 @@ export async function getReviewLifecycleState(
 
 function execFileResult(
   command: string,
-  args: string[]
+  args: string[],
+  maxBuffer = 1024 * 1024
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   const backoffError = activeGitHubRateLimitBackoff();
   if (backoffError) {
@@ -2017,7 +2051,7 @@ function execFileResult(
     execFileCb(
       command,
       args,
-      { encoding: "utf-8", timeout: 30000 },
+      { encoding: "utf-8", timeout: 30000, maxBuffer },
       (err, stdout, stderr) => {
         const errorOutput = (stderr || (err?.message ?? "")).toString();
         if (err && isGitHubRateLimitError(errorOutput)) {

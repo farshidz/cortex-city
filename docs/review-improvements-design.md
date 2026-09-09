@@ -264,3 +264,5 @@ counters, GitHub comment bursts per PR):
 - **`needs_human_decision` survival across rebases** (PR 4 acceptance).
 
 Line-number references are approximate (as of `0bc6deb`); locate by symbol name.
+
+Conversation acquisition reads ten GitHub records per page with an 8 MiB subprocess limit. It hashes full bodies before discarding text beyond an aggregate 24,000-byte retained-body budget. Compact identities remain available for later rounds, whose prompts include at most 50 items and 24,000 bytes. Bodies marked `body_omitted` must be fetched before acknowledgement. Review ownership is acquired before fetching discussion or constructing state-dependent prompts; PR finalization during the fetch prevents launch.

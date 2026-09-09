@@ -42,11 +42,17 @@ const { appendFileSync, readFileSync } = require("fs");
 const responses = JSON.parse(readFileSync(process.env.FAKE_GH_RESPONSES_FILE, "utf8"));
 const key = process.argv.slice(2).join(" ");
 appendFileSync(process.env.FAKE_GH_CALLS_FILE, JSON.stringify(key) + "\\n");
-const response = responses[key] || (
+let response = responses[key] || (
   key.startsWith("api graphql -f query=query CortexCityPullRequestSnapshots")
     ? responses.__graphql_snapshots__
     : undefined
 );
+
+if (!response && key.includes("?per_page=10&page=")) {
+  const [endpoint, pageText] = key.slice(4).split("?per_page=10&page=");
+  const all = responses["api --paginate --slurp " + endpoint];
+  if (all) response = all.exitCode ? all : {stdout: JSON.stringify(JSON.parse(all.stdout).flat().slice((Number(pageText) - 1) * 10, Number(pageText) * 10))};
+}
 
 if (!response) {
   process.stderr.write("No fake gh response for: " + key);
@@ -1558,4 +1564,41 @@ test("conversation snapshots retain edited versions across surfaces and exclude 
   assert.equal(new Set(result.map((item: {key: string}) => item.key)).size, 3);
   assert.equal(result[1].updated_at, "2026-05-02T00:00:00Z");
   assert.match(result[2].key, /^review:1:CHANGES_REQUESTED:/);
+});
+
+
+test("bounded conversation acquisition drains bodies larger than the old subprocess buffer", () => {
+  const workspace = setupWorkspace();
+  const prUrl = "https://github.com/acme/widget/pull/123";
+  const bodies = Array.from({length: 65}, (_, id) => ({id: id + 1, body: String(id) + "x".repeat(65_000), user: {login: "octocat"}}));
+  assert.ok(Buffer.byteLength(JSON.stringify(bodies)) > 1024 * 1024);
+  const result = runGithubScript(workspace, {
+    [reviewsKey()]: {stdout: "[[]]"},
+    [reviewCommentsKey()]: {stdout: "[[]]"},
+    [issueCommentsKey()]: {stdout: JSON.stringify([bodies])},
+  }, `
+    const conversationModule = await import(${JSON.stringify(pathToFileURL(path.join(REPO_ROOT, "src/lib/review-conversation.ts")).href)});
+    const {conversationPrompt, MAX_CONVERSATION_PROMPT_BYTES, mergeConversationCoverage, unhandledConversation} = conversationModule.default || conversationModule;
+    let state = {handled_conversation_keys: []};
+    const snapshots = [];
+    for (let round = 0; round < 2; round++) {
+      const items = await getReviewConversation(${JSON.stringify(prUrl)});
+      const pending = unhandledConversation(items, state);
+      const prompt = conversationPrompt(pending);
+      const batch = JSON.parse(prompt.split(/<unhandled_conversation[^>]*>\\n/)[1].split("\\n</unhandled_conversation>")[0]);
+      snapshots.push({count: items.length, retained: items.reduce((n, item) => n + Buffer.byteLength(item.body), 0), promptBytes: Buffer.byteLength(prompt), batchCount: batch.length, omitted: batch.every(item => item.body_omitted), firstKey: items[0].key});
+      state = {handled_conversation_keys: mergeConversationCoverage(state, items, items, batch.map(item => item.key))};
+    }
+    const remaining = unhandledConversation(await getReviewConversation(${JSON.stringify(prUrl)}), state).length;
+    console.log(JSON.stringify({snapshots, remaining, limit: MAX_CONVERSATION_PROMPT_BYTES}));
+  `);
+  assert.equal(result.remaining, 0);
+  assert.deepEqual(result.snapshots.map((round: {batchCount: number}) => round.batchCount), [50, 15]);
+  for (const round of result.snapshots) {
+    assert.equal(round.count, 65);
+    assert.ok(round.retained <= 24_000);
+    assert.ok(round.promptBytes <= result.limit);
+    assert.equal(round.omitted, true);
+    assert.equal(round.firstKey, `issue:1::${createHash("sha256").update(bodies[0].body).digest("hex")}`);
+  }
 });

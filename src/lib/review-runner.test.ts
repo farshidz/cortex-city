@@ -1809,7 +1809,7 @@ test("a missing pre-run conversation snapshot preserves the legacy coverage cuto
   const workspace = setupRunnerWorkspace("review-conversation-missing-");
   const gh = path.join(workspace, "bin", "gh");
   renameSync(gh, gh + "-real");
-  writeFileSync(gh, `#!/usr/bin/env node\nif (process.argv.includes("repos/acme/widget/pulls/1/reviews")) process.exit(1);\nprocess.stdout.write(require("node:child_process").execFileSync(__dirname + "/gh-real", process.argv.slice(2)));\n`);
+  writeFileSync(gh, `#!/usr/bin/env node\nif (process.argv.some(arg => arg.startsWith("repos/acme/widget/pulls/1/reviews"))) process.exit(1);\nprocess.stdout.write(require("node:child_process").execFileSync(__dirname + "/gh-real", process.argv.slice(2)));\n`);
   chmodSync(gh, 0o755);
   const request = sampleRequest();
   const cutoff = "2026-05-01T00:00:00Z";
@@ -5336,4 +5336,64 @@ test("saved sibling-list lessons survive wrapper projection and tags stay scoped
     console.log(JSON.stringify({outputs, scoped: scoped.includes("Scoped guidance"), rejected}));
   `, prependBinToPath(workspace));
   assert.deepEqual(result, {outputs: [true, true, true], scoped: true, rejected: true});
+});
+
+
+test("conversation snapshots hold run ownership and preserve finalization during the fetch", () => {
+  for (const finalize of [false, true]) {
+    const workspace = setupRunnerWorkspace("review-snapshot-ownership-");
+    const request = sampleRequest();
+    const scenarioFile = path.join(workspace, "scenario.json");
+    const argsFile = path.join(workspace, "args.json");
+    const entered = path.join(workspace, "snapshot-entered");
+    const release = path.join(workspace, "snapshot-release");
+    writeJson(scenarioFile, {claude: {stdout: JSON.stringify({session_id: "only-run", result: "New summary", is_error: false})}});
+    const gh = path.join(workspace, "bin", "gh");
+    const source = readFileSync(gh, "utf8");
+    const newline = source.indexOf("\n") + 1;
+    const delay = `
+      const cortexSnapshotFS = require("node:fs");
+      let cortexSnapshotFirst = false;
+      try { cortexSnapshotFS.writeFileSync(${JSON.stringify(entered)}, "entered", {flag: "wx"}); cortexSnapshotFirst = true; } catch {}
+      if (cortexSnapshotFirst) {
+        const deadline = Date.now() + 10000;
+        while (!cortexSnapshotFS.existsSync(${JSON.stringify(release)}) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    `;
+    writeFileSync(gh, source.slice(0, newline) + delay + source.slice(newline));
+    const result = runTsxScript(workspace, [
+      `import { spawnReviewSummary, ReviewRunInFlightError } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+      `import { upsertReviewSummary, patchReviewSummary, getReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+    ], `
+      const fs = await import("node:fs");
+      const request = ${JSON.stringify(request)};
+      await upsertReviewSummary({...request, summary: "Existing summary", generated_at: "2026-01-01", handled_conversation_keys: ["prior-key"]});
+      const pending = spawnReviewSummary(request, {runtime: "claude"});
+      for (let i = 0; !fs.existsSync(${JSON.stringify(entered)}) && i < 200; i++) await new Promise(resolve => setTimeout(resolve, 5));
+      let duplicateBlocked = false;
+      if (${finalize}) {
+        await patchReviewSummary(request.pr_url, {final_at: "2026-09-09T00:00:00Z", final_state: "merged"});
+      } else {
+        try { const duplicate = await spawnReviewSummary(request, {runtime: "claude"}); await duplicate.done; }
+        catch (error) { duplicateBlocked = error instanceof ReviewRunInFlightError; }
+      }
+      fs.writeFileSync(${JSON.stringify(release)}, "release");
+      let error = "";
+      try { const launched = await pending; await launched.done; }
+      catch (caught) { error = caught.message; }
+      const saved = getReviewSummary(request.pr_url);
+      console.log(JSON.stringify({duplicateBlocked, error, saved, launched: fs.existsSync(${JSON.stringify(argsFile)})}));
+    `, {...prependBinToPath(workspace), FAKE_AGENT_SCENARIO_FILE: scenarioFile, FAKE_AGENT_ARGS_FILE: argsFile});
+    if (finalize) {
+      assert.match(result.error, /finalized before launching/);
+      assert.equal(result.launched, false);
+      assert.equal(result.saved.final_state, "merged");
+      assert.equal(result.saved.summary, "Existing summary");
+      assert.deepEqual(result.saved.handled_conversation_keys, ["prior-key"]);
+    } else {
+      assert.equal(result.duplicateBlocked, true);
+      assert.equal(result.error, "");
+      assert.equal(result.saved.summary, "New summary");
+    }
+  }
 });
