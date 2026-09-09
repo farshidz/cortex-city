@@ -3356,3 +3356,22 @@ test("pollOnce will not clear a condition recorded after the drain it inspected"
   // later reviewer comment with no record left of it.
   assert.equal(h.reviews[pr.pr_url].pending_review_error, newer);
 });
+
+test("a changed diff after a ready verdict skips empty verification", () => {
+  const config = makeConfig({ reviewer_tiers: { tier1: { effort: "medium" }, tier2: { effort: "xhigh" } } });
+  const review = makeSummary(makeRequest({ head_sha: "new-head" }), {
+    summary: "No outstanding findings on the previous head.",
+    summary_head_sha: "old-head",
+    summary_diff_hash: "old-diff",
+    agent_review_status: "ready_for_human_approval",
+  });
+  assert.deepEqual(decideReviewRound({ review, diffHash: "new-diff", config }), {
+    round: "review", tier: 2, reason: "diff_changed",
+  });
+  assert.deepEqual(decideReviewRound({ review, diffHash: "old-diff", config }), { reason: "up_to_date" });
+  for (const status of ["needs_author_changes", "needs_human_decision", undefined] as const) {
+    assert.deepEqual(decideReviewRound({ review: { ...review, agent_review_status: status }, diffHash: "new-diff", config }), {
+      round: "review", tier: 1, reason: "diff_changed",
+    });
+  }
+});

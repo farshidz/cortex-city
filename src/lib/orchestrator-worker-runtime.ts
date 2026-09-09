@@ -692,7 +692,11 @@ export function decideReviewRound(
     }
     return {
       round: "review",
-      tier: tier1Enabled && hasSummary && !tier2Pending ? 1 : 2,
+      // A ready verdict from the full reviewer establishes that no findings
+      // remain across all feedback surfaces. A changed diff needs discovery,
+      // so skip the verification round that would only hand it back to tier 2.
+      tier: tier1Enabled && hasSummary && !tier2Pending &&
+        review.agent_review_status !== "ready_for_human_approval" ? 1 : 2,
       reason: hasSummary ? "diff_changed" : "initial",
     };
   }
