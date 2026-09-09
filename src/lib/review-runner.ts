@@ -1,3 +1,4 @@
+import { experimentReviewLearnings } from "./review-learnings-snapshot";
 import { recordRunEvent, readCodexRoundUsage, countersReset, claudeRoundUsage, type ReviewTokenUsage } from "./review-run-telemetry";
 import { spawn, type ChildProcess } from "child_process";
 import { createHash, randomUUID } from "crypto";
@@ -902,7 +903,10 @@ export function buildReviewWrapperPrompt(
   }
 
   if (config.review_learning_enabled !== false) {
-    const learnings = readReviewLearnings().trim();
+    const currentLearnings = readReviewLearnings();
+    const learnings = (config.review_session_reuse_experiment !== false
+      ? experimentReviewLearnings(currentLearnings)
+      : currentLearnings).trim();
     if (learnings) {
       sections.push(
         "",

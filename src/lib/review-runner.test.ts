@@ -65,6 +65,7 @@ function baseConfig(
     default_codex_model: "gpt-5.4",
     default_codex_effort: "medium",
     agents: {},
+    review_session_reuse_experiment: false,
     ...overrides,
   };
 }
@@ -5307,4 +5308,23 @@ test("scheduled reuse resumes only its own compatible tier session and controls 
     assert.deepEqual(result.map((args: string[]) => args.includes("resume")), group === "reuse" ? [false, true, false, true] : [false, false, false, false]);
     for (const args of result) assert.equal(args.includes("qa-only-session"), false);
   }
+});
+
+
+test("the experiment freezes injected learnings while opt-out sees later curation", () => {
+  const workspace = setupRunnerWorkspace("review-frozen-learnings-");
+  const result = runTsxScript(workspace, [
+    `import { writeReviewLearnings } from ${JSON.stringify(moduleUrl("src/lib/review-learnings-store.ts"))};`,
+    `import { buildReviewWrapperPrompt } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+  ], `
+    const config = ${JSON.stringify(baseConfig({review_learning_enabled: true, review_session_reuse_experiment: true}))};
+    const request = ${JSON.stringify(sampleRequest())};
+    await writeReviewLearnings("- Original curated guidance.");
+    const first = buildReviewWrapperPrompt(config, request);
+    await writeReviewLearnings("- Later retrospective guidance.");
+    const second = buildReviewWrapperPrompt(config, request);
+    const live = buildReviewWrapperPrompt({...config, review_session_reuse_experiment: false}, request);
+    console.log(JSON.stringify({first: first.includes("Original curated guidance"), frozen: second.includes("Original curated guidance") && !second.includes("Later retrospective guidance"), live: live.includes("Later retrospective guidance")}));
+  `, prependBinToPath(workspace));
+  assert.deepEqual(result, {first: true, frozen: true, live: true});
 });

@@ -2,6 +2,8 @@
 
 Merge and deploy the CI-scope, learnings, empty-verification, and conversation fixes before this change. Record the deployment time as the start of a one-week measurement window. Keep prompts, scheduling, learnings, and builder session reuse stable during that window.
 
+Both groups inject a shared snapshot of curated guidance, created atomically at `.cortex/review-reuse-v1-learnings.md` on the first full-review prompt. Retrospectives continue updating the live learnings file; those edits apply after the experiment is disabled. Install curated guidance before deployment so the initial snapshot is correct.
+
 ## Assignment and sessions
 
 Codex scheduled reviews use stable PR-level assignment: SHA-256 of `review-reuse-v1:<PR URL>`, first byte below 128 means reuse. The other PRs start fresh each round. The initial run in either group starts fresh. Claude reviews are recorded but excluded from this experiment. Setting `review_session_reuse_experiment` to `false` in configuration disables scheduled reuse.
