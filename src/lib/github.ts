@@ -1,3 +1,4 @@
+import { conversationKey, type ReviewConversationItem } from "./review-conversation";
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { createHash } from "crypto";
 import { mkdirSync } from "fs";
@@ -143,6 +144,7 @@ interface GraphQLResponseError {
 }
 
 interface ReviewCommentItem {
+  updated_at?: string;
   id: number;
   pull_request_review_id: number | null;
   body?: string | null;
@@ -151,6 +153,7 @@ interface ReviewCommentItem {
 }
 
 interface ReviewItem {
+  updated_at?: string;
   id: number;
   state?: string;
   body?: string | null;
@@ -159,6 +162,7 @@ interface ReviewItem {
 }
 
 interface IssueCommentItem {
+  updated_at?: string;
   id: number;
   body?: string | null;
   user?: { login?: string };
@@ -957,6 +961,117 @@ export async function getPRDiffHash(
   // yields no identity, which schedules a review instead of trusting this one.
   const observedHeadSha = await getPRHeadSha(prUrl);
   return observedHeadSha === expectedHeadSha ? hash : "";
+}
+
+// Snapshot published discussion with content versions. Reuse the same provenance
+// rules as the scheduling clock, but include edits and review-state changes.
+interface ConversationScanCadence {
+  observationKey?: string;
+  receiptsKey: string;
+  pageCount: number;
+  refreshAfter: number;
+}
+const conversationScanCache = new Map<string, ConversationScanCadence & {items: ReviewConversationItem[]}>();
+// Small deadlines outlive LRU snapshot eviction, so a large sweep cannot turn
+// every subsequent poll into a rescan. Expired deadlines are removed on lookup.
+const conversationScanCadence = new Map<string, ConversationScanCadence>();
+const CONVERSATION_SCAN_CACHE_SIZE = 128;
+
+export async function getReviewConversation(prUrl: string, observationKey?: string, options: {background?: boolean} = {}): Promise<ReviewConversationItem[] | undefined> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) return undefined;
+  const background = options.background === true || observationKey !== undefined;
+  const now = Date.now();
+  for (const [url, cadence] of conversationScanCadence) {
+    if (cadence.refreshAfter <= now) conversationScanCadence.delete(url);
+  }
+  const cached = background ? conversationScanCache.get(prUrl) : undefined;
+  const cadence = background ? conversationScanCadence.get(prUrl) : undefined;
+  const receipts = receiptedReviewerCommentIds(prUrl);
+  const receiptsKey = JSON.stringify([[...receipts.issueIds], [...receipts.reviewCommentIds]]);
+  const matches = cadence?.observationKey === observationKey && cadence?.receiptsKey === receiptsKey;
+  if (cadence && matches && now < cadence.refreshAfter) return cached?.items;
+  let pageBudget = Infinity;
+  if (background) {
+    // Background scans leave capacity for active reviews and other GitHub work.
+    // Run-start/end snapshots omit background mode and always read fresh versions.
+    const quota = await execFileResult("gh", ["api", "rate_limit"]);
+    try {
+      const remaining = JSON.parse(quota.stdout).resources.core.remaining;
+      if (!quota.ok || !Number.isFinite(remaining)) return undefined;
+      pageBudget = Math.max(0, remaining - 100);
+      if (pageBudget < (cached?.pageCount ?? 3)) return matches ? cached?.items : undefined;
+    } catch { return undefined; }
+  }
+  const items: ReviewConversationItem[] = [];
+  const submittedIds = new Set<number>();
+  let retainedBodyBytes = 0;
+  let pageCount = 0;
+  const add = (surface: ReviewConversationItem["surface"], item: { id: number; body?: string | null; created_at?: string; updated_at?: string; submitted_at?: string; state?: string }) => {
+    const body = item.body || "";
+    const state = surface === "review" ? item.state || "" : "";
+    const bytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+    const omitBody = bytes > 8_000 || retainedBodyBytes + bytes > 24_000;
+    if (!omitBody) retainedBodyBytes += bytes;
+    items.push({ key: conversationKey(surface, item.id, body, state), surface, id: item.id, body: omitBody ? "" : body, ...(omitBody ? {body_omitted: true} : {}), state, updated_at: item.updated_at || item.submitted_at || item.created_at || "" });
+  };
+  async function* pages<T>(endpoint: string): AsyncGenerator<T[]> {
+    for (let page = 1; ; page++) {
+      // Ten bodies fit in a bounded subprocess buffer, including JSON escaping.
+      // Only this page's full bodies are retained while computing their hashes.
+      if (pageCount >= pageBudget) throw new Error("Conversation background scan quota exhausted");
+      pageCount++;
+      const result = await execFileResult("gh", ["api", `${endpoint}?per_page=10&page=${page}`], 8 * 1024 * 1024);
+      if (!result.ok) throw new Error("Conversation page unavailable");
+      const rows: unknown = JSON.parse(result.stdout);
+      if (!Array.isArray(rows) || rows.length > 10) throw new Error("Invalid conversation page");
+      yield rows as T[];
+      if (rows.length < 10) return;
+    }
+  }
+  try {
+    for await (const reviews of pages<ReviewItem>(`repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`)) {
+      const identity = await reviewerCommentIdentity(prUrl, reviews);
+      for (const review of reviews) {
+        if (review.state === "PENDING") continue;
+        submittedIds.add(review.id);
+        if (!(review.body || "").trim()) continue;
+        if (identity.authorLogin && review.user?.login === identity.authorLogin && isReviewerAuthoredCommentBody(review.body)) continue;
+        add("review", review);
+      }
+    }
+    const reviewCount = items.length;
+    for await (const comments of pages<ReviewCommentItem>(`repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`)) {
+      const identity = await reviewerCommentIdentity(prUrl, comments);
+      for (const comment of comments) {
+        if (isCommentFromSubmittedReview(comment, submittedIds) && !isReviewerAuthoredComment(identity, "review_comment", comment)) add("review_comment", comment);
+      }
+    }
+    for await (const comments of pages<IssueCommentItem>(`repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`)) {
+      const identity = await reviewerCommentIdentity(prUrl, comments);
+      for (const comment of comments) {
+        if (!isReviewerAuthoredComment(identity, "issue", comment)) add("issue", comment);
+      }
+    }
+    const ordered = [...items.slice(reviewCount), ...items.slice(0, reviewCount)];
+    if (background) {
+      const nextCadence = {
+        observationKey, receiptsKey, pageCount,
+        // Small discussions refresh after five minutes for older edits that do
+        // not change observationKey. Large scans amortize ten seconds per page.
+        refreshAfter: Date.now() + Math.max(5 * 60_000, pageCount * 10_000),
+      };
+      conversationScanCadence.set(prUrl, nextCadence);
+      conversationScanCache.delete(prUrl);
+      conversationScanCache.set(prUrl, {...nextCadence, items: ordered});
+      while (conversationScanCache.size > CONVERSATION_SCAN_CACHE_SIZE) {
+        conversationScanCache.delete(conversationScanCache.keys().next().value!);
+      }
+    }
+    return ordered;
+  } catch {
+    return undefined;
+  }
 }
 
 // The newest published conversation on this PR that the reviewer did not author,
@@ -1975,7 +2090,8 @@ export async function getReviewLifecycleState(
 
 function execFileResult(
   command: string,
-  args: string[]
+  args: string[],
+  maxBuffer = 1024 * 1024
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   const backoffError = activeGitHubRateLimitBackoff();
   if (backoffError) {
@@ -1985,7 +2101,7 @@ function execFileResult(
     execFileCb(
       command,
       args,
-      { encoding: "utf-8", timeout: 30000 },
+      { encoding: "utf-8", timeout: 30000, maxBuffer },
       (err, stdout, stderr) => {
         const errorOutput = (stderr || (err?.message ?? "")).toString();
         if (err && isGitHubRateLimitError(errorOutput)) {

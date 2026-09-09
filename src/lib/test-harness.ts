@@ -394,6 +394,16 @@ if (args[0] === "api") {
     process.exit(0);
   }
 
+  const conversationPage = args[1]?.match(/^repos\\/([^/]+)\\/([^/]+)\\/(pulls|issues)\\/(\\d+)\\/(reviews|comments)\\?per_page=10&page=(\\d+)$/);
+  if (conversationPage) {
+    const [, owner, repo, scope, number, resource, page] = conversationPage;
+    const pr = getPr(state, owner, repo, number);
+    const rows = scope === "issues" ? pr.issueComments : resource === "reviews" ? pr.reviews : pr.comments;
+    if (scope === "issues") blockFor(Number(process.env.FAKE_GH_ISSUE_COMMENT_LIST_DELAY_MS || 0));
+    output((rows || []).slice((Number(page) - 1) * 10, Number(page) * 10));
+    process.exit(0);
+  }
+
   if (args[1] === "--paginate" && args[2] === "--slurp") {
     const endpoint = args[3];
     // The comments one review owns, which is how an unsubmitted review's

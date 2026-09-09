@@ -11,6 +11,7 @@ import {
   shouldRetryErroredReview,
   type WorkerRuntimeDeps,
 } from "./orchestrator-worker-runtime";
+import { ReviewRoundObsoleteError } from "./review-runner";
 import type { GitHubPRSnapshot, PendingReviewDrain } from "./github";
 import {
   deriveReviewState,
@@ -1182,6 +1183,28 @@ test("pollOnce reviews again when the effective diff changed", async () => {
   assert.deepEqual(h.diffHashLookups, [
     { pr_url: pr.pr_url, expected_head_sha: "fixedSha" },
   ]);
+});
+
+test("pollOnce uses handled versions to suppress overlap while preserving an edited comment", async () => {
+  const pr = makeRequest();
+  const item = {key: "issue:1::original", surface: "issue" as const, id: 1, body: "Thanks", updated_at: "2026-05-01T00:30:00Z"};
+  const h = makeHarness({
+    openReviewRequests: [pr],
+    reviews: { [pr.pr_url]: makeSummary(pr, {
+      summary: "reviewed", summary_head_sha: pr.head_sha, summary_diff_hash: "diff-1",
+      effective_diff_hash: "diff-1", effective_diff_head_sha: pr.head_sha,
+      last_conversation_seen_at: "2026-05-01T00:00:00Z", handled_conversation_keys: [item.key],
+    }) },
+    prDiffHashes: { [pr.pr_url]: "diff-1" },
+    foreignCommentAt: { [pr.pr_url]: item.updated_at },
+  });
+  h.deps.getReviewConversation = async () => [item];
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 0);
+  h.deps.getReviewConversation = async () => [{...item, key: "issue:1::edited", body: "Actually, please clarify"}];
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.spawnRounds.length, 1);
+  assert.equal(h.spawnRounds[0].round, "reply");
 });
 
 test("pollOnce schedules a reply round for comment-only activity", async () => {
@@ -3395,4 +3418,24 @@ test("pollOnce will not clear a condition recorded after the drain it inspected"
   // schedule or retry a PENDING review, so the newer draft would swallow every
   // later reviewer comment with no record left of it.
   assert.equal(h.reviews[pr.pr_url].pending_review_error, newer);
+});
+
+
+test("pollOnce treats a stale reply decision as a skipped launch", async () => {
+  const pr = makeRequest();
+  const h = makeHarness({openReviewRequests: [pr], reviews: {[pr.pr_url]: makeSummary(pr, {
+    summary: "Reviewed", summary_head_sha: pr.head_sha, summary_diff_hash: "diff-1", effective_diff_hash: "diff-1", effective_diff_head_sha: pr.head_sha, handled_conversation_keys: [],
+  })}, prDiffHashes: {[pr.pr_url]: "diff-1"}});
+  h.deps.getReviewConversation = async (_url, observationKey, options) => {
+    assert.equal(observationKey, undefined);
+    assert.equal(options?.background, true);
+    return [{key: "pending", id: 1, surface: "issue", body: "Question", updated_at: "2026-05-01"}];
+  };
+  h.deps.spawnReviewSummary = async () => {throw new ReviewRoundObsoleteError("Handled concurrently");};
+  const errors: unknown[] = [], logs: string[] = [];
+  h.deps.logger = {error: (...args) => {errors.push(args);}, log: (...args) => {logs.push(args.join(" "));}};
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.activeReviewPids.size, 0);
+  assert.equal(errors.length, 0);
+  assert.ok(logs.some(line => line.includes("Skipped stale reply decision")));
 });

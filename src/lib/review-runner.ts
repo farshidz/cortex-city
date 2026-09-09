@@ -1,3 +1,4 @@
+import { conversationPrompt, unhandledConversation, parseConversationCoverage, mergeConversationCoverage } from "./review-conversation";
 import { spawn, type ChildProcess } from "child_process";
 import { createHash, randomUUID } from "crypto";
 import { mkdirSync } from "fs";
@@ -25,6 +26,7 @@ import {
   deliverReviewerComment,
   drainMyPendingReview,
   getAuthenticatedUserLogin,
+  getReviewConversation,
   getMyReviewSignals,
   isStaleReviewerCommentDeliveryError,
   listReviewerAuthoredComments,
@@ -86,6 +88,7 @@ const REVIEW_RUN_LOCK_STALE_MS = 30_000;
 const REVIEW_RUN_LOCK_UPDATE_MS = 10_000;
 
 export class ReviewRunInFlightError extends Error {}
+export class ReviewRoundObsoleteError extends Error {}
 
 function isProcessRunning(pid?: number): boolean {
   if (typeof pid !== "number" || !Number.isFinite(pid)) return false;
@@ -1631,6 +1634,21 @@ export async function spawnReviewSummary(
   options: SpawnReviewSummaryOptions = {},
   onComplete?: (summary: ReviewSummary) => Promise<void> | void
 ): Promise<SpawnedReview> {
+  const runLock = await acquireReviewRunLock(request.pr_url);
+  try {
+    return await spawnReviewSummaryUnderLock(request, options, onComplete, runLock);
+  } catch (error) {
+    await releaseReviewRunLock(runLock);
+    throw error;
+  }
+}
+
+async function spawnReviewSummaryUnderLock(
+  request: ReviewRequest,
+  options: SpawnReviewSummaryOptions,
+  onComplete: ((summary: ReviewSummary) => Promise<void> | void) | undefined,
+  runLock: ReviewRunLock
+): Promise<SpawnedReview> {
   const config = readConfig();
   const tieringEnabled = isReviewTieringEnabled(config);
   // A tier-1 request runs tier 2 when tiering is off, so the rollout flag is a
@@ -1644,6 +1662,9 @@ export async function spawnReviewSummary(
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);
 
   const cachedBefore = getReviewSummary(request.pr_url);
+  if (cachedBefore?.final_at || cachedBefore?.final_state) {
+    throw new Error(`Review is finalized for ${request.pr_url}`);
+  }
   const target = effectiveReviewRequest(request, cachedBefore);
   const cachedSummaryHeadSha = summaryHeadShaFor(cachedBefore);
   const followupReview = isFollowupReview(target, cachedBefore);
@@ -1669,7 +1690,7 @@ export async function spawnReviewSummary(
   // A tier-1 round and a reply round both leave the stored review of the code
   // untouched: neither reviewed it.
   const verificationRound = replyRound || tier1VerificationRound;
-  const prompt = replyRound
+  const roundPrompt = replyRound
     ? buildReviewReplyPrompt(config, target, cachedBefore, cheapTierRound)
     : tier1VerificationRound
       ? buildReviewTier1Prompt(
@@ -1679,6 +1700,16 @@ export async function spawnReviewSummary(
           options.unresolved_threads
         )
       : buildReviewWrapperPrompt(config, target, cachedBefore);
+  const conversationBefore = await getReviewConversation(target.pr_url).catch((error) => {
+    console.warn(`[review-runner] Conversation snapshot unavailable for ${target.pr_url}:`, error);
+    return undefined;
+  });
+  if (replyRound && conversationBefore && unhandledConversation(conversationBefore, cachedBefore).length === 0) {
+    throw new ReviewRoundObsoleteError(`No unhandled conversation remains for ${target.pr_url}`);
+  }
+  const prompt = conversationBefore
+    ? `${roundPrompt}\n\n${conversationPrompt(unhandledConversation(conversationBefore, cachedBefore))}`
+    : roundPrompt;
   const baseEntry = {
     ...target,
     summary: cachedBefore?.summary ?? "",
@@ -1688,6 +1719,7 @@ export async function spawnReviewSummary(
     effective_diff_head_sha: cachedBefore?.effective_diff_head_sha,
     head_first_seen_at: cachedBefore?.head_first_seen_at,
     last_conversation_seen_at: cachedBefore?.last_conversation_seen_at,
+    handled_conversation_keys: cachedBefore?.handled_conversation_keys,
     prior_review_had_no_findings: cachedBefore?.prior_review_had_no_findings,
     last_round_diff_hash: cachedBefore?.last_round_diff_hash,
     last_round_head_sha: cachedBefore?.last_round_head_sha,
@@ -1719,7 +1751,10 @@ export async function spawnReviewSummary(
     ...retroFields(cachedBefore),
   };
 
-  const runLock = await acquireReviewRunLock(target.pr_url);
+  const latestBeforeLaunch = getReviewSummary(target.pr_url);
+  if (latestBeforeLaunch?.final_at || latestBeforeLaunch?.final_state) {
+    throw new Error(`Review was finalized before launching ${target.pr_url}`);
+  }
   const runStartedAt = new Date().toISOString();
   let spawned: SpawnResult;
   try {
@@ -1733,7 +1768,6 @@ export async function spawnReviewSummary(
       target.pr_url
     );
   } catch (error) {
-    await releaseReviewRunLock(runLock);
     const failedAt = new Date().toISOString();
     const message = error instanceof Error ? error.message : String(error);
     await mutateReviewSummary(target.pr_url, (current) => {
@@ -1807,6 +1841,8 @@ export async function spawnReviewSummary(
       );
       if (
         targetChanged ||
+        current?.final_at ||
+        current?.final_state ||
         (current?.current_run_pid && isProcessRunning(current.current_run_pid))
       ) {
         return undefined;
@@ -1847,13 +1883,16 @@ export async function spawnReviewSummary(
     }
   } catch (error) {
     killReviewRuntimeProcess(spawned.child, "SIGTERM");
-    await releaseReviewRunLock(runLock);
     throw error;
   }
   const { pid, child, done } = spawned;
 
   const completion = done.then(async (output) => {
-    const finalOutput = output;
+    const coverage = parseConversationCoverage(output.result_text);
+    const finalOutput = { ...output, result_text: coverage.text };
+    // Re-fetch without an observation cache so mid-run arrivals/edits can be
+    // matched to explicit agent receipts. Unclaimed items remain pending.
+    const conversationAfter = conversationBefore ? await getReviewConversation(target.pr_url).catch(() => undefined) : undefined;
     const generatedAt = new Date().toISOString();
     const replyStatus = replyRound
       ? parseReviewReplyStatus(finalOutput.result_text)
@@ -2346,17 +2385,20 @@ export async function spawnReviewSummary(
         pending_tier2_reason: reviewContextChangedDuringRun
           ? undefined
           : pendingTier2Reason,
-        // A round that completed read the conversation that existed when it
-        // started, so it clears the reply-round trigger up to that instant. A
-        // cheap round that failed to finish did not, even though it escalates
-        // rather than recording an error, so the conversation stays owed.
+        // Retain the timestamp for legacy compatibility. Once a ledger exists,
+        // only explicit receipts clear conversation work. Failed rounds and
+        // unavailable pre-run snapshots preserve the previous migration cutoff.
         last_conversation_seen_at:
-          reviewContextChangedDuringRun || !successful || cheapTierRunFailed
+          reviewContextChangedDuringRun || !successful || cheapTierRunFailed || !conversationBefore
             ? latestBeforeSave.last_conversation_seen_at
             : new Date(
                 new Date(runStartedAt).getTime() -
                   REVIEW_CONVERSATION_SEEN_SKEW_MS
               ).toISOString(),
+        handled_conversation_keys:
+          reviewContextChangedDuringRun || !successful || cheapTierRunFailed || !conversationBefore
+            ? latestBeforeSave.handled_conversation_keys
+            : mergeConversationCoverage(latestBeforeSave, conversationBefore, conversationAfter, coverage.keys),
         generated_at: reviewContextChangedDuringRun
           ? ""
           : rewritesSummary
