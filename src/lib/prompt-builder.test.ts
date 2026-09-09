@@ -330,7 +330,7 @@ test("buildReviewPrompt maps PR states and replaces every base-branch placeholde
   );
 
   assert.match(result, /PR=https:\/\/github.com\/farshidz\/marqo-cortex-city\/pull\/123/);
-  assert.match(result, /Status=Checks are failing — fix CI during this run\./);
+  assert.match(result, /Status=Checks are failing\. Fix CI failures related to or caused by this PR\./);
   assert.match(result, /Base=develop/);
   assert.match(result, /Again=develop/);
   assert.match(result, /## Agent Review Context\nReview Context/);

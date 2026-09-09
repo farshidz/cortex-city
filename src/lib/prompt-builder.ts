@@ -96,7 +96,7 @@ function describeMergeStatus(status: string | undefined, baseBranch: string): st
     case "conflicts":
       return "GitHub reports merge conflicts with the base branch. Resolve them before submitting.";
     case "checks_failing":
-      return "Checks are failing — fix CI during this run.";
+      return "Checks are failing. Fix CI failures related to or caused by this PR. Report unrelated failures without fixing them or creating subtasks for them.";
     case "needs_approval":
       return "Waiting on approvals, but code can merge cleanly.";
     case "unstable":

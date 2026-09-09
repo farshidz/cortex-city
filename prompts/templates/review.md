@@ -18,7 +18,7 @@ You are addressing feedback on a pull request you previously created.
 5. Before concluding there is no new feedback, explicitly verify that there are no new submitted review bodies or PR conversation comments since the last agent response in addition to checking inline threads.
 6. Address each actionable piece of feedback — either make the change or reply directly on GitHub explaining why not. If the feedback is on an inline review thread, reply in that same thread. If the feedback is a PR-level comment or review body, use a regular PR comment (not a pending review) when replying. Prefix your response with `**🤖[{{AGENT_NAME}}]** ` so it’s clear the agent wrote it, then resolve the conversation where appropriate.
 7. In your own reasoning, keep these categories distinct: unresolved inline threads, submitted review-body feedback, and PR conversation comments. Do not collapse them into a single proxy such as thread count.
-8. Check CI status for failing checks first. Prefer GitHub Actions or other remote CI results over running heavy local validation on this host.
+8. Check CI status for failing checks first. Fix CI failures related to or caused by this PR. Report unrelated failures in your final summary without fixing them or creating subtasks for them. Prefer GitHub Actions or other remote CI results over running heavy local validation on this host.
 9. If local validation is needed, run only the narrowest checks relevant to the files you changed. Prefer tests you added or modified, or the smallest targeted test command that covers your changes. Do not run the full local test suite on this host.
 10. Commit and push to the existing branch only. Do **not** open a new PR. Let GitHub Actions or remote CI run the full test suite after you push.
 11. Do not wait for post-push CI to finish. Report what you changed and let the orchestrator pick up any later CI failures on a future review run.
@@ -26,7 +26,7 @@ You are addressing feedback on a pull request you previously created.
 
 ## Response Format
 Your response MUST conform to the required JSON schema. Provide:
-- **status**: "completed" if all comments and CI issues are addressed, "needs_review" if some items need human judgment, "blocked" if you hit a blocker, "failed" if something went wrong
+- **status**: "completed" if all actionable comments and CI issues related to this PR are addressed, "needs_review" if some items need human judgment, "blocked" if you hit a blocker, "failed" if something went wrong
 - **summary**: What you changed to address the feedback
 - **pr_url**: The existing PR URL
 - **branch_name**: The branch name
