@@ -620,7 +620,8 @@ function retroFields(review?: ReviewSummary) {
 export function buildReviewWrapperPrompt(
   config: OrchestratorConfig,
   request: ReviewRequest,
-  cached?: ReviewSummary
+  cached?: ReviewSummary,
+  experimentEnabled = false
 ): string {
   const target = effectiveReviewRequest(request, cached);
   const source = reviewSourceOf(target);
@@ -905,7 +906,7 @@ export function buildReviewWrapperPrompt(
 
   if (config.review_learning_enabled !== false) {
     const currentLearnings = readReviewLearnings();
-    const learningsSource = config.review_session_reuse_experiment !== false
+    const learningsSource = experimentEnabled && config.review_session_reuse_experiment !== false
       ? experimentReviewLearnings(currentLearnings)
       : currentLearnings;
     const learnings = selectReviewLearnings(learningsSource, target.repo_slug);
@@ -1636,6 +1637,8 @@ export interface SpawnReviewSummaryOptions extends Partial<SpawnOpts> {
   // a tier-1 round starts from pointers.
   unresolved_threads?: ReviewerThreadSummary[];
   launch_reason?: string;
+  /** Set only by the scheduler; manual regeneration remains outside the experiment. */
+  scheduled?: boolean;
 }
 
 export function reviewReuseGroup(prUrl: string): "reuse" | "fresh" {
@@ -1681,7 +1684,7 @@ export async function spawnReviewSummary(
   const target = effectiveReviewRequest(request, cachedBefore);
   const cachedSummaryHeadSha = summaryHeadShaFor(cachedBefore);
   const followupReview = isFollowupReview(target, cachedBefore);
-  const experimentEnabled = opts.runtime === "codex" && config.review_session_reuse_experiment !== false;
+  const experimentEnabled = options.scheduled === true && opts.runtime === "codex" && config.review_session_reuse_experiment !== false;
   const experimentGroup = experimentEnabled ? reviewReuseGroup(target.pr_url) : "disabled";
   const reuseProfileKey = reviewReuseProfileKey(target, opts, tier);
   const priorScheduledSession = experimentGroup === "reuse" && cachedBefore && sameReviewContext(target, cachedBefore)
@@ -1713,7 +1716,7 @@ export async function spawnReviewSummary(
           cachedBefore,
           options.unresolved_threads
         )
-      : buildReviewWrapperPrompt(config, target, cachedBefore);
+      : buildReviewWrapperPrompt(config, target, cachedBefore, experimentEnabled);
   const prompt = resumeSessionId
     ? freshPrompt.replaceAll(
         "This session is fresh and has no memory of the earlier rounds.",
@@ -1778,6 +1781,7 @@ export async function spawnReviewSummary(
     resumed_session_id: resumeSessionId,
     started_at: runStartedAt,
     reason: options.launch_reason || "direct_request",
+    scheduled: options.scheduled === true,
     diff_hash: options.diff_hash,
     prior_run_error: cachedBefore?.error,
     had_prior_summary: Boolean(cachedBefore?.summary),
@@ -2585,6 +2589,20 @@ export async function askFollowup(
   if (cached.current_run_pid != null) {
     throw new Error("Summary is being refreshed for this PR.");
   }
+  const runLock = await acquireReviewRunLock(prUrl);
+  try {
+    return await askFollowupUnderLock(prUrl, question);
+  } finally {
+    await releaseReviewRunLock(runLock);
+  }
+}
+
+async function askFollowupUnderLock(
+  prUrl: string,
+  question: string
+): Promise<ReviewFollowup> {
+  const cached = getReviewSummary(prUrl);
+  if (!cached?.summary) throw new Error("Summary is not yet available for this PR.");
   const config = readConfig();
   const runTimeoutMs = resolveReviewRunTimeoutMs(config);
   const opts: SpawnOpts = cached.session_profile

@@ -234,6 +234,12 @@ test("disk hygiene continues after a deletion failure and reports failure at the
     mkdirSync(fakeBin, { recursive: true });
     symlinkSync(sessionHelper, path.join(scriptsDir, path.basename(sessionHelper)));
 
+    const expiredEvents = path.join(logDir, "run-events-expired.jsonl");
+    const retainedEvents = path.join(logDir, "run-events-recent.jsonl");
+    for (const [file, days] of [[expiredEvents, 40], [retainedEvents, 10]] as const) {
+      writeFileSync(file, "{}\n");
+      utimesSync(file, oldDate(days), oldDate(days));
+    }
     const failedLog = path.join(logDir, "server-old.log");
     writeFileSync(failedLog, "old log");
     utimesSync(failedLog, oldDate(30), oldDate(30));
@@ -324,6 +330,8 @@ test("disk hygiene continues after a deletion failure and reports failure at the
 
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.ok(existsSync(failedLog));
+    assert.equal(existsSync(expiredEvents), false);
+    assert.ok(existsSync(retainedEvents));
     assert.equal(existsSync(reviewWorkspace), false);
     assert.ok(existsSync(reviewRoot));
     assert.ok(existsSync(unmarkedWorkspace));

@@ -2231,6 +2231,20 @@ test("review summarize route launches Codex summaries with overrides", () => {
       seeded[prUrl].self_authored = true;
       writeJson(reviewsPath, seeded);
 
+      const runner = await loadRoute("./src/lib/review-runner.ts");
+      const profile = {runtime: "codex", effort: "high", model: "gpt-test"};
+      const reuseUrl = Array.from({length: 100}, (_, i) => "https://github.com/acme/widget/pull/" + (i + 1)).find(url => runner.reviewReuseGroup(url) === "reuse");
+      const manualRequest = {...seeded[prUrl], pr_url: reuseUrl};
+      const profileKey = runner.reviewReuseProfileKey(manualRequest, profile, 2);
+      manualRequest.scheduled_review_sessions = {[profileKey]: {session_id: "scheduled-existing"}};
+      seeded[reuseUrl] = manualRequest;
+      writeJson(reviewsPath, seeded);
+      fs.writeFileSync(path.join(cortexDir, "review-learnings.md"), "- Live guidance.");
+      const config = readJson(path.join(cortexDir, "config.json"));
+      writeJson(path.join(cortexDir, "config.json"), {...config, review_session_reuse_experiment: true});
+      const codexPath = path.join(binDir, "codex");
+      fs.writeFileSync(codexPath, fs.readFileSync(codexPath, "utf8").replace("process.exit(0);", "require('node:fs').writeFileSync(" + JSON.stringify(path.join(workspace, "manual-args.json")) + ", JSON.stringify(process.argv)); process.exit(0);"));
+
       const summarizeRoute = await loadRoute("./src/app/api/reviews/summarize/route.ts");
       const summarized = await json(
         await summarizeRoute.POST(
@@ -2238,7 +2252,7 @@ test("review summarize route launches Codex summaries with overrides", () => {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
-              pr_url: prUrl,
+              pr_url: reuseUrl,
               runtime: "codex",
               effort: "high",
               model: "gpt-test",
@@ -2255,6 +2269,15 @@ test("review summarize route launches Codex summaries with overrides", () => {
       assert.equal(summarized.body.my_last_review_sha, "abc123");
       assert.equal(summarized.body.label_only, true);
       assert.equal(summarized.body.self_authored, true);
+      assert.equal(readJson(path.join(workspace, "manual-args.json")).includes("resume"), false);
+      assert.equal(fs.existsSync(path.join(cortexDir, "review-reuse-v1-learnings.md")), false);
+      assert.deepEqual(summarized.body.scheduled_review_sessions, manualRequest.scheduled_review_sessions);
+      const logFile = fs.readdirSync(path.join(workspace, "logs")).find(name => name.startsWith("run-events-"));
+      const events = fs.readFileSync(path.join(workspace, "logs", logFile), "utf8").trim().split("\\n").map(line => JSON.parse(line));
+      const start = events.find(event => event.event === "review_started");
+      assert.equal(start.group, "disabled");
+      assert.equal(start.scheduled, false);
+      assert.equal(start.experiment, undefined);
     `)
   );
 });

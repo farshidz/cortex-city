@@ -44,7 +44,7 @@ test("Claude invocation totals include cache reads and writes without treating w
 
 test("the analysis counts each run once and keeps unknown usage visible", () => {
   const root = mkdtempSync(path.join(tmpdir(), "review-report-"));
-  const meta = {run_id: "a", group: "reuse", runtime: "codex", model: "test", effort: "medium", tier: 1, round: "review", started_at: "2026-09-09T00:00:00Z", deployment_revision: "abc", pr_url: "https://github.com/acme/widget/pull/1"};
+  const meta = {scheduled: true, experiment: "review-reuse-v1", run_id: "a", group: "reuse", runtime: "codex", model: "test", effort: "medium", tier: 1, round: "review", started_at: "2026-09-09T00:00:00Z", deployment_revision: "abc", pr_url: "https://github.com/acme/widget/pull/1"};
   const completion = {...meta, event: "review_runtime_completed", usage: {input_tokens: 100, cached_input_tokens: 80, output_tokens: 10}, raw_usage: {input_tokens: 999999}, duration_ms: 200};
   writeFileSync(path.join(root, "run-events-2026-09-09.jsonl"), [{...meta, event: "review_started"}, completion, completion, {...meta, event: "review_saved", agent_review_status: "needs_author_changes"}, {...meta, run_id: "b", event: "review_launch_failed", error: "spawn failed"}].map((event) => JSON.stringify(event)).join("\n"));
   const report = JSON.parse(execFileSync(process.execPath, [path.join(process.cwd(), "scripts/analyze-review-usage.mjs"), root, "2026-09-09T00:00:00Z", "2026-09-10T00:00:00Z"], {encoding: "utf8"}));
@@ -53,4 +53,25 @@ test("the analysis counts each run once and keeps unknown usage visible", () => 
   assert.equal(report.prs[0].rounds, 2);
   assert.equal(report.prs[0].unknown_usage_rounds, 1);
   assert.equal(report.prs[0].failed_rounds, 1);
+});
+
+
+test("analysis classifies every terminal and interrupted lifecycle and excludes manual runs", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "review-lifecycle-"));
+  const meta = {scheduled: true, experiment: "review-reuse-v1", group: "reuse", runtime: "codex", started_at: "2026-09-09T00:00:00Z", pr_url: "https://github.com/acme/widget/pull/1"};
+  const paths = [
+    ["review_launch_attempt"],
+    ["review_launch_attempt", "review_started"],
+    ["review_started", "review_runtime_completed"],
+    ["review_launch_attempt", "review_launch_failed"],
+    ["review_started", "review_runtime_completed", "review_saved"],
+    ["review_started", "review_runtime_completed", "review_completion_failed"],
+  ];
+  const records = paths.flatMap((events, id) => events.map((event) => ({...meta, run_id: String(id), event, ...(event.includes("failed") ? {error: "failure"} : {})})));
+  records.push({...meta, run_id: "manual", event: "review_started", scheduled: false});
+  writeFileSync(path.join(root, "run-events-2026-09-09.jsonl"), records.map((event) => JSON.stringify(event)).join("\n"));
+  const report = JSON.parse(execFileSync(process.execPath, [path.join(process.cwd(), "scripts/analyze-review-usage.mjs"), root, "2026-09-09T00:00:00Z", "2026-09-10T00:00:00Z"], {encoding: "utf8"}));
+  assert.equal(report.prs[0].rounds, 6);
+  assert.equal(report.prs[0].incomplete_rounds, 3);
+  assert.equal(report.prs[0].failed_rounds, 2);
 });

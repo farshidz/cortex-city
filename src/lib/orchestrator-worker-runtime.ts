@@ -2588,6 +2588,7 @@ async function runReviewPhases(
             tier,
             diff_hash: diffHash,
             launch_reason: decision.reason,
+            scheduled: true,
             ...(unresolvedThreads
               ? { unresolved_threads: unresolvedThreads }
               : {}),

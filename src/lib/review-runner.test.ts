@@ -5324,7 +5324,7 @@ test("scheduled reuse resumes only its own compatible tier session and controls 
       await upsertReviewSummary({...request, summary: "Previous", generated_at: "2026-01-01", session_id: "qa-only-session", runtime: "codex", effort: "medium", model: "gpt-test"});
       const invocations = [];
       for (const tier of [2, 2, 1, 1]) {
-        await summarizePR(request, {runtime: "codex", model: "gpt-test", effort: "medium", tier});
+        await summarizePR(request, {runtime: "codex", model: "gpt-test", effort: "medium", tier, scheduled: true});
         invocations.push(JSON.parse(fs.readFileSync(${JSON.stringify(argsFile)}, "utf8")).args);
       }
       console.log(JSON.stringify(invocations));
@@ -5344,9 +5344,9 @@ test("the experiment freezes injected learnings while opt-out sees later curatio
     const config = ${JSON.stringify(baseConfig({review_learning_enabled: true, review_session_reuse_experiment: true}))};
     const request = ${JSON.stringify(sampleRequest())};
     await writeReviewLearnings("- Original curated guidance.");
-    const first = buildReviewWrapperPrompt(config, request);
+    const first = buildReviewWrapperPrompt(config, request, undefined, true);
     await writeReviewLearnings("- Later retrospective guidance.");
-    const second = buildReviewWrapperPrompt(config, request);
+    const second = buildReviewWrapperPrompt(config, request, undefined, true);
     const live = buildReviewWrapperPrompt({...config, review_session_reuse_experiment: false}, request);
     console.log(JSON.stringify({first: first.includes("Original curated guidance"), frozen: second.includes("Original curated guidance") && !second.includes("Later retrospective guidance"), live: live.includes("Later retrospective guidance")}));
   `, prependBinToPath(workspace));
@@ -5373,4 +5373,42 @@ test("saved sibling-list lessons survive wrapper projection and tags stay scoped
     console.log(JSON.stringify({outputs, scoped: scoped.includes("Scoped guidance"), rejected}));
   `, prependBinToPath(workspace));
   assert.deepEqual(result, {outputs: [true, true, true], scoped: true, rejected: true});
+});
+
+
+test("in-flight Q&A holds the shared lock against Q&A, scheduled reuse, and manual review", () => {
+  const workspace = setupRunnerWorkspace("review-qa-lock-", {review_session_reuse_experiment: true});
+  const request = sampleRequest({pr_url: Array.from({length: 100}, (_, i) => `https://github.com/acme/widget/pull/${i + 1}`).find((url) => reviewReuseGroup(url) === "reuse")!});
+  const scenarioFile = path.join(workspace, "scenario.json");
+  const argsFile = path.join(workspace, "agent-args.json");
+  writeJson(scenarioFile, {codex: {sleepMs: 500, stdout: [
+    {type: "thread.started", thread_id: "shared-session"},
+    {type: "item.completed", item: {type: "agent_message", text: "Answer."}},
+    {type: "turn.completed", usage: {input_tokens: 100, cached_input_tokens: 50, output_tokens: 10}},
+  ].map((event) => JSON.stringify(event)).join("\n") + "\n"}});
+  const result = runTsxScript(workspace, [
+    `import { askFollowup, spawnReviewSummary, ReviewRunInFlightError, reviewReuseProfileKey } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+    `import { upsertReviewSummary } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`,
+  ], `
+    const fs = await import("node:fs");
+    const request = ${JSON.stringify(request)};
+    const profile = {runtime: "codex", model: "gpt-test", effort: "medium"};
+    const key = reviewReuseProfileKey(request, profile, 2);
+    await upsertReviewSummary({...request, summary: "Previous", generated_at: "2026-01-01", session_id: "shared-session", session_profile: profile, scheduled_review_sessions: {[key]: {session_id: "shared-session"}}});
+    const pending = askFollowup(request.pr_url, "Question");
+    for (let i = 0; !fs.existsSync(${JSON.stringify(argsFile)}) && i < 200; i++) await new Promise(resolve => setTimeout(resolve, 5));
+    const errors = [];
+    for (const launch of [
+      () => askFollowup(request.pr_url, "Second question"),
+      () => spawnReviewSummary(request, {...profile, scheduled: true}),
+      () => spawnReviewSummary(request, profile),
+    ]) {
+      try { const child = await launch(); if (child.done) await child.done; errors.push(false); }
+      catch (error) { errors.push(error instanceof ReviewRunInFlightError); }
+    }
+    const answered = await pending;
+    const after = await askFollowup(request.pr_url, "After release");
+    console.log(JSON.stringify({errors, answered: answered.answer, after: after.answer}));
+  `, {...prependBinToPath(workspace), FAKE_AGENT_SCENARIO_FILE: scenarioFile, FAKE_AGENT_ARGS_FILE: argsFile});
+  assert.deepEqual(result, {errors: [true, true, true], answered: "Answer.", after: "Answer."});
 });

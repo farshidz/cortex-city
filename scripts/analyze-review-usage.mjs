@@ -23,7 +23,7 @@ const groups = new Map(), prs = new Map();
 function add(map, key, meta, completed, saved) {
   const row = map.get(key) || {key, rounds: 0, measured_rounds: 0, unknown_usage_rounds: 0, incomplete_rounds: 0, failed_rounds: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, duration_ms: 0, verdicts: {}};
   row.rounds++;
-  if (!completed) row.incomplete_rounds++;
+  if (!saved && meta.event !== "review_launch_failed") row.incomplete_rounds++;
   if (completed?.runtime_failed || saved?.error || meta.event === "review_launch_failed") row.failed_rounds++;
   if (completed?.usage) {
     row.measured_rounds++;
@@ -36,7 +36,7 @@ function add(map, key, meta, completed, saved) {
 }
 for (const run of runs.values()) {
   const meta = run.review_launch_failed || run.review_started || run.review_launch_attempt;
-  if (!meta || !["fresh", "reuse"].includes(meta.group) || Date.parse(meta.started_at) < from || Date.parse(meta.started_at) >= until) continue;
+  if (!meta || meta.scheduled !== true || meta.experiment !== "review-reuse-v1" || !["fresh", "reuse"].includes(meta.group) || Date.parse(meta.started_at) < from || Date.parse(meta.started_at) >= until) continue;
   const completed = run.review_runtime_completed;
   const outcome = run.review_completion_failed || run.review_saved;
   const key = [meta.deployment_revision, meta.group, meta.runtime, meta.model, meta.effort, meta.tier, meta.round, meta.resumed ? "resumed" : "fresh", meta.had_prior_summary ? "followup" : "initial"].join("/");
