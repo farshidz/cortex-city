@@ -2358,10 +2358,9 @@ export async function spawnReviewSummary(
         pending_tier2_reason: reviewContextChangedDuringRun
           ? undefined
           : pendingTier2Reason,
-        // A round that completed read the conversation that existed when it
-        // started, so it clears the reply-round trigger up to that instant. A
-        // cheap round that failed to finish did not, even though it escalates
-        // rather than recording an error, so the conversation stays owed.
+        // Retain the timestamp for legacy compatibility. Once a ledger exists,
+        // only explicit receipts clear conversation work. Failed rounds and
+        // unavailable pre-run snapshots preserve the previous migration cutoff.
         last_conversation_seen_at:
           reviewContextChangedDuringRun || !successful || cheapTierRunFailed || !conversationBefore
             ? latestBeforeSave.last_conversation_seen_at

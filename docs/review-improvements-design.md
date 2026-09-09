@@ -156,12 +156,26 @@ the only scheduling signal), while adding a first-class trigger for conversation
    stable for a configurable window (`review_debounce_seconds`, default 300). Stacked
    PRs (#94) share the debounce: any movement in the stack resets the window for all
    its PRs.
-3. *Reply rounds.* New trigger: unreceipted comments by others newer than
-   `last_conversation_seen_at` (needs PR 3), with unchanged diff hash → schedule a
+3. *Reply rounds.* Published conversation versions absent from
+   `handled_conversation_keys`, with unchanged diff hash → schedule a
    **reply round**: prompt scoped to responding on existing threads; no re-review, no
    new findings; if conversation surfaces something material, emit `escalate` (see
    PR 5 statuses; pre-PR 5, emit `needs_human_decision` as the conservative mapping).
    Reply rounds run tier 1 once PR 5 lands.
+
+   Each version identifies its surface (PR comment, inline comment, or review),
+   ID, exact body hash, and review state. A successful round explicitly receipts
+   the versions it handled, including acknowledgements needing no reply. Missing
+   receipts, failed rounds, unread arrivals, and edits remain pending. Prompts
+   embed bounded batches; large bodies require a GitHub read before receipt.
+   Complete post-run snapshots remove obsolete hashes; unavailable snapshots
+   preserve existing coverage.
+
+   `last_conversation_seen_at` is migration-only. Until a ledger exists, older
+   comment versions can migrate using their update timestamps. Review versions
+   remain pending because REST submission time does not establish body/state
+   update time. A missing pre-run snapshot never advances the legacy cutoff.
+
 4. *Verdict lifetime fix (small but load-bearing).* On diff-hash-unchanged head moves
    (rebases), do **not** clear `agent_review_status` (upsert ~L1665-1687). A pending
    `needs_human_decision` survives until answered or the diff actually changes.
