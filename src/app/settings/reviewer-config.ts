@@ -16,7 +16,8 @@ type ClearableConfigKey =
   | "reviewer_agent_prompt"
   | "review_effort"
   | "review_model"
-  | "reviewer_tiers";
+  | "reviewer_tiers"
+  | "review_weekly_usage_limit_percent";
 
 export type ConfigUpdatePayload = Omit<
   OrchestratorConfig,
@@ -172,6 +173,7 @@ export function buildConfigUpdate(
 ): ConfigUpdatePayload {
   return {
     ...config,
+    review_weekly_usage_limit_percent: config.review_weekly_usage_limit_percent ?? null,
     reviewer_tiers: configuredReviewerTiers(config.reviewer_tiers),
     default_claude_model: configuredModel(config.default_claude_model),
     default_claude_effort: config.default_claude_effort ?? null,

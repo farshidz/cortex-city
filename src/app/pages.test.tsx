@@ -31,7 +31,7 @@ function runRenderScript(body: string): string[] {
             "onValueChange",
           ]) {
             if (typeof props[name] === "function") {
-              handlers.push({ name, fn: props[name] });
+              handlers.push({ name, fn: props[name], id: props.id });
             }
           }
         }
@@ -1798,4 +1798,34 @@ test("manual review regeneration displays quota errors and clears them on retry"
   assert.match(result.failedUpdates.find((update: { index: number; value: unknown }) => update.index === 7 && update.value)?.value, /weekly Codex usage limit/);
   assert.deepEqual(result.retryUpdates.filter((update: { index: number }) => update.index === 7).map((update: { value: unknown }) => update.value), [null]);
   assert.equal(result.mutateCount, 1);
+});
+
+
+test("settings clears a weekly limit without turning the blank input into zero", () => {
+  const output = runRenderScript(`
+    const configured = { ...config, review_weekly_usage_limit_percent: 20, review_author_whitelist: ["octocat"] };
+    await renderPage("./src/app/settings/page.tsx", {}, [false, configured]);
+    globalThis.__STATE_UPDATES__ = [];
+    const input = handlers.find((handler) => handler.id === "review-weekly-limit" && handler.name === "onChange");
+    await input.fn({ target: { value: "0" } });
+    const zero = globalThis.__STATE_UPDATES__.findLast((update) => update.index === 2).value;
+    await input.fn({ target: { value: "" } });
+    const cleared = globalThis.__STATE_UPDATES__.findLast((update) => update.index === 2).value;
+    handlers.length = 0;
+    const html = await renderPage("./src/app/settings/page.tsx", {}, [false, cleared]);
+    const requests = [];
+    globalThis.fetch = async (url, options) => {
+      requests.push({url, body: JSON.parse(options.body)});
+      return {ok: true};
+    };
+    await handlers.find((handler) => handler.fn.name === "saveConfig").fn();
+    const field = html.match(/<input[^>]*id="review-weekly-limit"[^>]*>/)?.[0] || "";
+    console.log(JSON.stringify({ zero: zero.review_weekly_usage_limit_percent, cleared: cleared.review_weekly_usage_limit_percent === undefined, requests, field }));
+  `);
+  const result = JSON.parse(output[0]);
+  assert.equal(result.zero, 0);
+  assert.equal(result.cleared, true);
+  assert.match(result.field, /value=""/);
+  assert.equal(result.requests[0].body.review_weekly_usage_limit_percent, null);
+  assert.deepEqual(result.requests[0].body.review_author_whitelist, ["octocat"]);
 });

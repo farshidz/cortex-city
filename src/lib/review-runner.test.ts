@@ -5539,7 +5539,7 @@ test("a delayed worker conversation scan cannot relaunch a reply handled by a ma
 });
 
 test("weekly quota gate refuses before spawning a reviewer and releases the run lock", () => {
-  const workspace = setupRunnerWorkspace("review-quota-gate-", { review_author_whitelist: ["trusted"] });
+  const workspace = setupRunnerWorkspace("review-quota-gate-", { review_author_whitelist: [], review_weekly_usage_limit_percent: 20 });
   const ghStateFile = path.join(workspace, "gh-state.json");
   const ghCallsFile = path.join(workspace, "gh-calls.jsonl");
   writeJson(ghStateFile, { prs: { "acme/widget#1": { state: "open", merged: false, headRefOid: "abc123", issueComments: Array.from({ length: 201 }, (_, i) => ({ id: i + 1, user: { login: "outsider" }, body: "x".repeat(12000) })) } } });
