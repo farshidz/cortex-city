@@ -248,6 +248,9 @@ export interface OrchestratorConfig {
   // Defaults to enabled: stable 50/50 PR assignment for Codex scheduled reviews.
   review_session_reuse_experiment?: boolean;
   review_learning_enabled?: boolean;
+  /** Empty disables the weekly usage gate. GitHub logins are case-insensitive. */
+  review_author_whitelist?: string[];
+  review_weekly_usage_limit_percent?: number;
   // How long a PR head must sit still before a changed effective diff schedules
   // a review round. Absent falls back to REVIEW_DEBOUNCE_DEFAULT_SECONDS; 0
   // disables the wait.

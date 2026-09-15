@@ -1,3 +1,4 @@
+import { enforceReviewQuota } from "./review-quota";
 import { experimentReviewLearnings } from "./review-learnings-snapshot";
 import { recordRunEvent, readCodexRoundUsage, countersReset, claudeRoundUsage, type ReviewTokenUsage } from "./review-run-telemetry";
 import { conversationPrompt, unhandledConversation, parseConversationCoverage, mergeConversationCoverage } from "./review-conversation";
@@ -1702,6 +1703,7 @@ async function spawnReviewSummaryUnderLock(
     throw new Error(`Review is finalized for ${request.pr_url}`);
   }
   const target = effectiveReviewRequest(request, cachedBefore);
+  await enforceReviewQuota(config, target);
   const cachedSummaryHeadSha = summaryHeadShaFor(cachedBefore);
   const followupReview = isFollowupReview(target, cachedBefore);
   const experimentEnabled = options.scheduled === true && opts.runtime === "codex" && config.review_session_reuse_experiment !== false;

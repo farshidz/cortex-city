@@ -2342,6 +2342,39 @@ export async function deliverReviewerComment(
   );
 }
 
+/** Resolve authors omitted by task-owned review requests. */
+export async function getPRUserLogin(prUrl: string): Promise<string> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) throw new Error("Invalid review target.");
+  const target = await execJsonStrict<{ user?: { login?: string } }>(
+    `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`
+  );
+  return target?.user?.login?.trim() || "";
+}
+
+export const REVIEW_QUOTA_REFUSAL_BODY =
+  `${REVIEWER_GITHUB_COMMENT_PREFIX} Review refused because the weekly Codex usage limit has been exceeded. Please try again after the weekly limit resets.`;
+
+/** One refusal per PR, including after a restart or an ambiguous POST result. */
+export async function postReviewQuotaRefusal(prUrl: string): Promise<void> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) throw new Error("Invalid review target.");
+  await withReviewerCommentDeliveryLock(prUrl, "weekly-quota", async () => {
+    const login = await getAuthenticatedUserLogin();
+    if (!login) throw new Error("GitHub did not return the reviewer login.");
+    const endpoint = `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`;
+    const comments = await execPaginatedArrayStrict<IssueCommentItem>(endpoint);
+    if (!comments) throw new Error("Failed to inspect PR comments for a quota refusal.");
+    if (comments.some((comment) => comment.user?.login === login && comment.body === REVIEW_QUOTA_REFUSAL_BODY)) return;
+    const target = await getReviewerCommentDeliveryTarget(pr);
+    if (target.merged || target.state?.toLowerCase() !== "open") return;
+    const result = await execFileResult("gh", [
+      "api", "--method", "POST", endpoint, "--raw-field", `body=${REVIEW_QUOTA_REFUSAL_BODY}`,
+    ]);
+    if (!result.ok) throw new Error(`Failed to post review quota refusal: ${result.stderr}`);
+  });
+}
+
 export const __testUtils = {
   parsePRUrl,
   firstLineOf,

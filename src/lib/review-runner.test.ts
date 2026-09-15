@@ -5537,3 +5537,37 @@ test("a delayed worker conversation scan cannot relaunch a reply handled by a ma
   assert.deepEqual(result.after, result.before);
   assert.deepEqual(result.after.handled_conversation_keys, [key]);
 });
+
+test("weekly quota gate refuses before spawning a reviewer and releases the run lock", () => {
+  const workspace = setupRunnerWorkspace("review-quota-gate-", { review_author_whitelist: ["trusted"] });
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  writeJson(ghStateFile, { prs: { "acme/widget#1": { state: "open", merged: false, headRefOid: "abc123" } } });
+  const binary = path.join(workspace, "bin", "codex");
+  writeFileSync(binary, `#!/usr/bin/env node
+const readline = require("readline");
+if (process.argv[2] !== "app-server") process.exit(99);
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (!request.id) return;
+  const result = request.id === 2 ? { rateLimitsByLimitId: { codex: { primary: { usedPercent: 20, windowDurationMins: 10080 } } } } : {};
+  console.log(JSON.stringify({id: request.id, result}));
+});
+`);
+  chmodSync(binary, 0o755);
+  const result = runTsxScript(workspace,
+    [`import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+     `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`],
+    `const errors = [];
+     for (let i = 0; i < 2; i++) {
+       try { await spawnReviewSummary(${JSON.stringify(sampleRequest())}, {runtime: "claude"}); }
+       catch (error) { errors.push(error.message); }
+     }
+     console.log(JSON.stringify({errors, reviews: readReviewSummaryMap()}));`,
+    { ...prependBinToPath(workspace), FAKE_GH_STATE_FILE: ghStateFile });
+  assert.equal(result.errors.length, 2);
+  assert.ok(result.errors.every((message: string) => /weekly Codex usage limit has been exceeded/.test(message)), JSON.stringify(result));
+  assert.deepEqual(result.reviews, {});
+  const state = JSON.parse(readFileSync(ghStateFile, "utf8"));
+  assert.equal(state.prs["acme/widget#1"].issueComments.length, 1);
+  assert.doesNotMatch(state.prs["acme/widget#1"].issueComments[0].body, /whitelist|author|20%/i);
+});

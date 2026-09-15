@@ -1,3 +1,4 @@
+import { ReviewQuotaDeferredError } from "@/lib/review-quota";
 import { NextRequest, NextResponse } from "next/server";
 import { getReviewSummary } from "@/lib/review-store";
 import {
@@ -65,6 +66,9 @@ export async function POST(request: NextRequest) {
       overrides
     );
   } catch (error) {
+    if (error instanceof ReviewQuotaDeferredError) {
+      return NextResponse.json({ error: error.message }, { status: 429 });
+    }
     if (error instanceof ReviewRunInFlightError) {
       return NextResponse.json({ error: error.message }, { status: 409 });
     }

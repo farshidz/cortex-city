@@ -509,6 +509,39 @@ export default function SettingsPage() {
             />
           </div>
           <div className="space-y-2">
+            <Label htmlFor="review-author-whitelist">Review Author Whitelist</Label>
+            <Input
+              id="review-author-whitelist"
+              value={(form.review_author_whitelist ?? []).join(", ")}
+              onChange={(e) => setForm({
+                ...form,
+                review_author_whitelist: e.target.value.split(",").map((login) => login.trimStart()),
+              })}
+              placeholder="octocat, another-author"
+            />
+            <p className="text-xs text-muted-foreground">
+              These GitHub authors can be reviewed regardless of weekly Codex usage.
+              Leave empty to review all PRs without a usage gate.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="review-weekly-limit">Weekly Codex Usage Limit (%)</Label>
+            <Input
+              id="review-weekly-limit"
+              type="number"
+              min={0}
+              max={100}
+              value={form.review_weekly_usage_limit_percent ?? 20}
+              onChange={(e) => setForm({
+                ...form,
+                review_weekly_usage_limit_percent: Number(e.target.value),
+              })}
+            />
+            <p className="text-xs text-muted-foreground">
+              Refuse reviews for other authors when weekly usage reaches this percentage.
+            </p>
+          </div>
+          <div className="space-y-2">
             <Label>Review Debounce (seconds)</Label>
             <Input
               type="number"

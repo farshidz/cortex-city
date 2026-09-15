@@ -47,6 +47,7 @@ function normalizeReviewerTiers(value: unknown): ReviewerTiers | undefined {
 // Upper bounds the persistence layer enforces, matching the Settings inputs.
 const BOUNDED_COUNT_KEYS: Record<string, number> = {
   review_debounce_seconds: REVIEW_DEBOUNCE_MAX_SECONDS,
+  review_weekly_usage_limit_percent: 100,
 };
 
 export async function GET() {
@@ -100,6 +101,16 @@ export async function PUT(request: NextRequest) {
     const value = body.review_session_reuse_experiment;
     if (value == null) delete mutableUpdated.review_session_reuse_experiment;
     else if (typeof value !== "boolean") return NextResponse.json({error: "review_session_reuse_experiment must be a boolean"}, {status: 400});
+  }
+
+  if (hasOwn("review_author_whitelist")) {
+    const value: unknown = body.review_author_whitelist;
+    if (value == null) mutableUpdated.review_author_whitelist = [];
+    else if (!Array.isArray(value) || value.some((login) => typeof login !== "string")) {
+      return NextResponse.json({ error: "review_author_whitelist must be an array of GitHub logins" }, { status: 400 });
+    } else {
+      mutableUpdated.review_author_whitelist = [...new Set(value.map((login: string) => login.trim().toLowerCase()).filter(Boolean))];
+    }
   }
 
   if (hasOwn("reviewer_tiers")) {
