@@ -76,6 +76,8 @@ test("readConfig creates defaults when no config file exists", () => {
     default_permission_mode: "bypassPermissions",
     default_agent_runner: "claude",
     review_learning_enabled: true,
+    review_author_whitelist: [],
+    review_weekly_usage_limit_percent: 20,
     agents: {},
   });
 
@@ -131,6 +133,8 @@ test("readConfig migrates legacy runner and permission fields", () => {
     default_permission_mode: "acceptEdits",
     default_agent_runner: "codex",
     review_learning_enabled: true,
+    review_author_whitelist: [],
+    review_weekly_usage_limit_percent: 20,
     agents: {},
     permission_mode: "acceptEdits",
   });
@@ -739,6 +743,8 @@ test("writeConfig persists the supplied configuration", () => {
     default_permission_mode: "yolo",
     default_agent_runner: "codex",
     review_learning_enabled: true,
+    review_author_whitelist: [],
+    review_weekly_usage_limit_percent: 20,
     agents: {
       "cortex-city-swe": {
         name: "Cortex City SWE",
@@ -774,6 +780,8 @@ test("writeConfig persists runtime-specific model and effort defaults", () => {
     default_permission_mode: "default",
     default_agent_runner: "claude",
     review_learning_enabled: true,
+    review_author_whitelist: [],
+    review_weekly_usage_limit_percent: 20,
     default_claude_model: "claude-sonnet-4-6",
     default_claude_effort: "high",
     default_codex_model: "gpt-5.4",

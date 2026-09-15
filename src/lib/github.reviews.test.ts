@@ -1438,3 +1438,38 @@ test("drainMyPendingReview says a discarded foreign draft loses the comments it 
     /Discarding it also discards 1 reviewer comment\(s\) it holds, which a re-review has to regenerate/
   );
 });
+
+test("quota refusal posts only when no identical comment belongs to the reviewer", () => {
+  const body = "**🤖[Cortex City Reviewer]** Review refused because the weekly Codex usage limit has been exceeded. Please try again after the weekly limit resets.";
+  const endpoint = "repos/acme/widget/issues/1/comments";
+  for (const author of ["me", "someone-else"]) {
+    const workspace = createTempWorkspace();
+    writeFakeGh(workspace);
+    const { calls } = runGhScript(workspace,
+      `import { postReviewQuotaRefusal } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+      {
+        "api user --jq .login": { stdout: "me" },
+        [`api ${endpoint}?per_page=100&page=1 --jq {count: length, found: any(.[]; .user.login == "me" and .body == ${JSON.stringify(body)})}`]: { stdout: JSON.stringify({ count: 1, found: author === "me" }) },
+        "api repos/acme/widget/pulls/1": { stdout: JSON.stringify({ state: "open", merged: false, head: { sha: "abc" } }) },
+        [`api --method POST ${endpoint} --raw-field body=${body}`]: { stdout: "{}" },
+      },
+      `await postReviewQuotaRefusal("https://github.com/acme/widget/pull/1"); console.log(JSON.stringify({ok: true}));`,
+      { recordCalls: true });
+    assert.equal(calls.filter((call) => call.includes("--method POST")).length, author === "me" ? 0 : 1);
+  }
+});
+
+test("quota refusal does not post when comment discovery fails", () => {
+  const workspace = createTempWorkspace();
+  writeFakeGh(workspace);
+  const { result, calls } = runGhScript(workspace,
+    `import { postReviewQuotaRefusal } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
+    {
+      "api user --jq .login": { stdout: "me" },
+      [`api repos/acme/widget/issues/1/comments?per_page=100&page=1 --jq {count: length, found: any(.[]; .user.login == "me" and .body == ${JSON.stringify("**🤖[Cortex City Reviewer]** Review refused because the weekly Codex usage limit has been exceeded. Please try again after the weekly limit resets.")})}`]: { exitCode: 1, stderr: "unavailable" },
+    },
+    `try { await postReviewQuotaRefusal("https://github.com/acme/widget/pull/1"); } catch (error) { console.log(JSON.stringify(error.message)); }`,
+    { recordCalls: true });
+  assert.match(String(result), /Failed to inspect PR comments/);
+  assert.equal(calls.some((call) => call.includes("--method POST")), false);
+});

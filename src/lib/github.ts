@@ -2342,6 +2342,60 @@ export async function deliverReviewerComment(
   );
 }
 
+/** Resolve authors omitted by task-owned review requests. */
+export async function getPRUserLogin(prUrl: string): Promise<string> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) throw new Error("Invalid review target.");
+  const target = await execJsonStrict<{ user?: { login?: string } }>(
+    `gh api repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`
+  );
+  return target?.user?.login?.trim() || "";
+}
+
+export const REVIEW_QUOTA_REFUSAL_BODY =
+  `${REVIEWER_GITHUB_COMMENT_PREFIX} Review refused because the weekly Codex usage limit has been exceeded. Please try again after the weekly limit resets.`;
+
+const confirmedQuotaRefusals = new Set<string>();
+
+/** One refusal per PR, including after a restart or an ambiguous POST result. */
+export async function postReviewQuotaRefusal(prUrl: string): Promise<void> {
+  const pr = parsePRUrl(prUrl);
+  if (!pr) throw new Error("Invalid review target.");
+  if (confirmedQuotaRefusals.has(prUrl)) return;
+  await withReviewerCommentDeliveryLock(prUrl, "weekly-quota", async () => {
+    if (confirmedQuotaRefusals.has(prUrl)) return;
+    const login = await getAuthenticatedUserLogin();
+    if (!login) throw new Error("GitHub did not return the reviewer login.");
+    const endpoint = `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`;
+    // Reduce each page inside gh so long comment bodies never fill Node's
+    // stdout buffer. Stop on a match; successful discovery/delivery is cached
+    // for subsequent polls. A new process rediscovers the GitHub receipt.
+    const query = `{count: length, found: any(.[]; .user.login == ${JSON.stringify(login)} and .body == ${JSON.stringify(REVIEW_QUOTA_REFUSAL_BODY)})}`;
+    for (let page = 1; ; page++) {
+      const result = await execFileResult("gh", [
+        "api", `${endpoint}?per_page=100&page=${page}`, "--jq", query,
+      ]);
+      if (!result.ok) throw new Error("Failed to inspect PR comments for a quota refusal.");
+      const receipt = JSON.parse(result.stdout) as { count: number; found: boolean };
+      if (!Number.isInteger(receipt.count) || receipt.count < 0 || receipt.count > 100 || typeof receipt.found !== "boolean") {
+        throw new Error("Invalid PR comment page for a quota refusal.");
+      }
+      if (receipt.found) {
+        confirmedQuotaRefusals.add(prUrl);
+        return;
+      }
+      if (receipt.count < 100) break;
+    }
+    const target = await getReviewerCommentDeliveryTarget(pr);
+    if (target.merged || target.state?.toLowerCase() !== "open") return;
+    const result = await execFileResult("gh", [
+      "api", "--method", "POST", endpoint, "--raw-field", `body=${REVIEW_QUOTA_REFUSAL_BODY}`,
+    ]);
+    if (!result.ok) throw new Error(`Failed to post review quota refusal: ${result.stderr}`);
+    confirmedQuotaRefusals.add(prUrl);
+  });
+}
+
 export const __testUtils = {
   parsePRUrl,
   firstLineOf,

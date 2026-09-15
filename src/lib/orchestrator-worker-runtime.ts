@@ -1,3 +1,4 @@
+import { ReviewQuotaDeferredError } from "./review-quota";
 import { recordRunEvent } from "./review-run-telemetry";
 // This module owns a single worker poll. The long-running loop, heartbeat, and
 // signal handling stay in src/orchestrator-worker.ts so tests can exercise one
@@ -2669,6 +2670,10 @@ async function runReviewPhases(
           pending_tier2_reason: cached?.pending_tier2_reason,
         });
       } catch (error) {
+        if (error instanceof ReviewQuotaDeferredError) {
+          deps.logger.log(`[worker] ${pr.pr_url}: ${error.message}`);
+          continue;
+        }
         if (error instanceof ReviewRoundObsoleteError) {
           deps.logger.log(`[worker] Skipped stale reply decision for ${pr.pr_url}: conversation already handled`);
           continue;

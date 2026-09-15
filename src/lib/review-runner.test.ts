@@ -5537,3 +5537,49 @@ test("a delayed worker conversation scan cannot relaunch a reply handled by a ma
   assert.deepEqual(result.after, result.before);
   assert.deepEqual(result.after.handled_conversation_keys, [key]);
 });
+
+test("weekly quota gate refuses before spawning a reviewer and releases the run lock", () => {
+  const workspace = setupRunnerWorkspace("review-quota-gate-", { review_author_whitelist: ["trusted"] });
+  const ghStateFile = path.join(workspace, "gh-state.json");
+  const ghCallsFile = path.join(workspace, "gh-calls.jsonl");
+  writeJson(ghStateFile, { prs: { "acme/widget#1": { state: "open", merged: false, headRefOid: "abc123", issueComments: Array.from({ length: 201 }, (_, i) => ({ id: i + 1, user: { login: "outsider" }, body: "x".repeat(12000) })) } } });
+  const binary = path.join(workspace, "bin", "codex");
+  writeFileSync(binary, `#!/usr/bin/env node
+const readline = require("readline");
+if (process.argv[2] !== "app-server") process.exit(99);
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (!request.id) return;
+  const result = request.id === 2 ? { rateLimitsByLimitId: { codex: { primary: { usedPercent: 20, windowDurationMins: 10080 } } } } : {};
+  console.log(JSON.stringify({id: request.id, result}));
+});
+`);
+  chmodSync(binary, 0o755);
+  const result = runTsxScript(workspace,
+    [`import { spawnReviewSummary } from ${JSON.stringify(REVIEW_RUNNER_MODULE_URL)};`,
+     `import { readReviewSummaryMap } from ${JSON.stringify(REVIEW_STORE_MODULE_URL)};`],
+    `const errors = [];
+     for (let i = 0; i < 2; i++) {
+       try { await spawnReviewSummary(${JSON.stringify(sampleRequest())}, {runtime: "claude"}); }
+       catch (error) { errors.push(error.message); }
+     }
+     console.log(JSON.stringify({errors, reviews: readReviewSummaryMap()}));`,
+    { ...prependBinToPath(workspace), FAKE_GH_STATE_FILE: ghStateFile, FAKE_GH_CALLS_FILE: ghCallsFile });
+  assert.equal(result.errors.length, 2);
+  assert.ok(result.errors.every((message: string) => /weekly Codex usage limit has been exceeded/.test(message)), JSON.stringify(result));
+  assert.deepEqual(result.reviews, {});
+  const state = JSON.parse(readFileSync(ghStateFile, "utf8"));
+  assert.equal(state.prs["acme/widget#1"].issueComments.length, 202);
+  const calls = readFileSync(ghCallsFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(calls.filter((call) => call.some((arg: string) => arg.includes("per_page=100"))).length, 3);
+  assert.doesNotMatch(state.prs["acme/widget#1"].issueComments[201].body, /whitelist|author|20%/i);
+  runTsxScript(workspace,
+    [`import { postReviewQuotaRefusal } from ${JSON.stringify(GITHUB_MODULE_URL)};`],
+    `await postReviewQuotaRefusal(${JSON.stringify(sampleRequest().pr_url)});
+     await postReviewQuotaRefusal(${JSON.stringify(sampleRequest().pr_url)});
+     console.log(JSON.stringify({ok: true}));`,
+    { ...prependBinToPath(workspace), FAKE_GH_STATE_FILE: ghStateFile, FAKE_GH_CALLS_FILE: ghCallsFile });
+  const recoveredCalls = readFileSync(ghCallsFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(recoveredCalls.filter((call) => call.some((arg: string) => arg.includes("per_page=100"))).length, 6);
+  assert.equal(JSON.parse(readFileSync(ghStateFile, "utf8")).prs["acme/widget#1"].issueComments.length, 202);
+});

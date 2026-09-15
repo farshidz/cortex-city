@@ -193,6 +193,32 @@ test("config route reads and updates Cortex config", () => {
   );
 });
 
+test("config route validates and normalizes the review quota settings", () => {
+  runRouteAssertions(withCortexState(`
+    const route = await loadRoute("./src/app/api/config/route.ts");
+    const put = async (body) => json(await route.PUT(request("http://localhost/api/config", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    })));
+    const defaults = await json(await route.GET());
+    assert.deepEqual(defaults.body.review_author_whitelist, []);
+    assert.equal(defaults.body.review_weekly_usage_limit_percent, 20);
+    const normalized = await put({ review_author_whitelist: [" Octocat ", "OCTOCAT", "", "another"], review_weekly_usage_limit_percent: 0 });
+    assert.deepEqual(normalized.body.review_author_whitelist, ["octocat", "another"]);
+    assert.equal(normalized.body.review_weekly_usage_limit_percent, 0);
+    for (const value of [101, -1, 20.5, "20", {}]) {
+      assert.equal((await put({ review_weekly_usage_limit_percent: value })).status, 400);
+    }
+    for (const value of ["octocat", [1], {}]) {
+      assert.equal((await put({ review_author_whitelist: value })).status, 400);
+    }
+    assert.equal((await put({ review_weekly_usage_limit_percent: 100 })).body.review_weekly_usage_limit_percent, 100);
+    await put({ review_weekly_usage_limit_percent: null, review_author_whitelist: null });
+    const reset = await json(await route.GET());
+    assert.deepEqual(reset.body.review_author_whitelist, []);
+    assert.equal(reset.body.review_weekly_usage_limit_percent, 20);
+  `));
+});
+
 test("config route enforces the review debounce bounds", () => {
   runRouteAssertions(
     withCortexState(`
@@ -2220,6 +2246,24 @@ test("review summarize route validates cached review state", () => {
       );
     `)
   );
+});
+
+test("review summarize route returns a quota deferral as JSON", () => {
+  runRouteAssertions(withReviewState(`
+    const configPath = path.join(cortexDir, "config.json");
+    writeJson(configPath, { ...readJson(configPath), review_author_whitelist: ["trusted"] });
+    const reviewsPath = path.join(cortexDir, "reviews.json");
+    const reviews = readJson(reviewsPath);
+    reviews[prUrl].author = "";
+    writeJson(reviewsPath, reviews);
+    const route = await loadRoute("./src/app/api/reviews/summarize/route.ts");
+    const response = await json(await route.POST(request("http://localhost/api/reviews/summarize", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pr_url: prUrl }),
+    })));
+    assert.equal(response.status, 429);
+    assert.match(response.body.error, /PR author is unavailable/);
+    assert.equal(readJson(reviewsPath)[prUrl].current_run_pid, undefined);
+  `));
 });
 
 test("review summarize route launches Codex summaries with overrides", () => {

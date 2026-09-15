@@ -394,6 +394,15 @@ if (args[0] === "api") {
     process.exit(0);
   }
 
+  const quotaPage = args[1]?.match(/^repos\\/([^/]+)\\/([^/]+)\\/issues\\/(\\d+)\\/comments\\?per_page=100&page=(\\d+)$/);
+  if (quotaPage && args[2] === "--jq") {
+    const [, owner, repo, number, page] = quotaPage;
+    const rows = (getPr(state, owner, repo, number).issueComments || []).slice((Number(page) - 1) * 100, Number(page) * 100);
+    const values = [...args[3].matchAll(/"(?:[^"\\\\]|\\\\.)*"/g)].map((match) => JSON.parse(match[0]));
+    output({ count: rows.length, found: rows.some((comment) => comment.user?.login === values[0] && comment.body === values[1]) });
+    process.exit(0);
+  }
+
   const conversationPage = args[1]?.match(/^repos\\/([^/]+)\\/([^/]+)\\/(pulls|issues)\\/(\\d+)\\/(reviews|comments)\\?per_page=10&page=(\\d+)$/);
   if (conversationPage) {
     const [, owner, repo, scope, number, resource, page] = conversationPage;
@@ -479,8 +488,9 @@ if (args[0] === "api") {
     });
     process.exit(0);
   }
+  const { issueComments, comments, reviews, ...prDetails } = pr;
   output({
-    ...pr,
+    ...prDetails,
     state: pr.state || "open",
     merged: Boolean(pr.merged),
     head: {
