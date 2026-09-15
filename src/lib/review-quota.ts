@@ -50,24 +50,25 @@ export async function enforceReviewQuota(
   request: Pick<ReviewRequest, "author" | "pr_url">,
   deps = { readQuota, getPRUserLogin, postReviewQuotaRefusal }
 ): Promise<void> {
+  const threshold = config.review_weekly_usage_limit_percent;
+  if (threshold == null) return;
+  if (!Number.isInteger(threshold) || threshold < 0 || threshold > 100) {
+    throw new ReviewQuotaDeferredError("Review deferred: weekly Codex usage limit must be an integer between 0 and 100.");
+  }
   const whitelist = (config.review_author_whitelist ?? [])
     .map((login) => login.trim().toLowerCase())
     .filter(Boolean);
-  if (!whitelist.length) return;
-  const author = request.author.trim() || await deps.getPRUserLogin(request.pr_url);
-  if (!author) {
-    throw new ReviewQuotaDeferredError("Review deferred: PR author is unavailable.");
+  if (whitelist.length) {
+    const author = request.author.trim() || await deps.getPRUserLogin(request.pr_url);
+    if (!author) {
+      throw new ReviewQuotaDeferredError("Review deferred: PR author is unavailable.");
+    }
+    if (whitelist.includes(author.toLowerCase())) return;
   }
-  if (whitelist.includes(author.toLowerCase())) return;
   const usage = codexWeeklyUsedPercent(await deps.readQuota());
   if (usage == null) {
     throw new ReviewQuotaDeferredError("Review deferred: weekly Codex usage is unavailable.");
   }
-  const configured = config.review_weekly_usage_limit_percent;
-  const threshold = typeof configured === "number" &&
-    Number.isFinite(configured) && configured >= 0 && configured <= 100
-    ? configured
-    : 20;
   if (usage < threshold) return;
   await deps.postReviewQuotaRefusal(request.pr_url);
   throw new ReviewQuotaDeferredError("Review refused: the weekly Codex usage limit has been exceeded.");

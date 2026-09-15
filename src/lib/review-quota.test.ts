@@ -19,21 +19,48 @@ test("weekly usage selects the main account bucket and either weekly slot", () =
   assert.equal(codexWeeklyUsedPercent({ ...quota({ primary: weekly(90) }), state: "error" }), undefined);
 });
 
-test("quota gate exempts empty lists and case-insensitive whitelisted authors without reading quota", async () => {
-  let reads = 0;
+test("an unset limit bypasses quota and author reads regardless of exemptions", async () => {
   const deps = {
-    readQuota: async () => { reads++; return quota({ primary: weekly(100) }); },
+    readQuota: async (): Promise<AgentQuotaStatus> => { throw new Error("Unexpected quota read"); },
+    getPRUserLogin: async (): Promise<string> => { throw new Error("Unexpected author lookup"); },
+    postReviewQuotaRefusal: async () => { assert.fail("Unexpected refusal"); },
+  };
+  for (const whitelist of [undefined, [], ["octocat"]]) {
+    await enforceReviewQuota({ review_author_whitelist: whitelist }, { author: "", pr_url: "url" }, deps);
+  }
+});
+
+test("configured limits exempt case-insensitive listed authors without reading quota", async () => {
+  const deps = {
+    readQuota: async (): Promise<AgentQuotaStatus> => { throw new Error("Unexpected quota read"); },
     getPRUserLogin: async () => "OCTOCAT",
     postReviewQuotaRefusal: async () => { assert.fail("Unexpected refusal"); },
   };
-  for (const whitelist of [undefined, [], ["  "], [" Octocat "]]) {
-    await enforceReviewQuota({ review_author_whitelist: whitelist }, { author: "octocat", pr_url: "url" }, deps);
-  }
-  await enforceReviewQuota({ review_author_whitelist: ["octocat"] }, { author: "", pr_url: "url" }, deps);
-  assert.equal(reads, 0);
+  const config = { review_author_whitelist: [" Octocat "], review_weekly_usage_limit_percent: 0 };
+  await enforceReviewQuota(config, { author: "octocat", pr_url: "url" }, deps);
+  await enforceReviewQuota(config, { author: "", pr_url: "url" }, deps);
 });
 
-test("quota gate refuses at inclusive default/configured boundaries and permits recovery", async () => {
+test("empty exemption lists apply the configured limit to everyone without author lookup", async () => {
+  let usage = 19;
+  let refusals = 0;
+  const deps = {
+    readQuota: async () => quota({ primary: weekly(usage) }),
+    getPRUserLogin: async (): Promise<string> => { throw new Error("Unexpected author lookup"); },
+    postReviewQuotaRefusal: async () => { refusals++; },
+  };
+  for (const whitelist of [undefined, [], ["  "]]) {
+    const config = { review_author_whitelist: whitelist, review_weekly_usage_limit_percent: 20 };
+    const request = { author: "", pr_url: "url" };
+    usage = 19;
+    await enforceReviewQuota(config, request, deps);
+    usage = 20;
+    await assert.rejects(enforceReviewQuota(config, request, deps), ReviewQuotaDeferredError);
+  }
+  assert.equal(refusals, 3);
+});
+
+test("quota gate refuses at inclusive configured boundaries and permits recovery", async () => {
   let usage = 19;
   const comments: string[] = [];
   const deps = {
@@ -41,7 +68,7 @@ test("quota gate refuses at inclusive default/configured boundaries and permits 
     getPRUserLogin: async () => "outsider",
     postReviewQuotaRefusal: async (url: string) => { comments.push(url); },
   };
-  const config = { review_author_whitelist: ["octocat"] };
+  const config = { review_author_whitelist: ["octocat"], review_weekly_usage_limit_percent: 20 };
   const request = { author: "outsider", pr_url: "url" };
   await enforceReviewQuota(config, request, deps);
   usage = 20;
@@ -56,7 +83,7 @@ test("quota gate refuses at inclusive default/configured boundaries and permits 
 });
 
 test("unknown usage or author defers without posting a false refusal; delivery failures propagate", async () => {
-  const config = { review_author_whitelist: ["octocat"] };
+  const config = { review_author_whitelist: ["octocat"], review_weekly_usage_limit_percent: 20 };
   const request = { author: "outsider", pr_url: "url" };
   const deps = {
     readQuota: async () => quota({}),
@@ -66,4 +93,10 @@ test("unknown usage or author defers without posting a false refusal; delivery f
   await assert.rejects(enforceReviewQuota(config, request, deps), /usage is unavailable/);
   await assert.rejects(enforceReviewQuota(config, { ...request, author: "" }, deps), /author is unavailable/);
   await assert.rejects(enforceReviewQuota(config, request, { ...deps, readQuota: async () => quota({ primary: weekly(20) }), postReviewQuotaRefusal: async () => { throw new Error("GitHub unavailable"); } }), /GitHub unavailable/);
+});
+
+test("invalid stored limits defer instead of substituting a hidden default", async () => {
+  for (const value of [NaN, Infinity, -1, 101, 20.5]) {
+    await assert.rejects(enforceReviewQuota({ review_weekly_usage_limit_percent: value }, { author: "", pr_url: "url" }), /must be an integer between 0 and 100/);
+  }
 });

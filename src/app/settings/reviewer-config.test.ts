@@ -212,3 +212,11 @@ test("config updates explicitly clear optional reviewer profile values", () => {
   assert.equal(update.review_effort, null);
   assert.equal(update.review_model, null);
 });
+
+
+test("config updates preserve zero limits and explicitly clear an unset quota limit", () => {
+  assert.equal(buildConfigUpdate(config({ review_weekly_usage_limit_percent: 0 })).review_weekly_usage_limit_percent, 0);
+  assert.equal(buildConfigUpdate(config({ review_weekly_usage_limit_percent: 20 })).review_weekly_usage_limit_percent, 20);
+  const edited = { ...config({ review_weekly_usage_limit_percent: 20 }), review_weekly_usage_limit_percent: undefined };
+  assert.equal(JSON.parse(JSON.stringify(buildConfigUpdate(edited))).review_weekly_usage_limit_percent, null);
+});

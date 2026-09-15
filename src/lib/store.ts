@@ -593,7 +593,6 @@ function getDefaultConfig(): OrchestratorConfig {
     default_agent_runner: "claude",
     review_learning_enabled: true,
     review_author_whitelist: [],
-    review_weekly_usage_limit_percent: 20,
     agents: {},
   };
 }
