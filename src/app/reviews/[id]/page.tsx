@@ -76,6 +76,7 @@ export default function ReviewDetailPage({
   const [runtimeOverride, setRuntimeOverride] = useState<AgentRuntime | "">("");
   const [effortOverride, setEffortOverride] = useState<TaskEffort | "">("");
   const [submitState, setSubmitState] = useState<SubmitState | null>(null);
+  const [regenerateError, setRegenerateError] = useState<string | null>(null);
 
   const defaultRuntime: AgentRuntime =
     config?.review_runtime || config?.default_agent_runner || "claude";
@@ -92,8 +93,9 @@ export default function ReviewDetailPage({
   async function regenerate() {
     if (!review) return;
     setRegenerating(true);
+    setRegenerateError(null);
     try {
-      await fetch("/api/reviews/summarize", {
+      const response = await fetch("/api/reviews/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -102,7 +104,13 @@ export default function ReviewDetailPage({
           effort: effortOverride || undefined,
         }),
       });
-      mutate();
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || "Failed to regenerate review");
+      }
+      await mutate();
+    } catch (error) {
+      setRegenerateError(error instanceof Error ? error.message : "Failed to regenerate review");
     } finally {
       setRegenerating(false);
     }
@@ -270,6 +278,11 @@ export default function ReviewDetailPage({
         {/* An unrepaired unsubmitted review blocks every reviewer comment on the
             PR while staying invisible to everyone but its author, so it is shown
             here rather than left to be inferred from comments that never appear. */}
+        {regenerateError && (
+          <div role="alert" className="border-t border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {regenerateError}
+          </div>
+        )}
         {review.pending_review_error && (
           <div className="border-t border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             <span className="font-medium">Unsubmitted review on this PR: </span>

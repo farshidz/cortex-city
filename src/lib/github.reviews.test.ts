@@ -1449,7 +1449,7 @@ test("quota refusal posts only when no identical comment belongs to the reviewer
       `import { postReviewQuotaRefusal } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
       {
         "api user --jq .login": { stdout: "me" },
-        [`api --paginate --slurp ${endpoint}`]: { stdout: JSON.stringify([[{ id: 1, user: { login: author }, body }]]) },
+        [`api ${endpoint}?per_page=100&page=1 --jq {count: length, found: any(.[]; .user.login == "me" and .body == ${JSON.stringify(body)})}`]: { stdout: JSON.stringify({ count: 1, found: author === "me" }) },
         "api repos/acme/widget/pulls/1": { stdout: JSON.stringify({ state: "open", merged: false, head: { sha: "abc" } }) },
         [`api --method POST ${endpoint} --raw-field body=${body}`]: { stdout: "{}" },
       },
@@ -1466,7 +1466,7 @@ test("quota refusal does not post when comment discovery fails", () => {
     `import { postReviewQuotaRefusal } from ${JSON.stringify(GITHUB_MODULE_URL)};`,
     {
       "api user --jq .login": { stdout: "me" },
-      "api --paginate --slurp repos/acme/widget/issues/1/comments": { exitCode: 1, stderr: "unavailable" },
+      [`api repos/acme/widget/issues/1/comments?per_page=100&page=1 --jq {count: length, found: any(.[]; .user.login == "me" and .body == ${JSON.stringify("**🤖[Cortex City Reviewer]** Review refused because the weekly Codex usage limit has been exceeded. Please try again after the weekly limit resets.")})}`]: { exitCode: 1, stderr: "unavailable" },
     },
     `try { await postReviewQuotaRefusal("https://github.com/acme/widget/pull/1"); } catch (error) { console.log(JSON.stringify(error.message)); }`,
     { recordCalls: true });

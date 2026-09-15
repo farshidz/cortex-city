@@ -1775,3 +1775,27 @@ test("settings keeps a rejected learnings draft in edit mode and shows the API e
   assert.equal(result.hasDraft, true);
   assert.equal(result.hasError, true);
 });
+
+test("manual review regeneration displays quota errors and clears them on retry", () => {
+  const output = runRenderScript(`
+    const message = "Review refused: the weekly Codex usage limit has been exceeded.";
+    const props = { params: Promise.resolve({ id: Buffer.from(review.pr_url).toString("base64url") }) };
+    globalThis.__STATE_UPDATES__ = [];
+    globalThis.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: message }) });
+    await renderPage("./src/app/reviews/[id]/page.tsx", props);
+    const regenerate = handlers.find((handler) => handler.fn.name === "regenerate").fn;
+    await regenerate();
+    const failedUpdates = [...globalThis.__STATE_UPDATES__];
+    const html = await renderPage("./src/app/reviews/[id]/page.tsx", props, ["", false, false, "", "", null, message]);
+    globalThis.__STATE_UPDATES__ = [];
+    globalThis.fetch = async () => ({ ok: true });
+    await regenerate();
+    console.log(JSON.stringify({ failedUpdates, retryUpdates: globalThis.__STATE_UPDATES__, visible: html.includes(message) && html.includes('role="alert"'), mutateCount: globalThis.__MUTATE_COUNT__ }));
+  `);
+  const result = JSON.parse(output[0]);
+  assert.equal(result.visible, true);
+  assert.deepEqual(result.failedUpdates.filter((update: { index: number }) => update.index === 3).map((update: { value: unknown }) => update.value), [true, false]);
+  assert.match(result.failedUpdates.find((update: { index: number; value: unknown }) => update.index === 7 && update.value)?.value, /weekly Codex usage limit/);
+  assert.deepEqual(result.retryUpdates.filter((update: { index: number }) => update.index === 7).map((update: { value: unknown }) => update.value), [null]);
+  assert.equal(result.mutateCount, 1);
+});
