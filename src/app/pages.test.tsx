@@ -989,7 +989,7 @@ test("settings page presents one unified reviewer configuration", () => {
       [false, reviewerConfig]
     );
     console.log(JSON.stringify({
-      reviewerTitleCount: (html.match(/>Reviewer<\\/div>/g) || []).length,
+      reviewerTitleCount: (html.match(/>Reviewer<\\/h2>/g) || []).length,
       hasRuntime: html.includes("Default Reviewer Runtime"),
       hasModel: html.includes("Default Reviewer Model"),
       hasEffort: html.includes("Default Reviewer Effort"),
@@ -1828,4 +1828,54 @@ test("settings clears a weekly limit without turning the blank input into zero",
   assert.match(result.field, /value=""/);
   assert.equal(result.requests[0].body.review_weekly_usage_limit_percent, null);
   assert.deepEqual(result.requests[0].body.review_author_whitelist, ["octocat"]);
+});
+
+test("settings groups prompts and learnings under reviewer and retains drafts across panels", () => {
+  const output = runRenderScript(`
+    const draft = {...config, review_prompt: "Unsaved reviewer instructions"};
+    const html = await renderPage("./src/app/settings/page.tsx", {}, [false, draft, true, false, "Unsaved lesson", "", "reviewer", "prompts"]);
+    const nav = html.match(/<nav[^>]*aria-label="Settings categories"[\\s\\S]*?<\\/nav>/)?.[0] || "";
+    const prompts = html.match(/<div[^>]*id="reviewer-prompts"[^>]*>/)?.[0] || "";
+    const general = html.match(/<div[^>]*id="reviewer-general"[^>]*>/)?.[0] || "";
+    const learnings = html.match(/<div[^>]*id="reviewer-learnings"[^>]*>/)?.[0] || "";
+    console.log(JSON.stringify({
+      categories: (nav.match(/<button/g) || []).length,
+      prompts, general, learnings,
+      draftPrompt: html.includes("Unsaved reviewer instructions"),
+      draftLearning: html.includes("Unsaved lesson"),
+      tabs: (html.match(/role="tab"/g) || []).length,
+    }));
+  `);
+  const result = JSON.parse(output[0]);
+  assert.equal(result.categories, 3);
+  assert.equal(result.tabs, 3);
+  assert.doesNotMatch(result.prompts, /hidden/);
+  assert.match(result.general, /hidden/);
+  assert.match(result.learnings, /hidden/);
+  assert.equal(result.draftPrompt, true);
+  assert.equal(result.draftLearning, true);
+});
+
+test("settings preserves the draft on a rejected save and adopts normalized values on retry", () => {
+  const output = runRenderScript(`
+    const draft = {...config, review_prompt: "My draft", review_model: " model-with-spaces "};
+    const normalized = {...draft, review_model: "model-with-spaces"};
+    await renderPage("./src/app/settings/page.tsx", {}, [false, draft]);
+    const save = handlers.find(handler => handler.fn.name === "saveConfig").fn;
+    globalThis.__STATE_UPDATES__ = [];
+    globalThis.fetch = async () => ({ok: false, status: 400, json: async () => ({error: "Invalid settings"})});
+    await save();
+    const failed = [...globalThis.__STATE_UPDATES__];
+    globalThis.__STATE_UPDATES__ = [];
+    globalThis.fetch = async () => ({ok: true, json: async () => normalized});
+    await save();
+    console.log(JSON.stringify({failed, succeeded: globalThis.__STATE_UPDATES__, normalized, mutations: globalThis.__MUTATE_COUNT__}));
+  `);
+  const result = JSON.parse(output[0]);
+  assert.equal(result.failed.some((update: {index: number}) => update.index === 2), false);
+  assert.equal(result.failed.findLast((update: {index: number}) => update.index === 10).value, "Invalid settings");
+  assert.equal(result.failed.findLast((update: {index: number}) => update.index === 1).value, false);
+  assert.deepEqual(result.succeeded.find((update: {index: number}) => update.index === 2).value, result.normalized);
+  assert.deepEqual(result.succeeded.find((update: {index: number}) => update.index === 11).value, result.normalized);
+  assert.equal(result.mutations, 1);
 });
