@@ -38,3 +38,23 @@ jobs:
         with:
           name: coverage-lcov
           path: coverage/**/lcov.info
+
+  browser:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: browser-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-results
+          path: test-results/

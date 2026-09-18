@@ -6,6 +6,7 @@
   margin-inline: auto;
 }
 .header {
+  flex-wrap: wrap;
   position: sticky;
   top: 0;
   z-index: 10;
@@ -240,7 +241,7 @@
     grid-row: auto;
   }
   .field > p {
-    grid-row: 2;
+    grid-row: auto;
   }
   .actions {
     gap: 8px;
@@ -283,4 +284,10 @@
 .settings input,
 .settings textarea {
   color: var(--foreground);
+}
+
+.saveError {
+  flex-basis: 100%;
+  color: var(--destructive);
+  font-size: 13px;
 }

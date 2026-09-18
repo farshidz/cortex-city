@@ -307,12 +307,12 @@ export default function SettingsPage() {
             {saving ? "Saving…" : "Save changes"}
           </Button>
         </div>
+        {saveError && (
+          <p role="alert" className={styles.saveError}>
+            {saveError}
+          </p>
+        )}
       </header>
-      {saveError && (
-        <p role="alert" className="mb-4 text-sm text-destructive">
-          {saveError}
-        </p>
-      )}
       <div className={styles.workspace}>
         <nav aria-label="Settings categories" className={styles.categories}>
           <p className={styles.eyebrow}>Configuration</p>
