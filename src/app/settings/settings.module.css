@@ -1,11 +1,13 @@
 .settings {
   color: var(--foreground);
   max-width: 1200px;
+  height: calc(100dvh - 48px);
+  overflow-y: auto;
   margin-inline: auto;
 }
 .header {
   position: sticky;
-  top: -24px;
+  top: 0;
   z-index: 10;
   display: flex;
   justify-content: space-between;
