@@ -156,7 +156,13 @@ export default function SettingsPage() {
             }
           >
             <SelectTrigger id={`tier-${tier}-runtime`}>
-              <SelectValue />
+              <SelectValue>
+                {tierConfig.runtime
+                  ? tierConfig.runtime === "codex"
+                    ? "Codex"
+                    : "Claude Code"
+                  : `Reviewer default (${reviewerRuntime === "codex" ? "Codex" : "Claude Code"})`}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={UNSET_VALUE}>
@@ -188,7 +194,11 @@ export default function SettingsPage() {
             }
           >
             <SelectTrigger id={`tier-${tier}-effort`}>
-              <SelectValue />
+              <SelectValue>
+                {tierConfig.effort
+                  ? formatEffortLabel(tierConfig.effort)
+                  : "Reviewer default"}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={UNSET_VALUE}>Reviewer default</SelectItem>
@@ -382,7 +392,11 @@ export default function SettingsPage() {
                 onValueChange={(v) => v && handleRunnerChange(v)}
               >
                 <SelectTrigger id="agent-0">
-                  <SelectValue />
+                  <SelectValue>
+                    {form.default_agent_runner === "codex"
+                      ? "Codex"
+                      : "Claude Code"}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="claude">Claude Code</SelectItem>
@@ -403,7 +417,11 @@ export default function SettingsPage() {
                 }
               >
                 <SelectTrigger id="agent-1">
-                  <SelectValue />
+                  <SelectValue>
+                    {permissionOptions.find(
+                      (option) => option.value === form.default_permission_mode,
+                    )?.label || form.default_permission_mode}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {permissionOptions.map((option) => (
@@ -442,7 +460,9 @@ export default function SettingsPage() {
                 }
               >
                 <SelectTrigger id="claude-1">
-                  <SelectValue />
+                  <SelectValue>
+                    {formatEffortLabel(form.default_claude_effort)}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={UNSET_VALUE}>CLI default</SelectItem>
@@ -482,7 +502,9 @@ export default function SettingsPage() {
                 }
               >
                 <SelectTrigger id="codex-1">
-                  <SelectValue />
+                  <SelectValue>
+                    {formatEffortLabel(form.default_codex_effort)}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={UNSET_VALUE}>CLI default</SelectItem>
@@ -518,7 +540,12 @@ export default function SettingsPage() {
                   onValueChange={(v) => v && handleReviewRunnerChange(v)}
                 >
                   <SelectTrigger id="reviewer-1">
-                    <SelectValue />
+                    <SelectValue>
+                      {(form.review_runtime || form.default_agent_runner) ===
+                      "codex"
+                        ? "Codex"
+                        : "Claude Code"}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="claude">Claude Code</SelectItem>
@@ -562,7 +589,9 @@ export default function SettingsPage() {
                   }
                 >
                   <SelectTrigger id="reviewer-3">
-                    <SelectValue />
+                    <SelectValue>
+                      {formatEffortLabel(form.review_effort)}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value={UNSET_VALUE}>CLI default</SelectItem>
