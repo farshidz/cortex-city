@@ -2891,8 +2891,22 @@ async function runReviewPhases(
       } catch (error) {
         deps.logger.error(
           `[worker] Failed to spawn review retro for ${next.pr_url}:`,
-          error
+          error instanceof Error ? error.message : String(error)
         );
+        await mutateStoredReview(deps, next.pr_url, (current) => {
+          if (
+            !current ||
+            current.final_at !== next.final_at ||
+            current.head_sha !== next.head_sha ||
+            current.retro_status !== "pending" ||
+            current.retro_run_pid != null
+          ) return undefined;
+          return {
+            ...current,
+            retro_status: "error",
+            retro_error: error instanceof Error ? error.message : String(error),
+          };
+        });
       }
     }
   }

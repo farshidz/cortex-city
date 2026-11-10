@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { rm } from "node:fs/promises";
+import { chmod, lstat, readdir, rm, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { AgentRuntime } from "./types";
 
@@ -214,6 +214,21 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
+// Runtime tools can leave read-only input trees. Restore directory access only
+// inside the owned workspace; lstat keeps symlinks from leading outside it.
+async function prepareDirectoryForRemoval(directory: string): Promise<void> {
+  const stat = await lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+  if ((stat.mode & 0o700) !== 0o700) {
+    await chmod(directory, stat.mode | 0o700);
+  }
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      await prepareDirectoryForRemoval(path.join(directory, entry.name));
+    }
+  }
+}
+
 /** Remove a terminal review's workspace only when Cortex ownership is proven. */
 export async function removeFinalReviewWorkspace(
   reviewKey: string,
@@ -229,7 +244,21 @@ export async function removeFinalReviewWorkspace(
     const marker = readMarker(path.join(workspacePath, REVIEW_WORKSPACE_MARKER));
     if (!marker || marker.review_key !== reviewKey) return false;
     if (marker.runtime_pid && isProcessRunning(marker.runtime_pid)) return false;
-    await rm(workspacePath, { recursive: true, force: true });
+    await prepareDirectoryForRemoval(workspacePath);
+    // Keep ownership evidence until all potentially failing recursive removals
+    // finish, so a partial cleanup can be retried on the next poll.
+    for (const name of await readdir(workspacePath)) {
+      if (name === REVIEW_WORKSPACE_MARKER) continue;
+      await rm(path.join(workspacePath, name), { recursive: true, force: true });
+    }
+    const markerPath = path.join(workspacePath, REVIEW_WORKSPACE_MARKER);
+    await unlink(markerPath);
+    try {
+      await rmdir(workspacePath);
+    } catch (error) {
+      writeMarker(markerPath, marker);
+      throw error;
+    }
     return true;
   } catch (error) {
     warnCleanupFailure(workspacePath, error);
