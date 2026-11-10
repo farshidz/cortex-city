@@ -375,7 +375,7 @@ export function StorageCard({
               id="routine-max-run-mb"
               type="number"
               min={1}
-              max={10000}
+              max={1000}
               inputMode="numeric"
               value={maxRunMb}
               placeholder={String(DEFAULT_MAX_RUN_MB)}

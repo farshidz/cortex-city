@@ -17,9 +17,12 @@ import {
 import {
   MAX_SLACK_ATTEMPTS,
   defaultRoutineRunnerDeps,
+  WORKSPACE_MARKER,
   deliverPendingSlackMessages,
   finalizeInterruptedRun,
-  finalizeRoutineRun,
+  finalizeRoutineRunSafely,
+  isRoutineProcess,
+  killProcessTree,
   routineWorkspaceRoot,
   startRoutineRun,
   type RoutineRunnerDeps,
@@ -66,26 +69,32 @@ async function reconcileOrphanedRuns(
     for (const run of listRuns(routine.id)) {
       if (!isActiveStatus(run) || active.has(run.id)) continue;
       deps.log(`[routines] Finalizing interrupted run ${run.id} of ${routine.id}`);
-      if (run.pid) {
-        try {
-          process.kill(run.pid, "SIGTERM");
-        } catch {
-          // Already gone.
-        }
-      }
+      // Only signal the saved PID while it is still this routine's agent; after
+      // a reboot the number may belong to an unrelated process.
+      if (run.pid && isRoutineProcess(run.pid)) killProcessTree(run.pid, "SIGTERM");
       await finalizeInterruptedRun(routine.id, run, deps.runner);
     }
   }
 }
 
-async function retrySlackDeliveries(routines: Routine[], deps: RoutineSchedulerDeps): Promise<void> {
+async function retrySlackDeliveries(
+  routines: Routine[],
+  active: Map<string, ActiveRoutineRun>,
+  deps: RoutineSchedulerDeps
+): Promise<void> {
   for (const routine of routines) {
     for (const run of listRuns(routine.id)) {
-      if (isActiveStatus(run)) continue;
+      // A run still in `active` is delivering its own messages right now.
+      if (isActiveStatus(run) || active.has(run.id)) continue;
       const retry = run.slack_messages.some(
         (message) => message.status === "failed" && message.attempts < MAX_SLACK_ATTEMPTS
       ) || run.slack_messages.some((message) => message.status === "pending");
-      if (retry) await deliverPendingSlackMessages(routine, run, deps.runner);
+      if (!retry) continue;
+      try {
+        await deliverPendingSlackMessages(routine, run, deps.runner);
+      } catch (error) {
+        deps.log(`[routines] Slack retry for run ${run.id} failed: ${(error as Error).message}`);
+      }
     }
   }
 }
@@ -101,15 +110,18 @@ export async function pruneRoutineRuns(routines: Routine[], storageLimitBytes: n
     const keep = routine.keep_runs ?? DEFAULT_ROUTINE_KEEP_RUNS;
     if (listRuns(routine.id).length <= keep) continue;
     const doomed = await mutateRuns(routine.id, (runs) => {
+      // Kept and active runs don't count towards "keep last N"; skipped runs
+      // (which have no files) are trimmed to the same number separately.
       const sorted = [...runs].sort((a, b) => b.number - a.number);
       const unkeptFinished = sorted.filter((run) => !run.kept && !isActiveStatus(run));
-      const keptOrActive = sorted.length - unkeptFinished.length;
-      const allowance = Math.max(0, keep - keptOrActive);
-      const toRemove = new Set(unkeptFinished.slice(allowance).map((run) => run.id));
+      const toRemove = new Set([
+        ...unkeptFinished.filter((run) => run.status !== "skipped").slice(keep),
+        ...unkeptFinished.filter((run) => run.status === "skipped").slice(keep),
+      ].map((run) => run.id));
       return { runs: runs.filter((run) => !toRemove.has(run.id)), result: [...toRemove] };
     });
     for (const runId of doomed) {
-      rmSync(runDataDir(routine.id, runId), { recursive: true, force: true });
+      removeQuietly(runDataDir(routine.id, runId));
       removed += 1;
     }
   }
@@ -127,7 +139,7 @@ export async function pruneRoutineRuns(routines: Routine[], storageLimitBytes: n
     if (total <= storageLimitBytes) break;
     const dir = runDataDir(routine.id, run.id);
     const size = directorySize(dir);
-    rmSync(dir, { recursive: true, force: true });
+    removeQuietly(dir);
     await mutateRuns(routine.id, (runs) => ({ runs: runs.filter((entry) => entry.id !== run.id), result: undefined }));
     total -= size;
     removed += 1;
@@ -135,14 +147,28 @@ export async function pruneRoutineRuns(routines: Routine[], storageLimitBytes: n
   return removed;
 }
 
-/** Deletes run workspaces left behind by crashes. */
+function removeQuietly(target: string): void {
+  try {
+    rmSync(target, { recursive: true, force: true });
+  } catch (error) {
+    console.error(`[routines] Could not remove ${target}:`, error);
+  }
+}
+
+/**
+ * Deletes run workspaces left behind by crashes. Only directories carrying
+ * the routine workspace marker are touched, so a custom workspace root that
+ * holds other data is safe.
+ */
 export function sweepRoutineWorkspaces(active: Map<string, ActiveRoutineRun>): number {
   const root = routineWorkspaceRoot();
   if (!existsSync(root)) return 0;
   let removed = 0;
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory() || active.has(entry.name)) continue;
-    rmSync(path.join(root, entry.name), { recursive: true, force: true });
+    const dir = path.join(root, entry.name);
+    if (!existsSync(path.join(dir, WORKSPACE_MARKER))) continue;
+    removeQuietly(dir);
     removed += 1;
   }
   return removed;
@@ -175,13 +201,24 @@ export async function pollRoutines(
   const config = readConfig();
   let routines = listRoutines();
 
-  await reconcileOrphanedRuns(routines, active, deps);
-  await retrySlackDeliveries(routines, deps);
-  await pruneRoutineRuns(
-    routines,
-    (config.routine_storage_limit_mb ?? DEFAULT_ROUTINE_STORAGE_LIMIT_MB) * 1024 * 1024
+  // Each housekeeping phase is isolated: one failure must not stop runs
+  // from being launched.
+  const phase = async (name: string, fn: () => unknown) => {
+    try {
+      await fn();
+    } catch (error) {
+      deps.log(`[routines] ${name} failed: ${(error as Error).message}`);
+    }
+  };
+  await phase("Reconciling interrupted runs", () => reconcileOrphanedRuns(routines, active, deps));
+  await phase("Retrying Slack deliveries", () => retrySlackDeliveries(routines, active, deps));
+  await phase("Pruning old runs", () =>
+    pruneRoutineRuns(
+      routines,
+      (config.routine_storage_limit_mb ?? DEFAULT_ROUTINE_STORAGE_LIMIT_MB) * 1024 * 1024
+    )
   );
-  sweepRoutineWorkspaces(active);
+  await phase("Sweeping workspaces", () => sweepRoutineWorkspaces(active));
 
   // Enabled routines always carry their next occurrence.
   for (const routine of routines) {
@@ -216,7 +253,7 @@ export async function pollRoutines(
     try {
       deps.checkDisk();
     } catch (error) {
-      await finalizeRoutineRun(routine, run, { status: "failed", error: (error as Error).message }, deps.runner);
+      await finalizeRoutineRunSafely(routine, run, { status: "failed", error: (error as Error).message }, deps.runner);
       continue;
     }
     deps.log(`[routines] Starting run #${run.number} of "${routine.name}" (${trigger})`);
@@ -231,19 +268,12 @@ export async function pollRoutines(
     } catch (error) {
       active.delete(run.id);
       deps.log(`[routines] Failed to start run ${run.id}: ${(error as Error).message}`);
-      await finalizeRoutineRun(routine, run, { status: "failed", error: (error as Error).message }, deps.runner);
+      await finalizeRoutineRunSafely(routine, run, { status: "failed", error: (error as Error).message }, deps.runner);
     }
   }
 }
 
 /** Stops every active run (worker shutdown). */
 export function stopActiveRoutineRuns(active: Map<string, ActiveRoutineRun>): void {
-  for (const entry of active.values()) {
-    if (!entry.pid) continue;
-    try {
-      process.kill(entry.pid, "SIGTERM");
-    } catch {
-      // Already gone.
-    }
-  }
+  for (const entry of active.values()) killProcessTree(entry.pid, "SIGTERM");
 }

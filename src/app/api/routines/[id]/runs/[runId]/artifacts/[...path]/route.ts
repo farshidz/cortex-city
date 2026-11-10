@@ -12,19 +12,21 @@ export async function GET(
   const { id, runId, path: segments } = await params;
   const found = findRun(id, runId);
   if (!found) return notFound("Run not found");
-  const relative = segments.map((segment) => decodeURIComponent(segment)).join("/");
+  // Next.js has already decoded each catch-all segment.
+  const relative = segments.join("/");
   const artifact = found.run.artifacts.find((entry) => entry.path === relative);
   const file = artifact ? resolveStoredArtifact(runArtifactsDir(id, runId), relative) : undefined;
   if (!artifact || !file) return notFound("Artifact not found");
   const download = request.nextUrl.searchParams.get("download") === "1";
-  const filename = path.basename(relative).replace(/["\r\n]/g, "_");
+  const filename = path.basename(relative);
+  const asciiName = filename.replace(/[^\x20-\x7e]|["\\]/g, "_");
   return new NextResponse(new Uint8Array(readFileSync(file)), {
     headers: {
       "Content-Type": artifact.content_type,
       "Content-Security-Policy": ARTIFACT_CSP,
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "private, no-store",
-      "Content-Disposition": `${download ? "attachment" : "inline"}; filename="${filename}"`,
+      "Content-Disposition": `${download ? "attachment" : "inline"}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
     },
   });
 }

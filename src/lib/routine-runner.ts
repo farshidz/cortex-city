@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "child_process";
-import { createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync, type WriteStream } from "fs";
+import { createWriteStream, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync, type WriteStream } from "fs";
 import path from "path";
 import { buildModelArgs, buildReviewPermissionArgs, __testUtils as runtimeArgsUtils } from "./runtime-args";
 import { getDefaultEffortForRuntime, getDefaultModelForRuntime } from "./runtime-config";
@@ -17,7 +17,14 @@ import {
   updateRun,
 } from "./routine-store";
 import { buildRoutinePrompt, parseRoutineReport, ROUTINE_REPORT_SCHEMA, type ParsedRoutineReport } from "./routine-prompt";
-import { captureArtifacts, createRedactor, resolveStoredArtifact, type Redactor } from "./routine-artifacts";
+import {
+  captureArtifacts,
+  createRedactor,
+  identityRedactor,
+  normalizeArtifactPath,
+  resolveStoredArtifact,
+  type Redactor,
+} from "./routine-artifacts";
 import { getSlackToken, sendSlackMessage, type FetchLike } from "./slack";
 import type { AgentRuntime, Routine, RoutineRun, RoutineSlackMessage } from "./types";
 
@@ -28,6 +35,38 @@ const KILL_GRACE_MS = 10_000;
 export function routineWorkspaceRoot(): string {
   const configured = process.env.CORTEX_ROUTINE_WORKSPACE_ROOT?.trim();
   return configured ? path.resolve(configured) : path.join(/* turbopackIgnore: true */ process.cwd(), "tmp", "routines");
+}
+
+export const WORKSPACE_MARKER = ".cortex-routine-workspace";
+
+/** Signals a run's whole process group, falling back to the process. */
+export function killProcessTree(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (!pid) return;
+  try {
+    process.kill(-pid, signal);
+    return;
+  } catch {
+    // Not a group leader (or already gone); try the process itself.
+  }
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Already gone.
+  }
+}
+
+/**
+ * True when `pid` is still a routine agent: its working directory is inside
+ * the routine workspace root. Guards against signalling a recycled PID.
+ */
+export function isRoutineProcess(pid: number, root = routineWorkspaceRoot()): boolean {
+  try {
+    const cwd = realpathSync(`/proc/${pid}/cwd`);
+    const resolvedRoot = existsSync(root) ? realpathSync(root) : root;
+    return cwd === resolvedRoot || cwd.startsWith(`${resolvedRoot}${path.sep}`);
+  } catch {
+    return false;
+  }
 }
 
 export function runWorkspaceDir(runId: string): string {
@@ -163,12 +202,19 @@ function asRecord(value: unknown): JsonRecord | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : undefined;
 }
 
-function truncateForTranscript(text: string, max = 4000): string {
+function truncateRedacted(text: string, max = 4000): string {
   return text.length > max ? `${text.slice(0, max)}\n… (${text.length - max} more characters)` : text;
 }
 
 /** Updates `state` from one event and returns transcript text for it, if any. */
-export function handleStreamEvent(runtime: AgentRuntime, event: JsonRecord, state: StreamState): string | undefined {
+export function handleStreamEvent(
+  runtime: AgentRuntime,
+  event: JsonRecord,
+  state: StreamState,
+  redact: (text: string) => string = (text) => text
+): string | undefined {
+  // Redact before truncating, so a cut never leaves part of a secret behind.
+  const truncateForTranscript = (text: string, max?: number) => truncateRedacted(redact(text), max);
   if (runtime === "codex") {
     if (event.type === "thread.started" && typeof event.thread_id === "string") {
       state.sessionId = event.thread_id;
@@ -182,7 +228,7 @@ export function handleStreamEvent(runtime: AgentRuntime, event: JsonRecord, stat
     }
     if (event.type === "item.completed" && item?.type === "command_execution") {
       const output = typeof item.aggregated_output === "string" ? item.aggregated_output.trim() : "";
-      return `CODEX (command)\n$ ${String(item.command ?? "")}${output ? `\n${truncateForTranscript(output)}` : ""}\n\n`;
+      return `CODEX (command)\n$ ${redact(String(item.command ?? ""))}${output ? `\n${truncateForTranscript(output)}` : ""}\n\n`;
     }
     const usage = asRecord(event.usage);
     if (event.type === "turn.completed" && usage) {
@@ -194,7 +240,7 @@ export function handleStreamEvent(runtime: AgentRuntime, event: JsonRecord, stat
       return undefined;
     }
     if (event.type === "error" && typeof event.message === "string") {
-      return `ERROR\n${event.message}\n\n`;
+      return `ERROR\n${redact(event.message)}\n\n`;
     }
     return undefined;
   }
@@ -209,7 +255,7 @@ export function handleStreamEvent(runtime: AgentRuntime, event: JsonRecord, stat
     const parts: string[] = [];
     for (const raw of content) {
       const block = asRecord(raw);
-      if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
+      if (block?.type === "text" && typeof block.text === "string") parts.push(redact(block.text));
       if (block?.type === "tool_use") {
         parts.push(`[tool] ${String(block.name ?? "")} ${truncateForTranscript(JSON.stringify(block.input ?? {}), 1500)}`);
       }
@@ -321,13 +367,24 @@ export async function finalizeRoutineRun(
   run: RoutineRun,
   input: FinalizeInput,
   deps: RoutineRunnerDeps = defaultRoutineRunnerDeps,
-  redact: Redactor = createRedactor(resolveRoutineSecrets(routine).secrets)
+  redactor?: Redactor
 ): Promise<RoutineRun | undefined> {
   const workspace = runWorkspaceDir(run.id);
   const outputDir = path.join(workspace, "out");
   const report = input.report;
   const maxBytes = (routine.max_run_mb ?? DEFAULT_ROUTINE_MAX_RUN_MB) * 1024 * 1024;
-  const capture = existsSync(outputDir)
+  let redact = redactor;
+  let secretsError: string | undefined;
+  if (!redact) {
+    try {
+      redact = createRedactor(resolveRoutineSecrets(routine).secrets);
+    } catch (error) {
+      // Without the secrets we can't redact, so no output is kept.
+      redact = identityRedactor;
+      secretsError = `Could not read this routine's secrets (${(error as Error).message}); its files were not kept.`;
+    }
+  }
+  const capture = !secretsError && existsSync(outputDir)
     ? captureArtifacts(outputDir, runArtifactsDir(routine.id, run.id), report?.artifacts ?? [], {
         maxBytes,
         redact,
@@ -342,6 +399,7 @@ export async function finalizeRoutineRun(
     else status = "failed";
   }
   let error = input.error ? redact(input.error) : undefined;
+  if (secretsError) error = error ? `${error}\n${secretsError}` : secretsError;
   if (!error && status === "failed" && !report) error = "The agent finished without a valid report.";
   if (capture.truncated) {
     const note = `Some files were not kept because the run went over its ${routine.max_run_mb ?? DEFAULT_ROUTINE_MAX_RUN_MB} MB limit: ${capture.skipped.slice(0, 10).join(", ")}`;
@@ -354,7 +412,9 @@ export async function finalizeRoutineRun(
     const attachments: string[] = [];
     const missing: string[] = [];
     for (const reported of request.attachments) {
-      const normalized = reported.replace(/^\.?\/+/, "").replace(/^out\//, "");
+      const normalized =
+        normalizeArtifactPath(outputDir, reported) ??
+        reported.replace(/^\.?\/+/, "").replace(/^out\//, "");
       if (stored.has(normalized)) attachments.push(normalized);
       else missing.push(reported);
     }
@@ -401,6 +461,39 @@ export async function finalizeRoutineRun(
   rmSync(workspace, { recursive: true, force: true });
   if (finished) return deliverPendingSlackMessages(routine, finished, deps);
   return finished;
+}
+
+/**
+ * finalizeRoutineRun that never throws: if capture or recording fails, the
+ * run is still marked failed so it can't stay queued or running forever.
+ */
+export async function finalizeRoutineRunSafely(
+  routine: Routine,
+  run: RoutineRun,
+  input: FinalizeInput,
+  deps: RoutineRunnerDeps = defaultRoutineRunnerDeps,
+  redactor?: Redactor
+): Promise<RoutineRun | undefined> {
+  try {
+    return await finalizeRoutineRun(routine, run, input, deps, redactor);
+  } catch (error) {
+    console.error(`[routines] Failed to finalize run ${run.id}:`, error);
+    try {
+      rmSync(runWorkspaceDir(run.id), { recursive: true, force: true });
+    } catch {
+      // Swept on a later poll.
+    }
+    try {
+      return await updateRun(routine.id, run.id, {
+        status: input.status === "timeout" ? "timeout" : "failed",
+        finished_at: deps.now().toISOString(),
+        error: `${input.error ? `${input.error}\n` : ""}Could not save this run's results: ${(error as Error).message}`,
+        pid: undefined,
+      });
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 /** Sends pending (or previously failed) messages; safe to call repeatedly. */
@@ -487,14 +580,27 @@ export async function startRoutineRun(
   mkdirSync(outputDir, { recursive: true });
   mkdirSync(path.join(workspace, "tmp"), { recursive: true });
   mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(workspace, WORKSPACE_MARKER), `${run.id}\n`);
 
-  const resolved = resolveRoutineSecrets(routine);
+  let resolved: ResolvedRoutineSecrets;
+  try {
+    resolved = resolveRoutineSecrets(routine);
+  } catch (error) {
+    const completion = finalizeRoutineRunSafely(
+      routine,
+      run,
+      { status: "failed", error: `Could not read this routine's secrets: ${(error as Error).message}` },
+      deps,
+      identityRedactor
+    );
+    return { completion };
+  }
   const redact = createRedactor(resolved.secrets);
   const transcript = openTranscript(routine, run);
 
   if (resolved.missing.length > 0) {
     transcript.end();
-    const completion = finalizeRoutineRun(
+    const completion = finalizeRoutineRunSafely(
       routine,
       { ...run, secrets_used: resolved.used },
       {
@@ -545,8 +651,8 @@ export async function startRoutineRun(
     if (!trimmed) return;
     if (trimmed.startsWith("{")) {
       try {
-        const text = handleStreamEvent(runtime, JSON.parse(trimmed) as JsonRecord, state);
-        if (text) transcript.write(redact(text));
+        const text = handleStreamEvent(runtime, JSON.parse(trimmed) as JsonRecord, state, redact);
+        if (text) transcript.write(text);
         return;
       } catch {
         // Not JSON after all; keep it as plain output.
@@ -561,10 +667,12 @@ export async function startRoutineRun(
       cwd: workspace,
       env,
       stdio: ["pipe", "pipe", "pipe"],
+      // Its own process group, so stopping a run also stops what it started.
+      detached: true,
     });
   } catch (error) {
     transcript.end();
-    const completionPromise = finalizeRoutineRun(
+    const completionPromise = finalizeRoutineRunSafely(
       routine,
       run,
       { status: "failed", error: `Could not start ${runtime}: ${(error as Error).message}` },
@@ -580,8 +688,8 @@ export async function startRoutineRun(
   const timeoutTimer = setTimeout(() => {
     timedOut = true;
     transcript.write(`SYSTEM\nTimed out after ${timeoutMinutes} minutes; stopping the agent.\n\n`);
-    child.kill("SIGTERM");
-    killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+    killProcessTree(child.pid, "SIGTERM");
+    killTimer = setTimeout(() => killProcessTree(child.pid, "SIGKILL"), KILL_GRACE_MS);
     killTimer.unref?.();
   }, timeoutMinutes * 60 * 1000);
   timeoutTimer.unref?.();
@@ -592,7 +700,8 @@ export async function startRoutineRun(
     for (const line of lines) handleLine(line);
   });
   child.stderr?.on("data", (chunk: Buffer) => {
-    stderrTail = (stderrTail + chunk.toString("utf-8")).slice(-4000);
+    // Keep a generous raw window; it is redacted before being cut to size.
+    stderrTail = (stderrTail + chunk.toString("utf-8")).slice(-65536);
   });
 
   const finish = async (exitCode: number | null, signal: NodeJS.Signals | null, spawnError?: Error) => {
@@ -602,7 +711,8 @@ export async function startRoutineRun(
     if (killTimer) clearTimeout(killTimer);
     if (stdoutCarry) handleLine(stdoutCarry);
     stdoutCarry = "";
-    if (stderrTail.trim()) transcript.write(`STDERR\n${redact(stderrTail.trim())}\n\n`);
+    stderrTail = redact(stderrTail).slice(-4000);
+    if (stderrTail.trim()) transcript.write(`STDERR\n${stderrTail.trim()}\n\n`);
     transcript.end();
     const latest = getRun(routine.id, run.id) ?? run;
     const report = reportFromStream(state);
@@ -622,19 +732,15 @@ export async function startRoutineRun(
       const detail = stderrTail.trim().split("\n").slice(-3).join("\n");
       error = `The agent exited (${signal ?? `code ${exitCode}`}) without a valid report.${detail ? `\n${detail}` : ""}`;
     }
-    try {
-      const result = await finalizeRoutineRun(
+    resolveCompletion(
+      await finalizeRoutineRunSafely(
         routine,
         latest,
         { status, report, error, sessionId: state.sessionId, usage: state.usage },
         deps,
         redact
-      );
-      resolveCompletion(result);
-    } catch (finalizeError) {
-      console.error(`[routines] Failed to finalize run ${run.id}:`, finalizeError);
-      resolveCompletion(undefined);
-    }
+      )
+    );
   };
 
   child.on("error", (error) => void finish(null, null, error));
@@ -661,7 +767,7 @@ export async function finalizeInterruptedRun(
 ): Promise<RoutineRun | undefined> {
   const routine = getRoutine(routineId);
   if (!routine) return undefined;
-  return finalizeRoutineRun(
+  return finalizeRoutineRunSafely(
     routine,
     run,
     {

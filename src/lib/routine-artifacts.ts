@@ -1,5 +1,4 @@
 import {
-  copyFileSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -17,7 +16,29 @@ import type { RoutineArtifact } from "./types";
 const MIN_REDACT_LENGTH = 4;
 const MIN_FILE_LINE_REDACT_LENGTH = 16;
 
-export type Redactor = (text: string) => string;
+export interface Redactor {
+  (text: string): string;
+  /** Byte-level redaction for files of any type. */
+  buffer: (data: Buffer) => Buffer;
+}
+
+function replaceAllBytes(data: Buffer, needle: Buffer, replacement: Buffer): Buffer {
+  let index = data.indexOf(needle);
+  if (index === -1) return data;
+  const parts: Buffer[] = [];
+  let start = 0;
+  while (index !== -1) {
+    parts.push(data.subarray(start, index), replacement);
+    start = index + needle.length;
+    index = data.indexOf(needle, start);
+  }
+  parts.push(data.subarray(start));
+  return Buffer.concat(parts);
+}
+
+export const identityRedactor: Redactor = Object.assign((text: string) => text, {
+  buffer: (data: Buffer) => data,
+});
 
 /**
  * Replaces every known secret value with a placeholder naming the secret.
@@ -45,14 +66,25 @@ export function createRedactor(secrets: Pick<ResolvedSecret, "name" | "value" | 
     }
   }
   needles.sort((a, b) => b.value.length - a.value.length);
-  if (needles.length === 0) return (text) => text;
-  return (text) => {
+  if (needles.length === 0) return identityRedactor;
+  const byteNeedles = needles.map((needle) => ({
+    value: Buffer.from(needle.value, "utf-8"),
+    label: Buffer.from(needle.label, "utf-8"),
+  }));
+  const redactText = (text: string) => {
     let result = text;
     for (const needle of needles) {
       if (result.includes(needle.value)) result = result.split(needle.value).join(needle.label);
     }
     return result;
   };
+  return Object.assign(redactText, {
+    buffer: (data: Buffer) => {
+      let result = data;
+      for (const needle of byteNeedles) result = replaceAllBytes(result, needle.value, needle.label);
+      return result;
+    },
+  });
 }
 
 // --- Content types ---
@@ -84,15 +116,6 @@ const CONTENT_TYPES: Record<string, string> = {
 
 export function contentTypeFor(filePath: string): string {
   return CONTENT_TYPES[path.extname(filePath).toLowerCase()] ?? "application/octet-stream";
-}
-
-export function isTextContentType(contentType: string): boolean {
-  return (
-    contentType.startsWith("text/") ||
-    contentType.startsWith("application/json") ||
-    contentType.startsWith("application/xml") ||
-    contentType === "image/svg+xml"
-  );
 }
 
 // --- Capture ---
@@ -186,26 +209,18 @@ export function captureArtifacts(
       continue;
     }
     const contentType = contentTypeFor(relative);
+    if (result.bytes + size > options.maxBytes) {
+      result.truncated = true;
+      result.skipped.push(relative);
+      continue;
+    }
     const destination = path.join(destinationDir, relative);
     mkdirSync(path.dirname(destination), { recursive: true });
-    let storedSize = size;
-    if (isTextContentType(contentType)) {
-      if (result.bytes + size > options.maxBytes) {
-        result.truncated = true;
-        result.skipped.push(relative);
-        continue;
-      }
-      const redacted = options.redact(readFileSync(source, "utf-8"));
-      writeFileSync(destination, redacted);
-      storedSize = Buffer.byteLength(redacted);
-    } else {
-      if (result.bytes + size > options.maxBytes) {
-        result.truncated = true;
-        result.skipped.push(relative);
-        continue;
-      }
-      copyFileSync(source, destination);
-    }
+    // Every file is redacted byte by byte, whatever its extension: an agent
+    // can write a token into a .env, a script or a file with no extension.
+    const redacted = options.redact.buffer(readFileSync(source));
+    writeFileSync(destination, redacted);
+    const storedSize = redacted.length;
     const entry = listed.get(relative);
     const main = Boolean(entry?.main) && !mainAssigned;
     if (main) mainAssigned = true;

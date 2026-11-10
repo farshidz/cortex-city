@@ -165,6 +165,8 @@ test("run routes serve sandboxed artifacts, zips, transcripts, keep flags and st
     fs.mkdirSync(path.join(artifactsDir, "charts"), { recursive: true });
     fs.writeFileSync(path.join(artifactsDir, "index.html"), "<h1>Hi</h1>");
     fs.writeFileSync(path.join(artifactsDir, "charts", "a b.csv"), "1,2");
+    fs.writeFileSync(path.join(artifactsDir, "100% done.html"), "done");
+    fs.writeFileSync(path.join(artifactsDir, "报告.html"), "report");
 
     assert.equal((await zipRoute.GET(req("/x"), ctx({ id, runId }))).status, 404);
     assert.equal((await transcriptRoute.GET(req("/x"), ctx({ id, runId }))).status, 200);
@@ -174,13 +176,15 @@ test("run routes serve sandboxed artifacts, zips, transcripts, keep flags and st
       artifacts: [
         { path: "index.html", title: "Report", size: 11, content_type: "text/html; charset=utf-8", main: true, listed: true },
         { path: "charts/a b.csv", title: "Data", size: 3, content_type: "text/csv; charset=utf-8", listed: false },
+        { path: "100% done.html", title: "Done", size: 4, content_type: "text/html; charset=utf-8", listed: false },
+        { path: "报告.html", title: "Report", size: 6, content_type: "text/html; charset=utf-8", listed: false },
       ],
     });
     fs.writeFileSync(store.runTranscriptPath(id, runId), "CLAUDE\\nhello\\n");
 
     const detail = await json(await runRoute.GET(req("/x"), ctx({ id, runId })));
     assert.equal(detail.body.routine.name, "Weekly metrics!");
-    assert.equal(detail.body.run.artifacts.length, 2);
+    assert.equal(detail.body.run.artifacts.length, 4);
     assert.equal((await runRoute.GET(req("/x"), ctx({ id, runId: "missing" }))).status, 404);
     assert.equal((await runRoute.GET(req("/x"), ctx({ id, runId: "../x" }))).status, 404);
 
@@ -190,8 +194,13 @@ test("run routes serve sandboxed artifacts, zips, transcripts, keep flags and st
     assert.match(html.headers.get("content-security-policy"), /connect-src 'none'/);
     assert.match(html.headers.get("content-disposition"), /^inline/);
     assert.equal(await html.text(), "<h1>Hi</h1>");
-    const csv = await artifactRoute.GET(req("/x?download=1"), ctx({ id, runId, path: ["charts", "a%20b.csv"] }));
-    assert.match(csv.headers.get("content-disposition"), /^attachment; filename="a b.csv"/);
+    // Next.js passes catch-all segments already decoded.
+    const csv = await artifactRoute.GET(req("/x?download=1"), ctx({ id, runId, path: ["charts", "a b.csv"] }));
+    assert.match(csv.headers.get("content-disposition"), /^attachment; filename="a b.csv"; filename[*]=UTF-8''a%20b.csv/);
+    assert.equal(await (await artifactRoute.GET(req("/x"), ctx({ id, runId, path: ["100% done.html"] }))).text(), "done");
+    const unicode = await artifactRoute.GET(req("/x"), ctx({ id, runId, path: ["报告.html"] }));
+    assert.equal(await unicode.text(), "report");
+    assert.match(unicode.headers.get("content-disposition"), /filename="__[.]html"; filename[*]=UTF-8''%E6%8A%A5%E5%91%8A[.]html/);
     assert.equal((await artifactRoute.GET(req("/x"), ctx({ id, runId, path: ["..", "..", "secrets", "global.json"] }))).status, 404);
     assert.equal((await artifactRoute.GET(req("/x"), ctx({ id, runId, path: ["missing.html"] }))).status, 404);
     assert.equal((await artifactRoute.GET(req("/x"), ctx({ id, runId: "missing", path: ["index.html"] }))).status, 404);

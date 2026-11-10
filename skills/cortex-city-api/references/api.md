@@ -82,11 +82,10 @@ An issue linked to a task cannot be deleted. Resolve the link through the UI or 
 - `cron`: a 5-field cron expression; `timezone`: an IANA timezone such as `Australia/Sydney` (default `UTC`)
 - `enabled`: JSON boolean; `false` pauses the schedule
 - `agent_runner`, `model`, `effort`; `timeout_minutes` (default 30)
-- `global_secrets`: names of global secrets the routine may use
 - `slack`: `{"allowed_channels": ["#eng"], "failure_channel": "#alerts"}`
 - `keep_runs` (default 30) and `max_run_mb` (default 100)
 
-`routines.run` asks the worker to start a run now; it consumes model quota and may send Slack messages to the routine's allowed channels. Secret values cannot be read or written through this client.
+`routines.run` asks the worker to start a run now; it consumes model quota and may send Slack messages to the routine's allowed channels. Secrets cannot be read, written or granted to a routine through this client, and the client refuses to change `prompt` or `slack` on a routine that has secrets; those changes are made in the Cortex City UI.
 
 ## Reviews
 

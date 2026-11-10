@@ -1987,7 +1987,7 @@ test("routine pages render the list, the routine and a run", () => {
   assert.match(detail, /If the last run is still going, the next one is skipped\./);
   assert.match(detail, /1 sent, 1 failed/);
   assert.match(runPage, /Run #(<!-- -->)?3/);
-  assert.match(runPage, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(runPage, /sandbox="allow-scripts allow-popups"/);
   assert.match(runPage, /artifacts\/data\/raw%20file\.csv\?download=1/);
   assert.match(runPage, /not listed in report/);
   assert.match(runPage, /Failure notice/);

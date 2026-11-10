@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { deleteRoutine, hasActiveRun, updateRoutine } from "@/lib/routine-store";
+import { deleteRoutine, updateRoutine } from "@/lib/routine-store";
 import { findRoutine, notFound, readJsonBody, routineDetail, validationErrorResponse } from "@/lib/routine-api";
 
 type Params = { params: Promise<{ id: string }> };
@@ -28,9 +28,10 @@ export async function PUT(request: NextRequest, { params }: Params) {
 export async function DELETE(_request: NextRequest, { params }: Params) {
   const { id } = await params;
   if (!findRoutine(id)) return notFound("Routine not found");
-  if (hasActiveRun(id)) {
+  const result = await deleteRoutine(id);
+  if (result === "not_found") return notFound("Routine not found");
+  if (result === "active") {
     return NextResponse.json({ error: "Stop the running run before deleting this routine." }, { status: 409 });
   }
-  await deleteRoutine(id);
   return NextResponse.json({ ok: true });
 }

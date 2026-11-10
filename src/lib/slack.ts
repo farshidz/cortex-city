@@ -11,6 +11,9 @@ import { normalizeChannel } from "./routine-store";
 
 export const SLACK_TOKEN_SECRET = "SLACK_BOT_TOKEN";
 const SLACK_API = "https://slack.com/api";
+// Slack calls run inside the worker poll; never let one hang it.
+const SLACK_API_TIMEOUT_MS = 30_000;
+const SLACK_UPLOAD_TIMEOUT_MS = 120_000;
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -51,6 +54,7 @@ async function callSlack(
       "Content-Type": form ? "application/x-www-form-urlencoded" : "application/json; charset=utf-8",
     },
     body: form ? (body as URLSearchParams).toString() : JSON.stringify(body),
+    signal: AbortSignal.timeout(SLACK_API_TIMEOUT_MS),
   });
   if (!response.ok) throw new SlackError(`Slack ${method} failed with HTTP ${response.status}`);
   const json = (await response.json()) as Record<string, unknown>;
@@ -148,7 +152,11 @@ export async function sendSlackMessage(
     const uploadUrl = String(ticket.upload_url ?? "");
     const fileId = String(ticket.file_id ?? "");
     if (!uploadUrl || !fileId) throw new SlackError("Slack did not return an upload URL");
-    const upload = await fetchImpl(uploadUrl, { method: "POST", body: new Uint8Array(data) });
+    const upload = await fetchImpl(uploadUrl, {
+      method: "POST",
+      body: new Uint8Array(data),
+      signal: AbortSignal.timeout(SLACK_UPLOAD_TIMEOUT_MS),
+    });
     if (!upload.ok) throw new SlackError(`Slack file upload failed with HTTP ${upload.status}`);
     uploaded.push({ id: fileId, title: file.title });
   }

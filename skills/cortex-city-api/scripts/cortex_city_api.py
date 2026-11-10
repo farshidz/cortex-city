@@ -26,10 +26,14 @@ EFFORTS = frozenset(
 PERMISSION_MODES = frozenset(
     {"bypassPermissions", "acceptEdits", "auto", "default", "yolo"}
 )
+# global_secrets is deliberately absent: granting secrets to a routine is a
+# UI-only decision, so an agent cannot point a routine at a secret it chose.
 ROUTINE_FIELDS = {
     "name", "prompt", "cron", "timezone", "enabled", "agent_runner", "model",
-    "effort", "timeout_minutes", "global_secrets", "slack", "keep_runs", "max_run_mb",
+    "effort", "timeout_minutes", "slack", "keep_runs", "max_run_mb",
 }
+# Changing what a routine does or where it posts is refused once it has secrets.
+SECRET_SENSITIVE_ROUTINE_FIELDS = frozenset({"prompt", "slack"})
 
 
 @dataclass(frozen=True)
@@ -247,6 +251,22 @@ def enforce_settings_boundary(method: str, path: str) -> None:
         fail(f"agent settings writes are prohibited: {method} {path}")
 
 
+def guard_routine_update(base_url: str, routine_id: str, body: dict[str, Any], timeout: float) -> None:
+    changed = SECRET_SENSITIVE_ROUTINE_FIELDS.intersection(body)
+    if not changed:
+        return
+    url = urljoin(base_url, f"api/routines/{quote(routine_id, safe='')}")
+    try:
+        with urlopen(Request(url, headers={"Accept": "application/json"}), timeout=timeout) as response:
+            detail = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, json.JSONDecodeError) as error:
+        fail(f"could not read the routine before updating it: {error}")
+    routine = detail.get("routine") or {}
+    if routine.get("global_secrets") or detail.get("secrets"):
+        fields = ", ".join(sorted(changed))
+        fail(f"routines with secrets can only have {fields} changed in the Cortex City UI")
+
+
 def render_payload(raw: bytes, compact: bool) -> str:
     text = raw.decode("utf-8", errors="replace")
     if not text:
@@ -319,6 +339,12 @@ def main() -> int:
             fail("mutating operations require --confirm after confirming user intent")
     except (OSError, ValueError, json.JSONDecodeError) as error:
         parser.error(str(error))
+
+    if args.operation == "routines.update" and not args.dry_run and body is not None:
+        try:
+            guard_routine_update(base_url, args.id, body, args.timeout)
+        except ValueError as error:
+            parser.error(str(error))
 
     url = urljoin(base_url, path.lstrip("/"))
     if query:

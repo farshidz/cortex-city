@@ -82,7 +82,7 @@ function ArtifactPreview({ url, artifact }: { url: string; artifact: RoutineArti
     <iframe
       title={artifact.title}
       src={url}
-      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+      sandbox="allow-scripts allow-popups"
       className="h-[640px] w-full rounded-lg border bg-white"
     />
   );

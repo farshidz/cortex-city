@@ -160,7 +160,7 @@ export function buildRoutinePrompt(
 ## Where to put your output
 Save every deliverable (HTML reports, CSV, images, Markdown and so on) in the output directory:
 ${options.outputDir}
-The path is also in the CORTEX_OUTPUT_DIR environment variable. Files saved anywhere else are discarded when the run ends. HTML reports should be self-contained (inline CSS and data).
+The path is also in the CORTEX_OUTPUT_DIR environment variable. Files saved anywhere else are discarded when the run ends. HTML reports must be fully self-contained: inline all CSS, JavaScript, data, images (as data: URIs) and fonts. Reports are viewed with all network access blocked, so anything loaded from a URL (CDN scripts, web fonts, remote images) will not appear.
 
 ## Secrets
 These environment variables are available. Use them, but never print, log or write their values anywhere, including your output files and messages.

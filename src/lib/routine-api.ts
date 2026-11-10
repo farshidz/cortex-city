@@ -109,15 +109,15 @@ export async function readJsonBody(request: Request): Promise<Record<string, unk
 }
 
 // Agent-written files are untrusted. Served with an opaque-origin sandbox and
-// no network access, so a report's scripts can draw charts but cannot reach
-// Cortex City's API or send data anywhere.
+// no network access at all: a report's inline scripts can draw charts, but it
+// cannot reach Cortex City's API, load remote resources or send data anywhere.
 export const ARTIFACT_CSP = [
-  "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+  "sandbox allow-scripts allow-popups",
   "default-src 'none'",
-  "script-src 'unsafe-inline' https:",
-  "style-src 'unsafe-inline' https:",
-  "img-src data: blob: https:",
-  "font-src data: https:",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "img-src data: blob:",
+  "font-src data:",
   "media-src data: blob:",
   "connect-src 'none'",
   "form-action 'none'",

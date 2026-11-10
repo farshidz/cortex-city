@@ -107,8 +107,8 @@ Create routines from `Routines` in the sidebar. Each run:
 
 - starts the configured runtime (Claude or Codex, with optional model, effort and timeout) in a fresh, empty folder, and tells the agent to save its deliverables in an output folder (`$CORTEX_OUTPUT_DIR`)
 - ends with a structured report: a status (`completed`, `needs_attention` or `failed`), a short summary, the files it saved, and any Slack messages it wants sent
-- keeps every file from the output folder on the run's page, where HTML reports are shown in a sandboxed frame that can run scripts but cannot reach Cortex City or the network; files can be viewed, downloaded one by one, or downloaded as a zip
-- keeps a transcript, with every secret value blanked out (as it is in the report, the Slack messages and text files)
+- keeps every file from the output folder on the run's page, where HTML reports are shown in a sandboxed frame that can run inline scripts but cannot reach Cortex City or load anything from the network (so reports must be self-contained, which the agent is told); files can be viewed, downloaded one by one, or downloaded as a zip
+- keeps a transcript, with every secret value blanked out (as it is in the report, the Slack messages and every saved file)
 
 Runs never see earlier runs. If a scheduled run comes due while the previous one is still going, it is skipped and recorded as skipped. Runs missed while the worker was down run once when it restarts. Routines have their own pool of parallel runs (`Parallel Routine Runs` in Settings, default 2), so they never hold up builder tasks.
 
@@ -116,7 +116,7 @@ Runs never see earlier runs. If a scheduled run comes due while the previous one
 
 **Slack.** Connect a Slack bot in `Settings → Integrations` (scopes `chat:write`, `files:write`, `channels:read`, `groups:read`; invite the bot to each channel). Agents never see this token. A routine asks Cortex City to send a message by adding it to its final report, optionally attaching its saved files; only channels on the routine's allowed list are accepted, and delivery is retried. Cortex City also posts to the routine's failure channel when a run fails or times out. Set `CORTEX_PUBLIC_URL` (for example `https://cortex.example.com`) to include a link to the run in failure notices.
 
-**Disk.** Each run's working folder (under `tmp/routines/`, or `CORTEX_ROUTINE_WORKSPACE_ROOT`) is deleted once its files are saved, and leftovers from crashes are swept on the next poll. Saved files are capped per run (`Max per run`, default 100 MB). Each routine keeps its newest runs (`Keep last`, default 30) plus any run marked "Keep this run"; when all routines together exceed `Routine Storage Limit` (default 5 GB), the oldest runs that are not kept are deleted first. Runs don't start when free disk space is below the worker's reserve.
+**Disk.** Each run's working folder (under `tmp/routines/`, or `CORTEX_ROUTINE_WORKSPACE_ROOT`) is deleted once its files are saved, and leftovers from crashes are swept on the next poll (only folders Cortex City marked as run workspaces are removed, so a custom root is safe). Saved files are capped per run (`Max per run`, default 100 MB, at most 1000 MB). Each routine keeps its newest runs (`Keep last`, default 30), and runs marked "Keep this run" are kept on top of that; when all routines together exceed `Routine Storage Limit` (default 5 GB), the oldest runs that are not kept are deleted first. Runs don't start when free disk space is below the worker's reserve. Stopping a run or hitting its timeout stops the agent's whole process group, including commands it started.
 
 ### Status
 

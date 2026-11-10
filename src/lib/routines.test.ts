@@ -82,6 +82,13 @@ test("redactor replaces secret values, trimmed values and long lines of file sec
   assert.equal(redact("abc stays"), "abc stays");
   assert.match(redact('"private_key": "-----BEGIN KEY-----abcdefghijklmnop"'), /\[REDACTED:SA_JSON\]/);
   assert.equal(createRedactor([])("unchanged"), "unchanged");
+  assert.equal(
+    redact.buffer(Buffer.from("x tok_1234567890 y tok_1234567890")).toString(),
+    "x [REDACTED:API_TOKEN] y [REDACTED:API_TOKEN]"
+  );
+  const binary = Buffer.from([0, 1, 2]);
+  assert.equal(redact.buffer(binary), binary);
+  assert.equal(createRedactor([]).buffer(binary), binary);
 });
 
 test("report parsing accepts objects, JSON text and fenced JSON, and rejects invalid reports", () => {
@@ -144,6 +151,7 @@ test("artifact capture orders listed files first, redacts text, skips symlinks a
   writeFileSync(path.join(out, "index.html"), "<p>key=tok_1234567890</p>");
   writeFileSync(path.join(out, "charts", "a.png"), Buffer.alloc(50, 1));
   writeFileSync(path.join(out, "notes.md"), "notes");
+  writeFileSync(path.join(out, "config"), "TOKEN=tok_1234567890\n");
   writeFileSync(path.join(out, "big.csv"), "x".repeat(500));
   symlinkSync("/etc/passwd", path.join(out, "link.txt"));
   const redact = createRedactor([{ name: "API_TOKEN", value: "tok_1234567890", kind: "env" }]);
@@ -158,10 +166,12 @@ test("artifact capture orders listed files first, redacts text, skips symlinks a
     ],
     { maxBytes: 200, redact }
   );
-  assert.deepEqual(result.artifacts.map((a) => a.path), ["index.html", "charts/a.png", "notes.md"]);
+  assert.deepEqual(result.artifacts.map((a) => a.path), ["index.html", "charts/a.png", "config", "notes.md"]);
   assert.equal(result.artifacts[0].main, true);
   assert.equal(result.artifacts[0].title, "Report");
   assert.equal(result.artifacts[2].listed, false);
+  // Files of any type are redacted, including ones with no extension.
+  assert.equal(readFileSync(path.join(dest, "config"), "utf-8"), "TOKEN=[REDACTED:API_TOKEN]\n");
   assert.equal(result.truncated, true);
   assert.deepEqual(result.skipped, ["big.csv"]);
   assert.match(readFileSync(path.join(dest, "index.html"), "utf-8"), /\[REDACTED:API_TOKEN\]/);
@@ -325,6 +335,8 @@ test("routine store validates input, schedules next runs and claims runs atomica
       const bytes = store.routineStorageBytes(created.id);
       const total = store.totalRoutineStorageBytes();
       const claimMissing = await store.claimRoutineRun("nope", "manual");
+      const refused = await store.deleteRoutine(created.id);
+      await store.updateRun(created.id, scheduled.id, { status: "failed" });
       const deleted = await store.deleteRoutine(created.id);
       const deletedAgain = await store.deleteRoutine(created.id);
       let badId = "";
@@ -335,7 +347,7 @@ test("routine store validates input, schedules next runs and claims runs atomica
       console.log(JSON.stringify({
         errors, created, paused, resumed, missing, requested: Boolean(requested.run_requested_at),
         manual, scheduled, skipped, afterClaims, updatedRun, missingRun, active, runs, bytes, total, claimMissing,
-        deleted, deletedAgain, badId, badRun, afterCorruption: store.listRoutines(),
+        refused, deleted, deletedAgain, badId, badRun, afterCorruption: store.listRoutines(),
         preview: store.nextRunTimes("0 8 * * 1", "Australia/Sydney", new Date("2026-11-06T00:00:00Z"), 2).map((d) => d.toISOString()),
         dirSizeMissing: store.directorySize("/does/not/exist"),
         validIds: [store.isValidRoutineId("ab_C-1"), store.isValidRoutineId("a/b"), store.isValidRunId("x"), store.isValidRunId("")],
@@ -378,8 +390,9 @@ test("routine store validates input, schedules next runs and claims runs atomica
   assert.equal(result.bytes, 5);
   assert.equal(result.total, 5);
   assert.equal(result.claimMissing, undefined);
-  assert.equal(result.deleted, true);
-  assert.equal(result.deletedAgain, false);
+  assert.equal(result.refused, "active");
+  assert.equal(result.deleted, "deleted");
+  assert.equal(result.deletedAgain, "not_found");
   assert.equal(result.badId, "Invalid routine id");
   assert.equal(result.badRun, "Invalid run id");
   assert.deepEqual(result.afterCorruption, []);
@@ -421,6 +434,116 @@ test("routine env passes only allowlisted variables, runtime auth and granted se
   assert.match(result.env.TMPDIR, /ws\/tmp$/);
   assert.equal(result.file, '{"k":1}');
   assert.equal(result.mode, 0o600);
+});
+
+test("stream text is redacted before it is truncated", () => {
+  const dir = workspace();
+  const result = run(
+    dir,
+    `
+      const secret = "sk_live_ABCDEFGHIJKLMNOP";
+      const redact = (text) => text.split(secret).join("[REDACTED:KEY]");
+      const longOutput = "x".repeat(1990) + "KEY=" + secret + "y".repeat(100);
+      const text = runner.handleStreamEvent("claude", { type: "user", message: { content: [{ type: "tool_result", content: longOutput }] } }, {}, redact);
+      const command = runner.handleStreamEvent("codex", { type: "item.completed", item: { type: "command_execution", command: "echo " + secret, aggregated_output: "" } }, {}, redact);
+      console.log(JSON.stringify({ text, command }));
+    `
+  );
+  // The cut lands inside the placeholder, never inside the secret.
+  assert.doesNotMatch(result.text, /sk_live/);
+  assert.match(result.text, /KEY=\[REDAC/);
+  assert.equal(result.command, "CODEX (command)\n$ echo [REDACTED:KEY]\n\n");
+});
+
+test("process helpers recognise routine agents by working directory", () => {
+  const dir = workspace();
+  const result = run(
+    dir,
+    `
+      const root = runner.routineWorkspaceRoot();
+      fs.mkdirSync(path.join(root, "run-x"), { recursive: true });
+      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { cwd: path.join(root, "run-x"), detached: true, stdio: "ignore" });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const inside = runner.isRoutineProcess(child.pid);
+      const self = runner.isRoutineProcess(process.pid);
+      const gone = runner.isRoutineProcess(999999);
+      const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve(signal)));
+      runner.killProcessTree(child.pid, "SIGTERM");
+      runner.killProcessTree(undefined, "SIGTERM");
+      runner.killProcessTree(999999, "SIGTERM");
+      console.log(JSON.stringify({ inside, self, gone, signal: await exited }));
+    `
+  );
+  assert.equal(result.inside, true);
+  assert.equal(result.self, false);
+  assert.equal(result.gone, false);
+  assert.equal(result.signal, "SIGTERM");
+});
+
+test("a routine whose secrets can't be decrypted fails without blocking other routines", () => {
+  const dir = workspace();
+  const result = run(
+    dir,
+    `
+      await secrets.setSecret({ kind: "global" }, { name: "API_TOKEN", value: "tok_value_1234" });
+      const broken = await store.createRoutine({ name: "Broken", prompt: "p", cron: "0 8 * * 1", global_secrets: ["API_TOKEN"], enabled: false });
+      const healthy = await store.createRoutine({ name: "Healthy", prompt: "p", cron: "0 8 * * 1", enabled: false });
+      await store.requestRoutineRun(broken.id);
+      await store.requestRoutineRun(healthy.id);
+      // The worker now uses a different key than the one that encrypted the secret.
+      process.env.CORTEX_SECRETS_KEY = "a-different-key";
+      secrets.__testUtils.resetKeyCache();
+      const started = [];
+      const deps = {
+        now: () => new Date(), checkDisk: () => {}, log: () => {},
+        runner: { spawn: () => { throw new Error("unused"); }, fetch: async () => new Response("{}"), now: () => new Date() },
+        startRun: async (routine, runRecord) => {
+          started.push(routine.name);
+          if (routine.name === "Broken") return runner.startRoutineRun(routine, runRecord, deps.runner);
+          await store.updateRun(routine.id, runRecord.id, { status: "succeeded" });
+          return { completion: Promise.resolve() };
+        },
+      };
+      const active = new Map();
+      await scheduler.pollRoutines(active, deps);
+      await Promise.all([...active.values()].map((entry) => entry.completion));
+      // An orphaned run of the broken routine is finalized as failed, not left stuck.
+      const orphan = await store.claimRoutineRun(broken.id, "manual");
+      await store.updateRun(broken.id, orphan.id, { status: "running" });
+      fs.mkdirSync(path.join(runner.runWorkspaceDir(orphan.id), "out"), { recursive: true });
+      fs.writeFileSync(path.join(runner.runWorkspaceDir(orphan.id), "out", "leak.txt"), "tok_value_1234");
+      await scheduler.pollRoutines(new Map(), deps);
+      console.log(JSON.stringify({
+        started,
+        brokenRuns: store.listRuns(broken.id).map((r) => [r.status, r.error, r.artifacts.length]),
+        healthyRuns: store.listRuns(healthy.id).map((r) => r.status),
+      }));
+    `
+  );
+  assert.deepEqual(result.started, ["Broken", "Healthy"]);
+  assert.equal(result.brokenRuns.length, 2);
+  for (const [status, error, artifacts] of result.brokenRuns) {
+    assert.equal(status, "failed");
+    assert.match(error, /secrets/);
+    assert.equal(artifacts, 0);
+  }
+  assert.deepEqual(result.healthyRuns, ["succeeded"]);
+});
+
+test("finalizing never throws: a failure to save results still marks the run failed", () => {
+  const dir = workspace();
+  const result = run(
+    dir,
+    `
+      const routine = await store.createRoutine({ name: "R", prompt: "p", cron: "0 8 * * 1" });
+      const claimed = await store.claimRoutineRun(routine.id, "manual");
+      const failingRedactor = Object.assign(() => { throw new Error("redact exploded"); }, { buffer: () => { throw new Error("redact exploded"); } });
+      const finished = await runner.finalizeRoutineRunSafely(routine, claimed, { status: "failed", error: "boom" }, runner.defaultRoutineRunnerDeps, failingRedactor);
+      console.log(JSON.stringify({ finished }));
+    `
+  );
+  assert.equal(result.finished.status, "failed");
+  assert.match(result.finished.error, /boom\nCould not save this run's results: redact exploded/);
 });
 
 test("stream parsing understands Claude stream-json and Codex exec events", () => {
@@ -737,12 +860,23 @@ test("scheduler runs due and requested routines, skips overlaps, reconciles inte
       fs.mkdirSync(path.join(runner.runWorkspaceDir(orphan.id), "out"), { recursive: true });
       fs.writeFileSync(path.join(runner.runWorkspaceDir(orphan.id), "out", "partial.md"), "partial");
       fs.mkdirSync(path.join(runner.routineWorkspaceRoot(), "stale-dir"), { recursive: true });
+      fs.writeFileSync(path.join(runner.routineWorkspaceRoot(), "stale-dir", runner.WORKSPACE_MARKER), "x");
+      fs.mkdirSync(path.join(runner.routineWorkspaceRoot(), "not-ours"), { recursive: true });
       await store.updateRoutine(manual.id, { enabled: false });
       await store.mutateRoutine(manual.id, (r) => { const { run_requested_at, ...rest } = r; return rest; });
       await store.mutateRoutine(due.id, (r) => ({ ...r, next_run_at: "2999-01-01T00:00:00.000Z" }));
       await scheduler.pollRoutines(new Map(), deps);
       const orphanRun = store.getRun(later.id, orphan.id);
       const staleGone = !fs.existsSync(path.join(runner.routineWorkspaceRoot(), "stale-dir"));
+      const foreignKept = fs.existsSync(path.join(runner.routineWorkspaceRoot(), "not-ours"));
+
+      // Slack retries skip runs still finishing in this worker (no double send).
+      const pendingRun = await store.claimRoutineRun(later.id, "manual");
+      await store.updateRun(later.id, pendingRun.id, { status: "succeeded", slack_messages: [{ channel: "x", text: "t", attachments: [], kind: "agent", status: "pending", attempts: 0 }] });
+      await scheduler.pollRoutines(new Map([[pendingRun.id, { routineId: later.id, completion: Promise.resolve() }]]), deps);
+      const stillPending = store.getRun(later.id, pendingRun.id).slack_messages[0].status;
+      await scheduler.pollRoutines(new Map(), deps);
+      const retried = store.getRun(later.id, pendingRun.id).slack_messages[0].status;
 
       // Retention keeps the newest N plus kept runs; storage cap removes the oldest.
       const retained = await store.createRoutine({ name: "Retained", prompt: "p", cron: "0 8 * * 1", keep_runs: 2, enabled: false });
@@ -770,7 +904,7 @@ test("scheduler runs due and requested routines, skips overlaps, reconciles inte
       scheduler.stopActiveRoutineRuns(new Map([["x", { routineId: "r", pid: 999999, completion: Promise.resolve() }], ["y", { routineId: "r", completion: Promise.resolve() }]]));
       console.log(JSON.stringify({
         firstStarted, activeAfterFirst, dueRuns, manualStillRequested, laterHasNext, activeAfterDone,
-        orphanRun, staleGone, prunedByCount, afterCount, prunedBySize, afterSize, failingRuns,
+        orphanRun, staleGone, foreignKept, stillPending, retried, prunedByCount, afterCount, prunedBySize, afterSize, failingRuns,
         summary: api.summarizeRoutine(store.getRoutine(retained.id)),
         usage: api.globalSecretUsage(),
         sweptNothing: scheduler.sweepRoutineWorkspaces(new Map()),
@@ -787,9 +921,13 @@ test("scheduler runs due and requested routines, skips overlaps, reconciles inte
   assert.match(result.orphanRun.error, /worker restarted/);
   assert.deepEqual(result.orphanRun.artifacts.map((a: { path: string }) => a.path), ["partial.md"]);
   assert.equal(result.staleGone, true);
-  assert.equal(result.prunedByCount, 3);
-  assert.deepEqual(result.afterCount, [5, 1]);
-  assert.equal(result.prunedBySize, 1);
+  assert.equal(result.foreignKept, true);
+  assert.equal(result.stillPending, "pending");
+  assert.equal(result.retried, "failed");
+  // Keep last 2, plus the kept run on top.
+  assert.equal(result.prunedByCount, 2);
+  assert.deepEqual(result.afterCount, [5, 4, 1]);
+  assert.equal(result.prunedBySize, 2);
   assert.deepEqual(result.afterSize, [1]);
   assert.deepEqual(result.failingRuns, [
     ["failed", "cannot start"],

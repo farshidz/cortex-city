@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { updateRun } from "@/lib/routine-store";
+import { killProcessTree } from "@/lib/routine-runner";
 import { findRun, notFound, readJsonBody } from "@/lib/routine-api";
 
 type Params = { params: Promise<{ id: string; runId: string }> };
@@ -27,11 +28,8 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       return NextResponse.json({ error: "This run isn't running." }, { status: 409 });
     }
     await updateRun(id, runId, { stop_requested: true });
-    try {
-      process.kill(run.pid, "SIGTERM");
-    } catch {
-      // Already exited; the worker finalizes it.
-    }
+    // The agent runs in its own process group; the worker finalizes the run.
+    killProcessTree(run.pid, "SIGTERM");
     return NextResponse.json({ ok: true });
   }
 

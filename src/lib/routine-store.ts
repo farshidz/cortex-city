@@ -19,7 +19,8 @@ export const MAX_ROUTINE_TIMEOUT_MINUTES = 24 * 60;
 export const DEFAULT_ROUTINE_KEEP_RUNS = 30;
 export const MAX_ROUTINE_KEEP_RUNS = 1000;
 export const DEFAULT_ROUTINE_MAX_RUN_MB = 100;
-export const MAX_ROUTINE_MAX_RUN_MB = 10_000;
+// Keeps every file under Node's 2 GB read limit and the zip under 4 GB.
+export const MAX_ROUTINE_MAX_RUN_MB = 1000;
 export const DEFAULT_ROUTINE_TIMEZONE = "UTC";
 
 const ROUTINE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -434,18 +435,22 @@ export async function requestRoutineRun(id: string): Promise<Routine | undefined
   }));
 }
 
-export async function deleteRoutine(id: string): Promise<boolean> {
-  const removed = await withRoutineLock(() => {
+export type DeleteRoutineResult = "deleted" | "not_found" | "active";
+
+/** Refuses (under the lock the worker claims runs with) while a run is active. */
+export async function deleteRoutine(id: string): Promise<DeleteRoutineResult> {
+  const result = await withRoutineLock((): DeleteRoutineResult => {
     const routines = listRoutines();
     const filtered = routines.filter((routine) => routine.id !== id);
-    if (filtered.length === routines.length) return false;
+    if (filtered.length === routines.length) return "not_found";
+    if (hasActiveRun(id)) return "active";
     writeRoutinesLocked(filtered, "routines");
     rmSync(runsFile(id), { force: true });
     rmSync(routineDataDir(id), { recursive: true, force: true });
-    return true;
+    return "deleted";
   });
-  if (removed) await deleteSecretScope({ kind: "routine", routineId: id });
-  return removed;
+  if (result === "deleted") await deleteSecretScope({ kind: "routine", routineId: id });
+  return result;
 }
 
 // --- Runs ---
