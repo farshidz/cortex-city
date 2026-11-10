@@ -27,6 +27,9 @@ export const metadata: Metadata = {
   },
 };
 
+const NAV_HEADING_CLASS =
+  "px-2 pb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground";
+
 const commitSha = process.env.NEXT_PUBLIC_CORTEX_COMMIT_SHA;
 const shortCommitSha = commitSha?.slice(0, 7);
 
@@ -62,13 +65,34 @@ export default async function RootLayout({
                 </div>
               </div>
             </Link>
-            <div className="flex flex-col gap-1 flex-1">
-              <SidebarNavLink href="/issues">Issues</SidebarNavLink>
-              <SidebarNavLink href="/" match={["/", "/tasks"]}>
-                Tasks
-              </SidebarNavLink>
-              <ReviewsNavLink />
-              <SidebarNavLink href="/agents">Agents</SidebarNavLink>
+            <div className="flex flex-col gap-5 flex-1">
+              <div
+                role="group"
+                aria-labelledby="nav-development"
+                className="flex flex-col gap-1"
+              >
+                <p id="nav-development" className={NAV_HEADING_CLASS}>
+                  Development
+                </p>
+                <SidebarNavLink href="/issues">Issues</SidebarNavLink>
+                <SidebarNavLink href="/" match={["/", "/tasks"]}>
+                  Tasks
+                </SidebarNavLink>
+                <ReviewsNavLink />
+                <SidebarNavLink href="/agents">Agents</SidebarNavLink>
+              </div>
+              <div
+                role="group"
+                aria-labelledby="nav-automation"
+                className="flex flex-col gap-1"
+              >
+                <p id="nav-automation" className={NAV_HEADING_CLASS}>
+                  Automation
+                </p>
+                <SidebarNavLink href="/routines">Routines</SidebarNavLink>
+              </div>
+            </div>
+            <div className="mt-4 mb-3 flex flex-col gap-1">
               <SidebarNavLink href="/sessions">Sessions</SidebarNavLink>
               <SidebarNavLink href="/settings">Settings</SidebarNavLink>
             </div>

@@ -6,6 +6,7 @@ The bundled client maps named operations to the routes called by the Cortex City
 
 - [Tasks](#tasks)
 - [Issues](#issues)
+- [Routines](#routines)
 - [Reviews](#reviews)
 - [Field values](#field-values)
 - [Side effects and conflicts](#side-effects-and-conflicts)
@@ -64,6 +65,27 @@ Creating a task requests a worker poll. An open task may begin running immediate
 `issues.list` hides resolved issues unless `show_resolved=true`. `page` starts at 1. `page_size` is between 1 and 100 and defaults to 25.
 
 An issue linked to a task cannot be deleted. Resolve the link through the UI or another authorized workflow before calling `issues.delete`.
+
+## Routines
+
+| Operation | Request | Input |
+| --- | --- | --- |
+| `routines.list` | `GET /api/routines` | None |
+| `routines.get` | `GET /api/routines/{id}` | `--id`; returns the routine, its runs, its secret names and the next run times |
+| `routines.create` | `POST /api/routines` | Body; required: `name`, `prompt`, `cron` |
+| `routines.update` | `PUT /api/routines/{id}` | `--id` and a non-empty body |
+| `routines.run` | `POST /api/routines/{id}/run` | `--id` |
+
+`routines.create` and `routines.update` accept:
+
+- `name`, `prompt` (the whole job, in plain text)
+- `cron`: a 5-field cron expression; `timezone`: an IANA timezone such as `Australia/Sydney` (default `UTC`)
+- `enabled`: JSON boolean; `false` pauses the schedule
+- `agent_runner`, `model`, `effort`; `timeout_minutes` (default 30)
+- `slack`: `{"allowed_channels": ["#eng"], "failure_channel": "#alerts"}`
+- `keep_runs` (default 30) and `max_run_mb` (default 100)
+
+`routines.run` asks the worker to start a run now; it consumes model quota and may send Slack messages to the routine's allowed channels. Secrets cannot be read, written or granted to a routine through this client, and the client refuses to change `prompt` or `slack` on a routine that has secrets; those changes are made in the Cortex City UI.
 
 ## Reviews
 

@@ -257,6 +257,9 @@ export interface OrchestratorConfig {
   // disables the wait.
   review_debounce_seconds?: number;
   worktree_roots?: string[];
+  max_parallel_routines?: number;
+  // Total disk budget for routine run files and transcripts, in MB.
+  routine_storage_limit_mb?: number;
 }
 
 export type PRStatus =
@@ -616,4 +619,114 @@ export interface ClaudeRunResult {
     output_tokens: number;
     cache_read_input_tokens: number;
   };
+}
+
+// --- Routines ---
+
+export type RoutineRunStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "needs_attention"
+  | "failed"
+  | "timeout"
+  | "skipped";
+
+export type RoutineRunTrigger = "schedule" | "manual";
+
+export interface RoutineSlackConfig {
+  // Channels the routine may ask Cortex City to post to. Names ("#eng" or
+  // "eng") or channel IDs. Requests for any other channel are refused.
+  allowed_channels: string[];
+  // Channel Cortex City posts to on its own when a run fails or times out.
+  failure_channel?: string;
+}
+
+export interface Routine {
+  id: string;
+  name: string;
+  prompt: string;
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  agent_runner?: AgentRuntime;
+  model?: string;
+  effort?: TaskEffort;
+  timeout_minutes?: number;
+  // Global secret names this routine may use. Routine-scoped secrets are
+  // always available to the routine and override a global of the same name.
+  global_secrets: string[];
+  slack: RoutineSlackConfig;
+  keep_runs?: number;
+  max_run_mb?: number;
+  next_run_at?: string;
+  run_requested_at?: string;
+  last_run_number?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RoutineArtifact {
+  path: string; // relative to the run's artifact directory
+  title: string;
+  size: number;
+  content_type: string;
+  main?: boolean;
+  listed: boolean; // named by the agent in its report
+}
+
+export type RoutineSlackMessageStatus = "pending" | "sent" | "failed" | "refused";
+
+export interface RoutineSlackMessage {
+  channel: string;
+  text: string;
+  attachments: string[];
+  kind: "agent" | "failure_notice";
+  status: RoutineSlackMessageStatus;
+  attempts: number;
+  error?: string;
+  sent_at?: string;
+}
+
+export interface RoutineReport {
+  status: "completed" | "needs_attention" | "failed";
+  summary: string;
+}
+
+export interface RoutineRun {
+  id: string;
+  routine_id: string;
+  number: number;
+  trigger: RoutineRunTrigger;
+  status: RoutineRunStatus;
+  scheduled_for?: string;
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+  pid?: number;
+  session_id?: string;
+  runtime?: AgentRuntime;
+  model?: string;
+  effort?: TaskEffort;
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  output_tokens?: number;
+  report?: RoutineReport;
+  artifacts: RoutineArtifact[];
+  artifacts_bytes: number;
+  artifacts_truncated?: boolean;
+  slack_messages: RoutineSlackMessage[];
+  secrets_used: { name: string; scope: "global" | "routine" }[];
+  kept?: boolean;
+  stop_requested?: boolean;
+  error?: string;
+}
+
+export type SecretKind = "env" | "file";
+
+export interface SecretMetadata {
+  name: string;
+  description: string;
+  kind: SecretKind;
+  updated_at: string;
 }

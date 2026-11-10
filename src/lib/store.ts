@@ -34,6 +34,9 @@ const DEFAULT_CORTEX_GITIGNORE_ENTRIES = [
   ".env",
   "repos/",
   "backups/",
+  "secrets/",
+  "routine-runs/",
+  "routine-data/",
 ];
 const DEFAULT_CORTEX_GITIGNORE = `${DEFAULT_CORTEX_GITIGNORE_ENTRIES.join("\n")}\n`;
 const TASKS_WRITE_LOCK_RETRY_MS = 10;

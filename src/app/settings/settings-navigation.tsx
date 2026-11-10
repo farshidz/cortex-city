@@ -17,6 +17,21 @@ export const SETTINGS_CATEGORIES = [
     title: "Reviewer",
     description: "General, prompts & learnings",
   },
+  {
+    id: "routines",
+    title: "Routines",
+    description: "Capacity & storage",
+  },
+  {
+    id: "secrets",
+    title: "Secrets",
+    description: "Global secrets for routines",
+  },
+  {
+    id: "integrations",
+    title: "Integrations",
+    description: "Slack",
+  },
 ] as const;
 export type SettingsCategory = (typeof SETTINGS_CATEGORIES)[number]["id"];
 const TABS = ["general", "prompts", "learnings"] as const;

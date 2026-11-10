@@ -48,6 +48,8 @@ function normalizeReviewerTiers(value: unknown): ReviewerTiers | undefined {
 const BOUNDED_COUNT_KEYS: Record<string, number> = {
   review_debounce_seconds: REVIEW_DEBOUNCE_MAX_SECONDS,
   review_weekly_usage_limit_percent: 100,
+  max_parallel_routines: 20,
+  routine_storage_limit_mb: 1_000_000,
 };
 
 export async function GET() {
