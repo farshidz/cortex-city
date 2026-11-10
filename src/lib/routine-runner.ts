@@ -27,7 +27,7 @@ const KILL_GRACE_MS = 10_000;
 
 export function routineWorkspaceRoot(): string {
   const configured = process.env.CORTEX_ROUTINE_WORKSPACE_ROOT?.trim();
-  return configured ? path.resolve(configured) : path.join(process.cwd(), "tmp", "routines");
+  return configured ? path.resolve(configured) : path.join(/* turbopackIgnore: true */ process.cwd(), "tmp", "routines");
 }
 
 export function runWorkspaceDir(runId: string): string {
@@ -87,7 +87,7 @@ export function buildRoutineEnv(
   secrets: ResolvedSecret[],
   options: { workspace: string; outputDir: string; secretsDir: string; routine: Routine; run: RoutineRun },
   baseEnv: NodeJS.ProcessEnv = process.env,
-  globalEnvFile = path.join(process.cwd(), ".env")
+  globalEnvFile = path.join(/* turbopackIgnore: true */ process.cwd(), ".env")
 ): NodeJS.ProcessEnv {
   const env = {} as NodeJS.ProcessEnv;
   for (const key of PASSTHROUGH_ENV) {

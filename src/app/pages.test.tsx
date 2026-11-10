@@ -1744,6 +1744,9 @@ test("root layout renders navigation around page content", () => {
   assert.match(html, /commit 1234567/);
   assert.match(html, /title="1234567890abcdef"/);
   assert.match(html, /aria-current="page"/);
+  assert.match(html, /Development/);
+  assert.match(html, /Automation/);
+  assert.match(html, /href="\/routines"/);
 });
 
 
@@ -1847,7 +1850,7 @@ test("settings groups prompts and learnings under reviewer and retains drafts ac
     }));
   `);
   const result = JSON.parse(output[0]);
-  assert.equal(result.categories, 3);
+  assert.equal(result.categories, 6);
   assert.equal(result.tabs, 3);
   assert.doesNotMatch(result.prompts, /hidden/);
   assert.match(result.general, /hidden/);
@@ -1878,4 +1881,117 @@ test("settings preserves the draft on a rejected save and adopts normalized valu
   assert.deepEqual(result.succeeded.find((update: {index: number}) => update.index === 2).value, result.normalized);
   assert.deepEqual(result.succeeded.find((update: {index: number}) => update.index === 11).value, result.normalized);
   assert.equal(result.mutations, 1);
+});
+
+test("settings routines, secrets and integrations categories render their sections", () => {
+  const output = runRenderScript(`
+    globalThis.__SWR_DATA__ = {
+      ...globalThis.__SWR_DATA__,
+      "/api/secrets": [
+        {name: "GITHUB_TOKEN", description: "Read-only token", kind: "env", updated_at: now, used_by: [{id: "r1", name: "Weekly report", overridden: false}]},
+        {name: "UNUSED_KEY", description: "", kind: "file", updated_at: now, used_by: []},
+      ],
+      "/api/integrations/slack": {connected: true, description: "cortex-bot in Acme", updated_at: now},
+    };
+    const configured = {...config, max_parallel_routines: 4, routine_storage_limit_mb: 2048};
+    const results = {};
+    for (const category of ["routines", "secrets", "integrations"]) {
+      const html = await renderPage("./src/app/settings/page.tsx", {}, [false, configured, false, false, "", "", category]);
+      const panel = html.match(new RegExp('<div[^>]*id="settings-' + category + '"[^>]*>'))?.[0] || "";
+      results[category] = {html, panel};
+    }
+    globalThis.__STATE_UPDATES__ = [];
+    for (const id of ["routines-parallel", "routines-storage"]) {
+      const handler = handlers.find((entry) => entry.name === "onChange" && entry.id === id);
+      await handler.fn({target: {value: "7"}});
+      await handler.fn({target: {value: ""}});
+    }
+    console.log(JSON.stringify({
+      routinesPanel: results.routines.panel,
+      parallel: results.routines.html.includes('value="4"'),
+      storage: results.routines.html.includes('value="2048"'),
+      routineHelp: results.routines.html.includes("never hold up"),
+      secretsPanel: results.secrets.panel,
+      secretName: results.secrets.html.includes("GITHUB_TOKEN"),
+      usage: results.secrets.html.includes("1 routine") && results.secrets.html.includes("Not used"),
+      secretsNote: results.secrets.html.includes("kept out of .cortex backups"),
+      integrationsPanel: results.integrations.panel,
+      slackConnected: results.integrations.html.includes("Connected") && results.integrations.html.includes("Replace bot token"),
+      slackHelp: results.integrations.html.includes("chat:write"),
+      updates: globalThis.__STATE_UPDATES__.filter((update) => update.index === 2).map((update) => [update.value.max_parallel_routines, update.value.routine_storage_limit_mb]),
+    }));
+  `);
+  const result = JSON.parse(output[0]);
+  assert.doesNotMatch(result.routinesPanel, /hidden/);
+  assert.equal(result.parallel, true);
+  assert.equal(result.storage, true);
+  assert.equal(result.routineHelp, true);
+  assert.doesNotMatch(result.secretsPanel, /hidden/);
+  assert.equal(result.secretName, true);
+  assert.equal(result.usage, true);
+  assert.equal(result.secretsNote, true);
+  assert.doesNotMatch(result.integrationsPanel, /hidden/);
+  assert.equal(result.slackConnected, true);
+  assert.equal(result.slackHelp, true);
+  assert.deepEqual(result.updates, [[7, 2048], [1, 2048], [4, 7], [4, 1]]);
+});
+
+test("routine pages render the list, the routine and a run", () => {
+  const output = runRenderScript(`
+    const routine = {
+      id: "r1", name: "Weekly report", prompt: "Write the weekly report.\\nMore detail.",
+      cron: "0 9 * * 1", timezone: "Europe/London", enabled: true,
+      global_secrets: ["GITHUB_TOKEN"], slack: {allowed_channels: ["eng"], failure_channel: "alerts"},
+      next_run_at: now, created_at: now, updated_at: now, storage_bytes: 2048,
+      last_run: {id: "run1", number: 3, status: "needs_attention", trigger: "schedule", created_at: now, started_at: now},
+    };
+    const run = {
+      id: "run1", routine_id: "r1", number: 3, trigger: "manual", status: "succeeded",
+      created_at: now, started_at: now, finished_at: "2026-05-19T07:04:12.000Z",
+      runtime: "claude", effort: "high", model: "claude-opus", input_tokens: 12000, output_tokens: 800,
+      report: {status: "completed", summary: "All good this week."},
+      artifacts: [
+        {path: "report.html", title: "Weekly report", size: 4096, content_type: "text/html", main: true, listed: true},
+        {path: "data/raw file.csv", title: "Raw data", size: 100, content_type: "text/csv", listed: false},
+      ],
+      artifacts_bytes: 4196,
+      slack_messages: [
+        {channel: "eng", text: "Report is ready", attachments: ["report.html"], kind: "agent", status: "sent", attempts: 1, sent_at: now},
+        {channel: "alerts", text: "Run failed", attachments: [], kind: "failure_notice", status: "failed", attempts: 2, error: "not_in_channel"},
+      ],
+      secrets_used: [{name: "GITHUB_TOKEN", scope: "global"}],
+      kept: true,
+    };
+    globalThis.__SWR_DATA__ = {
+      ...globalThis.__SWR_DATA__,
+      "/api/routines": [routine],
+      "/api/routines/r1": {routine, runs: [run], secrets: [{name: "GITHUB_TOKEN", description: "Own token", kind: "env", updated_at: now}], next_runs: [now]},
+      "/api/routines/r1/runs/run1": {run, routine: {id: "r1", name: "Weekly report"}},
+      "/api/secrets": [{name: "GITHUB_TOKEN", description: "Read-only token", kind: "env", updated_at: now, used_by: []}],
+      "/api/integrations/slack": {connected: false},
+    };
+    const list = await renderPage("./src/app/routines/page.tsx");
+    const detail = await renderPage("./src/app/routines/[id]/page.tsx", {params: Promise.resolve({id: "r1"})});
+    const runPage = await renderPage("./src/app/routines/[id]/runs/[runId]/page.tsx", {params: Promise.resolve({id: "r1", runId: "run1"})});
+    const created = await renderPage("./src/app/routines/new/page.tsx");
+    console.log(JSON.stringify({list, detail, runPage, created}));
+  `);
+  const { list, detail, runPage, created } = JSON.parse(output[0]);
+  assert.match(list, /Scheduled agent runs that produce reports or take actions\./);
+  assert.match(list, /Weekly on Monday at 9:00/);
+  assert.match(list, /Needs attention/);
+  assert.match(list, /href="\/routines\/r1"/);
+  assert.match(detail, /Overrides global/);
+  assert.match(detail, /#eng/);
+  assert.match(detail, /Settings → Integrations/);
+  assert.match(detail, /If the last run is still going, the next one is skipped\./);
+  assert.match(detail, /1 sent, 1 failed/);
+  assert.match(runPage, /Run #(<!-- -->)?3/);
+  assert.match(runPage, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(runPage, /artifacts\/data\/raw%20file\.csv\?download=1/);
+  assert.match(runPage, /not listed in report/);
+  assert.match(runPage, /Failure notice/);
+  assert.match(runPage, /not_in_channel/);
+  assert.match(runPage, /All good this week\./);
+  assert.match(created, /Cortex City adds where to save files/);
 });

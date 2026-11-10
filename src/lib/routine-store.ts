@@ -27,7 +27,7 @@ const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 function cortexDir(): string {
   ensureCortexDir();
-  return path.join(process.cwd(), ".cortex");
+  return path.join(/* turbopackIgnore: true */ process.cwd(), ".cortex");
 }
 
 function routinesFile(): string {

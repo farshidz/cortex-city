@@ -38,6 +38,8 @@ import {
 } from "./reviewer-config";
 
 import styles from "./settings.module.css";
+import { IntegrationsSection } from "./integrations-section";
+import { SecretsSection } from "./secrets-section";
 import {
   ReviewerTabs,
   SETTINGS_CATEGORIES,
@@ -951,6 +953,77 @@ export default function SettingsPage() {
                 saved with your other settings.
               </p>
             </div>
+          </div>
+          <div
+            id="settings-routines"
+            hidden={category !== "routines"}
+            className={styles.panel}
+          >
+            <h2>Routines</h2>
+            <p className={styles.description}>
+              Set how many routine runs go at once and how much disk they use.
+            </p>
+            <div className={styles.field}>
+              <Label htmlFor="routines-parallel">Parallel Routine Runs</Label>
+              <Input
+                id="routines-parallel"
+                type="number"
+                min={1}
+                max={20}
+                value={form.max_parallel_routines ?? 2}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    max_parallel_routines: parseInt(e.target.value) || 1,
+                  })
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Routines run in their own slot pool, so they never hold up
+                builder tasks.
+              </p>
+            </div>
+            <div className={styles.field}>
+              <Label htmlFor="routines-storage">Routine Storage Limit (MB)</Label>
+              <Input
+                id="routines-storage"
+                type="number"
+                min={1}
+                value={form.routine_storage_limit_mb ?? 5120}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    routine_storage_limit_mb: parseInt(e.target.value) || 1,
+                  })
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                When all routines together go over this, the oldest runs that
+                aren&apos;t kept are deleted first.
+              </p>
+            </div>
+          </div>
+          <div
+            id="settings-secrets"
+            hidden={category !== "secrets"}
+            className={styles.panel}
+          >
+            <h2>Secrets</h2>
+            <p className={styles.description}>
+              Global secrets that routines can opt into.
+            </p>
+            {category === "secrets" && <SecretsSection />}
+          </div>
+          <div
+            id="settings-integrations"
+            hidden={category !== "integrations"}
+            className={styles.panel}
+          >
+            <h2>Integrations</h2>
+            <p className={styles.description}>
+              Services Cortex City connects to on your behalf.
+            </p>
+            {category === "integrations" && <IntegrationsSection />}
           </div>
         </fieldset>
       </div>

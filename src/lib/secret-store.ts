@@ -79,7 +79,7 @@ export function validateSecretName(name: string): string | undefined {
 
 function secretsDir(): string {
   ensureCortexDir();
-  return path.join(process.cwd(), ".cortex", "secrets");
+  return path.join(/* turbopackIgnore: true */ process.cwd(), ".cortex", "secrets");
 }
 
 export function secretFilePath(scope: SecretScope): string {
@@ -94,7 +94,7 @@ export function secretFilePath(scope: SecretScope): string {
 function keyFilePath(): string {
   const configured = process.env.CORTEX_SECRETS_KEY_FILE?.trim();
   if (configured) return configured;
-  return path.join(os.homedir(), ".config", "cortex-city", "secrets.key");
+  return path.join(/* turbopackIgnore: true */ os.homedir(), ".config", "cortex-city", "secrets.key");
 }
 
 let cachedKey: { source: string; key: Buffer } | undefined;

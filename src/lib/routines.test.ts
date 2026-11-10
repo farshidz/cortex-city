@@ -40,7 +40,7 @@ function workspace(): string {
   return dir;
 }
 
-function run(dir: string, body: string, env: NodeJS.ProcessEnv = {}) {
+function run(dir: string, body: string, env: Record<string, string> = {}) {
   return runTsxScript(dir, IMPORTS, body, {
     ...process.env,
     HOME: dir,
