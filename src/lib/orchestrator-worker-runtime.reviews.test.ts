@@ -3453,3 +3453,41 @@ test("pollOnce treats a stale reply decision as a skipped launch", async () => {
   assert.equal(errors.length, 0);
   assert.ok(logs.some(line => line.includes("Skipped stale reply decision")));
 });
+
+
+test("a failed retrospective launch records its error and lets the next review run", async () => {
+  const first = makeRequest();
+  const second = makeRequest({ pr_url: "https://github.com/acme/widget/pull/2", pr_number: 2 });
+  const h = makeHarness({ reviews: {
+    [first.pr_url]: makeSummary(first, { final_at: new Date(Date.now() - 2000).toISOString(), final_state: "merged", retro_status: "pending" }),
+    [second.pr_url]: makeSummary(second, { final_at: new Date(Date.now() - 1000).toISOString(), final_state: "merged", retro_status: "pending" }),
+  } });
+  const spawn = h.deps.spawnReviewRetro;
+  const errors: unknown[][] = [];
+  h.deps.logger = { ...h.deps.logger, error: (...args: unknown[]) => { errors.push(args); } };
+  h.deps.spawnReviewRetro = async (...args) => {
+    if (args[0].pr_url === first.pr_url) throw new Error("Refusing unowned review workspace");
+    return spawn(...args);
+  };
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.reviews[first.pr_url].retro_status, "error");
+  assert.equal(h.reviews[first.pr_url].retro_error, "Refusing unowned review workspace");
+  assert.ok(errors.some((args) => args[1] === "Refusing unowned review workspace"));
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.retroCalls.length, 1);
+  assert.equal(h.retroCalls[0].review.pr_url, second.pr_url);
+});
+
+test("a retrospective launch failure preserves a concurrently registered run", async () => {
+  const pr = makeRequest();
+  const h = makeHarness({ reviews: {
+    [pr.pr_url]: makeSummary(pr, { final_at: new Date().toISOString(), final_state: "merged", retro_status: "pending" }),
+  } });
+  h.deps.spawnReviewRetro = async () => {
+    h.reviews[pr.pr_url] = { ...h.reviews[pr.pr_url], retro_run_pid: 123456 };
+    throw new Error("late launch failure");
+  };
+  await pollOnce(new Map(), h.deps, h.activeReviewPids);
+  assert.equal(h.reviews[pr.pr_url].retro_status, "pending");
+  assert.equal(h.reviews[pr.pr_url].retro_run_pid, 123456);
+});

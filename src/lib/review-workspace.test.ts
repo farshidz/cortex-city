@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, statSync, symlinkSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createTempWorkspace } from "./test-harness";
@@ -97,4 +98,41 @@ test("final cleanup refuses a workspace whose ownership marker changed", async (
 
   assert.equal(await removeFinalReviewWorkspace(reviewKey, {}, appRoot), false);
   assert.equal(existsSync(workspace.path), true);
+});
+
+
+test("final cleanup removes read-only input trees without following symlinks", async () => {
+  const appRoot = createTempWorkspace("review-workspace-readonly-");
+  const reviewKey = "https://github.com/acme/widget/pull/8";
+  const workspace = createReviewWorkspace("codex", reviewKey, {}, appRoot);
+  const inputs = path.join(workspace.path, "immutable_inputs", "nested");
+  mkdirSync(inputs, { recursive: true });
+  writeFileSync(path.join(inputs, "input"), "data");
+  chmodSync(inputs, 0o555);
+  chmodSync(path.dirname(inputs), 0o555);
+  const external = path.join(appRoot, "external");
+  mkdirSync(external);
+  writeFileSync(path.join(external, "keep"), "keep");
+  chmodSync(external, 0o555);
+  symlinkSync(external, path.join(workspace.path, "external-link"));
+
+  assert.equal(await removeFinalReviewWorkspace(reviewKey, {}, appRoot), true);
+  assert.equal(existsSync(workspace.path), false);
+  assert.equal(readFileSync(path.join(external, "keep"), "utf8"), "keep");
+  assert.equal(statSync(external).mode & 0o777, 0o555);
+  chmodSync(external, 0o755);
+});
+
+test("failed recursive cleanup retains the ownership marker for retry", async (t) => {
+  const appRoot = createTempWorkspace("review-workspace-retry-");
+  const reviewKey = "https://github.com/acme/widget/pull/9";
+  const workspace = createReviewWorkspace("codex", reviewKey, {}, appRoot);
+  writeFileSync(path.join(workspace.path, "artifact"), "data");
+  const removal = t.mock.method(fsPromises, "rm", async () => {
+    throw new Error("simulated filesystem failure");
+  });
+  assert.equal(await removeFinalReviewWorkspace(reviewKey, {}, appRoot), false);
+  assert.equal(JSON.parse(readFileSync(workspace.markerPath, "utf8")).review_key, reviewKey);
+  removal.mock.restore();
+  assert.equal(await removeFinalReviewWorkspace(reviewKey, {}, appRoot), true);
 });
