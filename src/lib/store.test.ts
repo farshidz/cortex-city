@@ -85,7 +85,7 @@ test("readConfig creates defaults when no config file exists", () => {
   assert.deepEqual(JSON.parse(readFileSync(configFile, "utf-8")), config);
   assert.equal(
     readFileSync(gitignoreFile, "utf-8"),
-    ".tasks.write.lock.*\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
+    ".tasks.write.lock.*\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\nsecrets/\nroutine-runs/\nroutine-data/\n"
   );
 });
 
@@ -99,7 +99,7 @@ test("readConfig appends missing default cortex gitignore entries", () => {
 
   assert.equal(
     readFileSync(gitignoreFile, "utf-8"),
-    "custom-state.json\n.tasks.write.lock.*\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\n"
+    "custom-state.json\n.tasks.write.lock.*\norchestrator-state.json\n.env.*\n.env\nrepos/\nbackups/\nsecrets/\nroutine-runs/\nroutine-data/\n"
   );
 });
 

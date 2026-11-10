@@ -59,7 +59,8 @@ Use only operations listed by `--list-operations`. The client excludes:
 - task deletion, manual instructions, and session transcripts
 - active-session and worker-control operations
 - review regeneration and GitHub review submission
-- all configuration, prompt, environment, learning, quota, and status operations
+- all configuration, prompt, environment, secret, integration, learning, quota, and status operations
+- routine deletion and run controls (stop, keep)
 
 Do not bypass this boundary with `curl`, another HTTP client, or direct file edits.
 
@@ -71,6 +72,7 @@ All writes require `--confirm`. Give extra attention to these operations:
 - `tasks.update` can remove a worktree when it sets the task status to `merged` or `closed`.
 - `issues.delete` removes a stored issue.
 - `reviews.followup` can launch model work.
+- `routines.create` with `enabled` left on schedules recurring model work; `routines.run` starts a run immediately and may post to Slack.
 
 Use only IDs and PR URLs returned by Cortex City or explicitly supplied by the user. Preserve user-authored Markdown exactly in descriptions, plans, notes, comments, and review questions.
 

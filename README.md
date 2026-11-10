@@ -99,6 +99,25 @@ Each PR gets an isolated directory under `tmp/reviews/` that is reused by its re
 
 Initial reviews examine the full PR. When a reviewed PR receives another commit, the follow-up review instead verifies the reviewer's previous required-change findings and examines the exact diff between the previously reviewed head and the new head for significant regressions. It does not re-audit unchanged code for additional marginal findings, except when unchanged code contains a clearly critical security, data-loss, or correctness issue.
 
+### Routine
+
+A `routine` is a scheduled agent run. It is defined entirely by its prompt, plus a cron schedule (with a timezone) and the secrets it may use. Routines usually produce a report (an HTML page, CSV and so on); they can also take actions with the tools and tokens you give them. They are separate from tasks: no repository, branch or PR is involved.
+
+Create routines from `Routines` in the sidebar. Each run:
+
+- starts the configured runtime (Claude or Codex, with optional model, effort and timeout) in a fresh, empty folder, and tells the agent to save its deliverables in an output folder (`$CORTEX_OUTPUT_DIR`)
+- ends with a structured report: a status (`completed`, `needs_attention` or `failed`), a short summary, the files it saved, and any Slack messages it wants sent
+- keeps every file from the output folder on the run's page, where HTML reports are shown in a sandboxed frame that can run scripts but cannot reach Cortex City or the network; files can be viewed, downloaded one by one, or downloaded as a zip
+- keeps a transcript, with every secret value blanked out (as it is in the report, the Slack messages and text files)
+
+Runs never see earlier runs. If a scheduled run comes due while the previous one is still going, it is skipped and recorded as skipped. Runs missed while the worker was down run once when it restarts. Routines have their own pool of parallel runs (`Parallel Routine Runs` in Settings, default 2), so they never hold up builder tasks.
+
+**Secrets.** Global secrets are set in `Settings → Secrets`; a routine uses only the ones ticked on its page. A routine can also have its own secrets, which override a global secret with the same name and are deleted with the routine. Secrets reach the agent only as environment variables (a `file` secret becomes a path to a 0600 file); the prompt lists their names and descriptions, never their values. Values are write-only in the UI and API, encrypted with AES-256-GCM in `.cortex/secrets/`, and excluded from `.cortex` git snapshots. The key comes from `CORTEX_SECRETS_KEY` if set, otherwise from a random key generated once at `~/.config/cortex-city/secrets.key` (override with `CORTEX_SECRETS_KEY_FILE`); the web and worker services must use the same key. A routine's process does not inherit the worker's environment, the global `.env` or agent env files: only a small allowlist (such as `PATH`, `HOME`, proxy and CA settings) and the runtime's own credentials (such as `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) are passed through. This protects against accidental disclosure, not against a compromised agent, which runs as the same OS user; give routines narrow, read-only tokens.
+
+**Slack.** Connect a Slack bot in `Settings → Integrations` (scopes `chat:write`, `files:write`, `channels:read`, `groups:read`; invite the bot to each channel). Agents never see this token. A routine asks Cortex City to send a message by adding it to its final report, optionally attaching its saved files; only channels on the routine's allowed list are accepted, and delivery is retried. Cortex City also posts to the routine's failure channel when a run fails or times out. Set `CORTEX_PUBLIC_URL` (for example `https://cortex.example.com`) to include a link to the run in failure notices.
+
+**Disk.** Each run's working folder (under `tmp/routines/`, or `CORTEX_ROUTINE_WORKSPACE_ROOT`) is deleted once its files are saved, and leftovers from crashes are swept on the next poll. Saved files are capped per run (`Max per run`, default 100 MB). Each routine keeps its newest runs (`Keep last`, default 30) plus any run marked "Keep this run"; when all routines together exceed `Routine Storage Limit` (default 5 GB), the oldest runs that are not kept are deleted first. Runs don't start when free disk space is below the worker's reserve.
+
 ### Status
 
 Tasks move through a small workflow:

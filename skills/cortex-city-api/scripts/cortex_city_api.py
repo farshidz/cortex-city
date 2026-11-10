@@ -26,6 +26,10 @@ EFFORTS = frozenset(
 PERMISSION_MODES = frozenset(
     {"bypassPermissions", "acceptEdits", "auto", "default", "yolo"}
 )
+ROUTINE_FIELDS = {
+    "name", "prompt", "cron", "timezone", "enabled", "agent_runner", "model",
+    "effort", "timeout_minutes", "global_secrets", "slack", "keep_runs", "max_run_mb",
+}
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,24 @@ OPERATIONS: dict[str, Operation] = {
         allowed_body=frozenset({"body"}), required_body=frozenset({"body"}), body_required=True,
     ),
     "issues.delete": Operation("DELETE", "/api/issues/{id}", "Delete an issue", needs_id=True),
+    "routines.list": Operation("GET", "/api/routines", "List routines"),
+    "routines.get": Operation(
+        "GET", "/api/routines/{id}", "Get a routine with its runs", needs_id=True
+    ),
+    "routines.create": Operation(
+        "POST", "/api/routines", "Create a scheduled routine",
+        allowed_body=frozenset(ROUTINE_FIELDS),
+        required_body=frozenset({"name", "prompt", "cron"}), body_required=True,
+        body_values={"agent_runner": RUNTIMES, "effort": EFFORTS},
+    ),
+    "routines.update": Operation(
+        "PUT", "/api/routines/{id}", "Edit a routine or pause/resume it", needs_id=True,
+        allowed_body=frozenset(ROUTINE_FIELDS), body_required=True,
+        body_values={"agent_runner": RUNTIMES, "effort": EFFORTS},
+    ),
+    "routines.run": Operation(
+        "POST", "/api/routines/{id}/run", "Run a routine now", needs_id=True
+    ),
     "reviews.list": Operation("GET", "/api/reviews", "List inbound review summaries"),
     "reviews.followups": Operation(
         "GET", "/api/reviews/followup", "List review follow-ups",
@@ -213,8 +235,12 @@ def normalize_base_url(value: str) -> str:
 def enforce_settings_boundary(method: str, path: str) -> None:
     if method == "GET":
         return
-    if path in {"/api/config", "/api/reviews/learnings"}:
+    if path in {"/api/config", "/api/reviews/learnings", "/api/secrets"} or path.startswith(
+        "/api/integrations/"
+    ):
         fail(f"global settings writes are prohibited: {method} {path}")
+    if path.startswith("/api/routines/") and path.endswith("/secrets"):
+        fail(f"secret writes are prohibited: {method} {path}")
     if path.startswith("/api/agents/") and (
         path.endswith("/prompt") or path.endswith("/env")
     ):

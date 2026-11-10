@@ -7,6 +7,11 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import path from "path";
 import { pollOnce } from "./lib/orchestrator-worker-runtime";
+import {
+  pollRoutines,
+  stopActiveRoutineRuns,
+  type ActiveRoutineRun,
+} from "./lib/routine-scheduler";
 
 const CORTEX_DIR = path.join(process.cwd(), ".cortex");
 const CONFIG_FILE = path.join(CORTEX_DIR, "config.json");
@@ -29,6 +34,7 @@ installLogger();
 const activePids = new Map<string, number>();
 const activeReviewPids = new Map<string, number>();
 const deadOwnedPids = new Map<string, { pid: number; firstSeenAt: number }>();
+const activeRoutineRuns = new Map<string, ActiveRoutineRun>();
 const STATE_FILE = path.join(CORTEX_DIR, "orchestrator-state.json");
 let pollInFlight: Promise<void> | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
@@ -65,6 +71,11 @@ async function runPollCycle() {
       await pollOnce(activePids, undefined, activeReviewPids, deadOwnedPids);
     } catch (err) {
       console.error("[worker] Poll error:", err);
+    }
+    try {
+      await pollRoutines(activeRoutineRuns);
+    } catch (err) {
+      console.error("[worker] Routine poll error:", err);
     }
     lastPollAt = pollTime;
     pollFinishedAt = new Date().toISOString();
@@ -113,6 +124,7 @@ function shutdown(signal: NodeJS.Signals, exitCode = 0) {
       process.kill(pid, "SIGTERM");
     } catch {}
   }
+  stopActiveRoutineRuns(activeRoutineRuns);
   writeJSON(STATE_FILE, {
     running: false,
     active_sessions: 0,
