@@ -58,7 +58,10 @@ async function callSlack(
   });
   if (!response.ok) throw new SlackError(`Slack ${method} failed with HTTP ${response.status}`);
   const json = (await response.json()) as Record<string, unknown>;
-  if (json.ok !== true) throw new SlackError(`Slack ${method} failed: ${String(json.error ?? "unknown_error")}`);
+  if (json.ok !== true) {
+    const needed = typeof json.needed === "string" ? ` (the bot needs the ${json.needed} scope)` : "";
+    throw new SlackError(`Slack ${method} failed: ${String(json.error ?? "unknown_error")}${needed}`);
+  }
   return json;
 }
 
@@ -165,6 +168,58 @@ export async function sendSlackMessage(
     channel_id: channelId,
     initial_comment: message.text,
   });
+}
+
+const USER_ID_PATTERN = /^[UW][A-Z0-9]{6,}$/;
+
+/** Resolves a Slack member ID or a workspace email address to a user ID. */
+export async function resolveUserId(
+  token: string,
+  target: string,
+  fetchImpl: FetchLike = fetch
+): Promise<string> {
+  const trimmed = target.trim();
+  if (USER_ID_PATTERN.test(trimmed)) return trimmed;
+  if (!/^[^\s@]+@[^\s@]+$/.test(trimmed)) {
+    throw new SlackError("Enter your Slack email address or member ID (it starts with U).");
+  }
+  const result = await callSlack(
+    fetchImpl,
+    token,
+    "users.lookupByEmail",
+    new URLSearchParams({ email: trimmed }),
+    { form: true }
+  );
+  const id = (result.user as { id?: string } | undefined)?.id;
+  if (!id) throw new SlackError(`No Slack user found for ${trimmed}.`);
+  return id;
+}
+
+/**
+ * Sends a direct message from the bot to one person, to check the
+ * connection end to end. Opens the DM first (im:write); if that scope is
+ * missing, posts to the user ID, which Slack delivers to the app's DM.
+ */
+export async function sendSlackTestMessage(
+  target: string,
+  fetchImpl: FetchLike = fetch
+): Promise<{ user_id: string }> {
+  const token = getSlackToken();
+  if (!token) throw new SlackError("Slack isn't connected. Add a bot token first.");
+  const userId = await resolveUserId(token, target, fetchImpl);
+  let channel = userId;
+  try {
+    const opened = await callSlack(fetchImpl, token, "conversations.open", { users: userId });
+    const id = (opened.channel as { id?: string } | undefined)?.id;
+    if (id) channel = id;
+  } catch {
+    // Without im:write, posting to the user ID still reaches their DM.
+  }
+  await callSlack(fetchImpl, token, "chat.postMessage", {
+    channel,
+    text: "This is a test message from Cortex City. Slack is connected, and routines can post messages through this bot.",
+  });
+  return { user_id: userId };
 }
 
 export const __testUtils = {
