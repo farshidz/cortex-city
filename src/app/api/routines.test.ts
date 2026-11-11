@@ -240,7 +240,16 @@ test("Slack integration route reports status, rejects non-bot tokens and disconn
     const secrets = await load("src/lib/secret-store.ts");
     await secrets.setSecret({ kind: "system" }, { name: "SLACK_BOT_TOKEN", value: "xoxb-1", description: "Connected as @bot in Team" });
     assert.equal((await json(await route.GET())).body.connected, true);
+    const testRoute = await load("src/app/api/integrations/slack/test/route.ts");
+    assert.equal((await testRoute.POST(jsonReq("/x", "POST", {}))).status, 400);
+    assert.equal((await testRoute.POST(jsonReq("/x", "POST", { target: "  " }))).status, 400);
+    const badTarget = await json(await testRoute.POST(jsonReq("/x", "POST", { target: "not an address" })));
+    assert.equal(badTarget.status, 400);
+    assert.match(badTarget.body.error, /email address or member ID/);
     assert.deepEqual((await json(await route.DELETE())).body, { connected: false });
+    const notConnected = await json(await testRoute.POST(jsonReq("/x", "POST", { target: "U0123456" })));
+    assert.equal(notConnected.status, 400);
+    assert.match(notConnected.body.error, /isn't connected/);
   `);
 });
 

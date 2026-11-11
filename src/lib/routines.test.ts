@@ -66,6 +66,16 @@ const FAKE_FETCH = `
     if (url.endsWith("/files.getUploadURLExternal")) return respond({ ok: true, upload_url: "https://files.example/upload", file_id: "F1" });
     if (url.startsWith("https://files.example/")) return new Response("ok", { status: 200 });
     if (url.endsWith("/files.completeUploadExternal")) return respond({ ok: true });
+    if (url.endsWith("/users.lookupByEmail")) {
+      return init.body.includes("missing%40x.com")
+        ? respond({ ok: false, error: "users_not_found" })
+        : respond({ ok: true, user: { id: "U0FARSHID" } });
+    }
+    if (url.endsWith("/conversations.open")) {
+      return JSON.parse(init.body).users === "U0NOSCOPE"
+        ? respond({ ok: false, error: "missing_scope", needed: "im:write" })
+        : respond({ ok: true, channel: { id: "D0DIRECT1" } });
+    }
     return respond({ ok: false, error: "unknown_method" });
   };
 `;
@@ -985,4 +995,42 @@ test("routine API helpers find records, read JSON bodies and map validation erro
   assert.equal(result.rethrown, "boom");
   assert.deepEqual(result.bodies, [{ a: 1 }, null, null]);
   assert.equal(result.csp, true);
+});
+
+test("Slack test message resolves the person, opens a DM and posts to it", () => {
+  const dir = workspace();
+  const result = run(
+    dir,
+    `
+      ${FAKE_FETCH}
+      const errors = [];
+      try { await slack.sendSlackTestMessage("me@x.com", fakeFetch); } catch (error) { errors.push(error.message); }
+      await slack.connectSlack("xoxb-test", fakeFetch);
+      calls.length = 0;
+      const byEmail = await slack.sendSlackTestMessage(" me@x.com ", fakeFetch);
+      const posted = JSON.parse(calls.find((call) => call.url.endsWith("chat.postMessage")).body);
+      calls.length = 0;
+      const byIdWithoutDmScope = await slack.sendSlackTestMessage("U0NOSCOPE", fakeFetch);
+      const postedToUser = JSON.parse(calls.find((call) => call.url.endsWith("chat.postMessage")).body);
+      for (const target of ["not an address", "missing@x.com"]) {
+        try { await slack.sendSlackTestMessage(target, fakeFetch); } catch (error) { errors.push(error.message); }
+      }
+      try {
+        await slack.sendSlackTestMessage("U0FARSHID", async (url) =>
+          url.endsWith("chat.postMessage")
+            ? new Response(JSON.stringify({ ok: false, error: "missing_scope", needed: "chat:write" }))
+            : fakeFetch(url, { body: JSON.stringify({ users: "U0FARSHID" }) }));
+      } catch (error) { errors.push(error.message); }
+      console.log(JSON.stringify({ errors, byEmail, posted, byIdWithoutDmScope, postedToUser }));
+    `
+  );
+  assert.match(result.errors[0], /isn't connected/);
+  assert.deepEqual(result.byEmail, { user_id: "U0FARSHID" });
+  assert.equal(result.posted.channel, "D0DIRECT1");
+  assert.match(result.posted.text, /test message from Cortex City/);
+  assert.deepEqual(result.byIdWithoutDmScope, { user_id: "U0NOSCOPE" });
+  assert.equal(result.postedToUser.channel, "U0NOSCOPE");
+  assert.match(result.errors[1], /email address or member ID/);
+  assert.match(result.errors[2], /users_not_found/);
+  assert.match(result.errors[3], /missing_scope \(the bot needs the chat:write scope\)/);
 });

@@ -1918,6 +1918,8 @@ test("settings routines, secrets and integrations categories render their sectio
       integrationsPanel: results.integrations.panel,
       slackConnected: results.integrations.html.includes("Connected") && results.integrations.html.includes("Replace bot token"),
       slackHelp: results.integrations.html.includes("chat:write"),
+      slackManifest: results.integrations.html.includes("How to create the Slack bot") && results.integrations.html.includes("Copy manifest") && results.integrations.html.includes("users:read.email"),
+      slackTest: results.integrations.html.includes("Send test message"),
       updates: globalThis.__STATE_UPDATES__.filter((update) => update.index === 2).map((update) => [update.value.max_parallel_routines, update.value.routine_storage_limit_mb]),
     }));
   `);
@@ -1933,6 +1935,8 @@ test("settings routines, secrets and integrations categories render their sectio
   assert.doesNotMatch(result.integrationsPanel, /hidden/);
   assert.equal(result.slackConnected, true);
   assert.equal(result.slackHelp, true);
+  assert.equal(result.slackManifest, true);
+  assert.equal(result.slackTest, true);
   assert.deepEqual(result.updates, [[7, 2048], [1, 2048], [4, 7], [4, 1]]);
 });
 
